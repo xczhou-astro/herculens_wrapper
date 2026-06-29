@@ -1,0 +1,18 @@
+# Ignore local simulation data and test runs
+legacy_scripts/
+modeling_sim/
+simulation/
+test_modeling/
+herculens/
+
+# Ignore python caches
+__pycache__/
+**/__pycache__/
+
+# Ignore OS-generated files
+.DS_Store
+**/.DS_Store
+
+# Ignore config files and other workspace scripts
+config*
+sim_sl_with_lens_light.py
