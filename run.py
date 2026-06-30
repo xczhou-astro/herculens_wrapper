@@ -406,6 +406,7 @@ def build_and_run(config_path=None):
                 point_source_type_list=point_source_type_list,
                 point_source_params_list=point_source_params_list,
                 regul_model=getattr(run_prob_model, 'regul_model', None),
+                param_list=param_list,
             )
 
             np.savez_compressed(
@@ -623,6 +624,7 @@ def build_and_run(config_path=None):
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
             regul_model=regul_model,
+            param_list=param_list,
         )
 
         np.savez_compressed(

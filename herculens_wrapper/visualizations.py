@@ -476,7 +476,39 @@ def _get_mge_exclude_list(all_names, threshold=3):
     return exclude
 
 
-def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=None, filename='corner_traced_params.png'):
+def _get_param_order(param_list):
+    order = []
+    if not param_list:
+        return order
+    
+    # 1. Lens Mass
+    for i, model in enumerate(param_list.get('lens_mass_params_list', [])):
+        if isinstance(model, dict):
+            for key in model.keys():
+                order.append(f'lens_{key}_{i}')
+            
+    # 2. Lens Light
+    for i, model in enumerate(param_list.get('lens_light_params_list', [])):
+        if isinstance(model, dict):
+            for key in model.keys():
+                order.append(f'lens_light_{key}_{i}')
+            
+    # 3. Source Light
+    for i, model in enumerate(param_list.get('source_light_params_list', [])):
+        if isinstance(model, dict):
+            for key in model.keys():
+                order.append(f'source_{key}_{i}')
+            
+    # 4. Point Source
+    for i, model in enumerate(param_list.get('point_source_params_list', [])):
+        if isinstance(model, dict):
+            for key in model.keys():
+                order.append(f'ps_{key}_{i}')
+            
+    return order
+
+
+def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=None, filename='corner_traced_params.png', param_list=None):
     if corner is None:
         print(f'[plots] corner package not installed; skipping {filename}')
         return
@@ -486,9 +518,21 @@ def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=No
     if mge_excludes:
         print(f"[plots] MGE detected, excluding from corner plot: {sorted(list(mge_excludes))}")
         exclude.update(mge_excludes)
+
+    desired_order = _get_param_order(param_list)
+    order_map = {name: idx for idx, name in enumerate(desired_order)}
+
+    def key_fn(name):
+        base_name = name.split('[')[0]
+        if base_name in order_map:
+            return (0, order_map[base_name])
+        return (1, name)
+
+    sorted_keys = sorted(samples.keys(), key=key_fn)
+
     cols = []
     labels = []
-    for name in sorted(samples.keys()):
+    for name in sorted_keys:
         if name in exclude or name.startswith('ps_'):
             continue
         arr = np.asarray(samples[name])
@@ -582,6 +626,7 @@ def plot_corner_emcee(
     save_path,
     max_samples=15_000,
     exclude_sites=('source_pixels',),
+    param_list=None,
 ):
     if corner is None:
         print('[plots] corner package not installed; skipping corner_emcee.png')
@@ -600,9 +645,33 @@ def plot_corner_emcee(
         print(f"[plots] MGE detected, excluding from emcee corner plot: {sorted(list(mge_excludes))}")
         exclude_sites.update(mge_excludes)
 
+    desired_order = _get_param_order(param_list)
+    if desired_order:
+        label_to_index = {lab: idx for idx, lab in enumerate(labels)}
+        ordered_indices = []
+        for name in desired_order:
+            if name in label_to_index:
+                ordered_indices.append(label_to_index[name])
+            else:
+                for lab, idx in label_to_index.items():
+                    if lab.startswith(f'{name}['):
+                        ordered_indices.append(idx)
+        seen_indices = set(ordered_indices)
+        for idx in range(len(labels)):
+            if idx not in seen_indices:
+                ordered_indices.append(idx)
+        labels = [labels[idx] for idx in ordered_indices]
+        X_orig = np.asarray(flat_samples, dtype=np.float64)
+        cols_all = []
+        for idx in ordered_indices:
+            if idx < X_orig.shape[1]:
+                cols_all.append(X_orig[:, idx])
+        X = np.column_stack(cols_all) if cols_all else X_orig
+    else:
+        X = np.asarray(flat_samples, dtype=np.float64)
+
     cols = []
     sel_labels = []
-    X = np.asarray(flat_samples, dtype=np.float64)
     for i, lab in enumerate(labels):
         if any(lab == ex or lab.startswith(f'{ex}[') for ex in exclude_sites):
             continue
@@ -720,6 +789,7 @@ def generate_run_plots(
     point_source_type_list=None,
     point_source_params_list=None,
     regul_model=None,
+    param_list=None,
 ):
     """Best-effort diagnostic figures; failures are logged and skipped."""
     if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
@@ -796,13 +866,13 @@ def generate_run_plots(
                 )
                 
             guide_samples_np = {k: np.asarray(v) for k, v in guide_samples.items()}
-            plot_corner_traced_params(guide_samples_np, save_path, filename='corner_svi.png')
+            plot_corner_traced_params(guide_samples_np, save_path, filename='corner_svi.png', param_list=param_list)
         _try('corner_svi.png', _svi_corner)
 
     if mcmc_samples is not None:
-        _try('corner_traced_params.png', lambda: plot_corner_traced_params(mcmc_samples, save_path))
+        _try('corner_traced_params.png', lambda: plot_corner_traced_params(mcmc_samples, save_path, param_list=param_list))
 
     if flat_samples is not None and prob_model is not None and init_params is not None:
         _try('corner_emcee.png', lambda: plot_corner_emcee(
-            flat_samples, prob_model, init_params, save_path,
+            flat_samples, prob_model, init_params, save_path, param_list=param_list,
         ))
