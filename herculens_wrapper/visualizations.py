@@ -68,7 +68,7 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
             norm, cbar_label = _norm_from_plot_scale('log', plot_data[i])
         else:
             norm, cbar_label = None, 'linear'
-        im = axes[i].imshow(plot_data[i], origin='lower', cmap='magma', extent=extent, norm=norm)
+        im = axes[i].imshow(plot_data[i], origin='lower', cmap='bwr', extent=extent, norm=norm)
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')
         axes[i].set_title(titles[i])
@@ -94,7 +94,7 @@ def plot_input_data(
     # 1. Linear Scale Plot
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='magma', extent=extent)
+    im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
     axes[0].set_title('Image data')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
@@ -121,13 +121,13 @@ def plot_input_data(
                 k += 1
         axes[0].legend(loc='best', fontsize=8)
 
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='viridis', extent=extent)
+    im1 = axes[1].imshow(noise_map, origin='lower', cmap='bwr', extent=extent)
     axes[1].set_title('Noise map')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     plt.colorbar(im1, ax=axes[1], label='linear')
 
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='magma')
+    im2 = axes[2].imshow(psf_data, origin='lower', cmap='bwr')
     axes[2].set_title('PSF kernel')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
@@ -142,7 +142,7 @@ def plot_input_data(
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
     norm_img, label_img = _norm_from_plot_scale('log', image_data)
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='magma', extent=extent, norm=norm_img)
+    im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_img)
     axes[0].set_title('Image data (log)')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
@@ -168,14 +168,14 @@ def plot_input_data(
         axes[0].legend(loc='best', fontsize=8)
 
     norm_noise, label_noise = _norm_from_plot_scale('log', noise_map)
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='viridis', extent=extent, norm=norm_noise)
+    im1 = axes[1].imshow(noise_map, origin='lower', cmap='bwr', extent=extent, norm=norm_noise)
     axes[1].set_title('Noise map (log)')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     plt.colorbar(im1, ax=axes[1], label=label_noise)
 
     norm_psf, label_psf = _norm_from_plot_scale('log', psf_data)
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='magma', norm=norm_psf)
+    im2 = axes[2].imshow(psf_data, origin='lower', cmap='bwr', norm=norm_psf)
     axes[2].set_title('PSF kernel (log)')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
@@ -229,31 +229,31 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
 
     fig, ax = plt.subplots(2, 3, figsize=(17, 10))
 
-    im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='magma', extent=extent)
+    im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='bwr', extent=extent)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[0, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[0, 0].set_title('Extended Source (Lensed)')
     plt.colorbar(im0, ax=ax[0, 0], label='linear')
 
-    im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='magma', extent=extent)
+    im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent)
     ax[0, 1].set_title('Lens Light')
     plt.colorbar(im1, ax=ax[0, 1], label='linear')
 
-    im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='magma', extent=extent)
+    im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='bwr', extent=extent)
     ax[0, 2].set_title('Point Sources')
     plt.colorbar(im2, ax=ax[0, 2], label='linear')
 
-    im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='magma', extent=extent)
+    im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='bwr', extent=extent)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[1, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[1, 0].set_title('Composite')
     plt.colorbar(im3, ax=ax[1, 0], label='linear')
 
-    im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='magma', extent=extent)
+    im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
     ax[1, 1].set_title('Image Data')
     plt.colorbar(im4, ax=ax[1, 1], label='linear')
 
-    im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='RdBu_r', extent=extent)
+    im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent)
     ax[1, 2].set_title('Residuals (model - data) / noise')
     plt.colorbar(im5, ax=ax[1, 2])
 
@@ -321,7 +321,7 @@ def plot_source_plane(
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
-    im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='magma', norm=norm)
+    im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
     axes[0].set_title('Extended Source')
     plt.colorbar(im0, ax=axes[0], label=cbar_label)
 
@@ -334,7 +334,7 @@ def plot_source_plane(
     axes[1].set_xlim(extent[0], extent[1])
     axes[1].set_ylim(extent[2], extent[3])
 
-    im2 = axes[2].imshow(source_for_plot, origin='lower', extent=extent, cmap='magma', norm=norm)
+    im2 = axes[2].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
         axes[2].scatter(ras, decs, s=30, marker='*', color=colors[i])
     for caust_x, caust_y in caustics:
@@ -366,19 +366,19 @@ def plot_lens_light_subtracted_image(
 
     fig, ax = plt.subplots(1, 3, figsize=(16, 5))
 
-    im0 = ax[0].imshow(image_data, origin='lower', cmap='magma', extent=extent)
+    im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
     ax[0].set_title('Image data')
     plt.colorbar(im0, ax=ax[0], label='linear')
 
-    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='magma', extent=extent)
+    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent)
     ax[1].set_title('Lens light model')
     plt.colorbar(im1, ax=ax[1], label='linear')
 
     if noise_map is not None:
-        im2 = ax[2].imshow(subtracted / noise_map, origin='lower', cmap='RdBu_r', extent=extent)
+        im2 = ax[2].imshow(subtracted / noise_map, origin='lower', cmap='bwr', extent=extent)
         ax[2].set_title('Data - Lens light (S/N)')
     else:
-        im2 = ax[2].imshow(subtracted, origin='lower', cmap='magma', extent=extent)
+        im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent)
         ax[2].set_title('Data - Lens light')
         plt.colorbar(im2, ax=ax[2], label='linear')
     if noise_map is not None:
@@ -395,7 +395,7 @@ def plot_lens_light_subtracted_image(
 
 def plot_weights(weights_list, save_path):
     plt.figure(figsize=(6, 5))
-    plt.imshow(weights_list[0][0], origin='lower', cmap='gist_stern')
+    plt.imshow(weights_list[0][0], origin='lower', cmap='bwr')
     plt.colorbar()
     plt.title('Regularization weights')
     plt.savefig(os.path.join(save_path, 'weights_list.png'), dpi=150, bbox_inches='tight')
@@ -729,7 +729,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
     
     # --- Panel 0: 2D Convergence Map ---
     norm_kappa, cbar_label_kappa = _norm_from_plot_scale('log', kappa_map)
-    im_kappa = axes[0].imshow(kappa_map, origin='lower', extent=extent, cmap='magma', norm=norm_kappa)
+    im_kappa = axes[0].imshow(kappa_map, origin='lower', extent=extent, cmap='bwr', norm=norm_kappa)
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
     axes[0].set_title(r'2D Convergence ($\kappa$) Map')
@@ -754,7 +754,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
     else:
         norm_mag = LogNorm(vmin=0.1, vmax=100.0)
         
-    im_mag = axes[1].imshow(abs_mag_map, origin='lower', extent=extent, cmap='viridis', norm=norm_mag)
+    im_mag = axes[1].imshow(abs_mag_map, origin='lower', extent=extent, cmap='bwr', norm=norm_mag)
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     axes[1].set_title(r'2D Magnification ($|\mu|$) Map')
