@@ -56,7 +56,7 @@ def _image_extent(ny, nx, pixel_scale):
     ]
 
 
-def display(plot_data, titles, pixel_scale, savefilename=None):
+def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear'):
     num = len(plot_data)
     fig, axes = plt.subplots(1, num, figsize=(4 * num + 2, 4))
     if num == 1:
@@ -64,11 +64,15 @@ def display(plot_data, titles, pixel_scale, savefilename=None):
     for i in range(num):
         ny, nx = plot_data[i].shape
         extent = _image_extent(ny, nx, pixel_scale)
-        im = axes[i].imshow(plot_data[i], origin='lower', cmap='magma', extent=extent)
+        if plot_scale == 'log' and i < 2:
+            norm, cbar_label = _norm_from_plot_scale('log', plot_data[i])
+        else:
+            norm, cbar_label = None, 'linear'
+        im = axes[i].imshow(plot_data[i], origin='lower', cmap='magma', extent=extent, norm=norm)
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')
         axes[i].set_title(titles[i])
-        plt.colorbar(im, ax=axes[i])
+        plt.colorbar(im, ax=axes[i], label=cbar_label)
     plt.tight_layout()
     if savefilename is not None:
         plt.savefig(savefilename, dpi=300, bbox_inches='tight')
@@ -802,7 +806,7 @@ def generate_run_plots(
         except Exception as e:
             print(f'[plots] {name} skipped: {e}')
 
-    _try('best_fit_model.png', lambda: display(
+    _try('best_fit_model_linear.png', lambda: display(
         [best_fit_model, image_data, (best_fit_model - image_data) / noise_map],
         titles=[
             'Best fit model',
@@ -810,7 +814,20 @@ def generate_run_plots(
             f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
         ],
         pixel_scale=pixel_scale,
-        savefilename=os.path.join(save_path, 'best_fit_model.png'),
+        savefilename=os.path.join(save_path, 'best_fit_model_linear.png'),
+        plot_scale='linear',
+    ))
+
+    _try('best_fit_model_log.png', lambda: display(
+        [best_fit_model, image_data, (best_fit_model - image_data) / noise_map],
+        titles=[
+            'Best fit model',
+            'Image data',
+            f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+        ],
+        pixel_scale=pixel_scale,
+        savefilename=os.path.join(save_path, 'best_fit_model_log.png'),
+        plot_scale='log',
     ))
 
     _try('image_plane.png', lambda: plot_image_plane(
@@ -876,3 +893,88 @@ def generate_run_plots(
         _try('corner_emcee.png', lambda: plot_corner_emcee(
             flat_samples, prob_model, init_params, save_path, param_list=param_list,
         ))
+
+
+def recreate_best_fit_plots_for_run(run_dir):
+    """Recreate best_fit_model_linear.png and best_fit_model_log.png from an existing run directory."""
+    import os
+    import json
+    npz_path = os.path.join(run_dir, 'modeling_result.npz')
+    if not os.path.exists(npz_path):
+        print(f"Error: {npz_path} does not exist.")
+        return False
+        
+    try:
+        data = np.load(npz_path)
+    except Exception as e:
+        print(f"Error loading {npz_path}: {e}")
+        return False
+        
+    if 'best_fit_model' not in data or 'image_data' not in data or 'noise_map' not in data:
+        print(f"Error: {npz_path} does not contain required arrays.")
+        return False
+        
+    best_fit_model = data['best_fit_model']
+    image_data = data['image_data']
+    noise_map = data['noise_map']
+    
+    # Try to load pixel_scale from args.json
+    pixel_scale = 0.08  # default fallback
+    args_json_path = os.path.join(run_dir, 'args.json')
+    if os.path.exists(args_json_path):
+        try:
+            with open(args_json_path, 'r') as f:
+                args_dict = json.load(f)
+                pixel_scale = args_dict.get('pixel_scale', pixel_scale)
+        except Exception:
+            pass
+            
+    # Try to load metrics.json for chi2
+    chi2 = None
+    metrics_json_path = os.path.join(run_dir, 'metrics.json')
+    if os.path.exists(metrics_json_path):
+        try:
+            with open(metrics_json_path, 'r') as f:
+                metrics_dict = json.load(f)
+                chi2 = metrics_dict.get('CHI2', None)
+        except Exception:
+            pass
+            
+    if chi2 is None:
+        chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+        
+    # Recreate the two plots
+    try:
+        display(
+            [best_fit_model, image_data, (best_fit_model - image_data) / noise_map],
+            titles=[
+                'Best fit model',
+                'Image data',
+                f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+            ],
+            pixel_scale=pixel_scale,
+            savefilename=os.path.join(run_dir, 'best_fit_model_linear.png'),
+            plot_scale='linear',
+        )
+        print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_linear.png')}")
+    except Exception as e:
+        print(f"Failed to create best_fit_model_linear.png: {e}")
+        
+    try:
+        display(
+            [best_fit_model, image_data, (best_fit_model - image_data) / noise_map],
+            titles=[
+                'Best fit model',
+                'Image data',
+                f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+            ],
+            pixel_scale=pixel_scale,
+            savefilename=os.path.join(run_dir, 'best_fit_model_log.png'),
+            plot_scale='log',
+        )
+        print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_log.png')}")
+    except Exception as e:
+        print(f"Failed to create best_fit_model_log.png: {e}")
+        
+    return True
+
