@@ -5,6 +5,7 @@ from functools import partial
 import jax
 import optax
 import numpy as np
+import scipy.ndimage
 import numpyro
 import numpyro.distributions as dist
 from numpyro.distributions import constraints
@@ -1266,6 +1267,223 @@ def create_pixel_grids(npix, pix_scl):
     )
     return pixel_grid, ps_grid
 
+class LensImageExtension(LensImage):
+    def __init__(
+        self,
+        grid_class,
+        psf_class,
+        noise_class=None,
+        lens_mass_model_class=None,
+        source_model_class=None,
+        lens_light_model_class=None,
+        point_source_model_class=None,
+        source_arc_mask=None,
+        source_grid_scale=1.0,
+        conjugate_points=None,
+        kwargs_numerics=None,
+        kwargs_lens_equation_solver=None,
+    ):
+        super().__init__(
+            grid_class,
+            psf_class,
+            noise_class=noise_class,
+            lens_mass_model_class=lens_mass_model_class,
+            source_model_class=source_model_class,
+            lens_light_model_class=lens_light_model_class,
+            point_source_model_class=point_source_model_class,
+            source_arc_mask=source_arc_mask,
+            kwargs_numerics=kwargs_numerics,
+            kwargs_lens_equation_solver=kwargs_lens_equation_solver,
+        )
+        self._source_grid_scale = source_grid_scale
+        self.conjugate_points = conjugate_points
+
+        ssf = self.ImageNumerics.grid_supersampling_factor
+        s_ones = np.ones([ssf, ssf])
+        if source_arc_mask is None:
+            nx, ny = grid_class.num_pixel_axes
+            self.source_arc_mask = np.ones([nx, ny], dtype=bool)
+        else:
+            self.source_arc_mask = source_arc_mask
+        self.source_arc_mask_ss = np.kron(self.source_arc_mask, s_ones)
+        self._source_arc_mask_flat = self.source_arc_mask_ss.flatten()
+        self._source_arc_mask_outline_flat = (
+            self.source_arc_mask_ss - scipy.ndimage.binary_erosion(self.source_arc_mask_ss)
+        ).flatten().astype(bool)
+
+    def source_surface_brightness(
+        self,
+        kwargs_source,
+        kwargs_lens=None,
+        de_lensed=False,
+        k=None,
+        k_lens=None,
+    ):
+        if len(self.SourceModel.profile_type_list) == 0:
+            return jnp.zeros(self.Grid.num_pixel_axes)
+
+        x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+        if (self._src_adaptive_grid) or (not de_lensed):
+            x_grid_src, y_grid_src = self.MassModel.ray_shooting(
+                x_grid_img,
+                y_grid_img,
+                kwargs_lens,
+                k=k_lens,
+            )
+            pixels_x_coord, pixels_y_coord, _ = self.adapt_source_coordinates(
+                x_grid_src,
+                y_grid_src,
+            )
+        else:
+            pixels_x_coord, pixels_y_coord = None, None
+        if de_lensed:
+            source_light = self.SourceModel.surface_brightness(
+                x_grid_img,
+                y_grid_img,
+                kwargs_source,
+                k=k,
+                pixels_x_coord=pixels_x_coord,
+                pixels_y_coord=pixels_y_coord,
+            )
+        else:
+            source_light = self.SourceModel.surface_brightness(
+                x_grid_src,
+                y_grid_src,
+                kwargs_source,
+                k=k,
+                pixels_x_coord=pixels_x_coord,
+                pixels_y_coord=pixels_y_coord,
+            )
+        return source_light
+
+    def lens_surface_brightness(self, kwargs_lens_light, k=None):
+        x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+        return self.LensLightModel.surface_brightness(
+            x_grid_img,
+            y_grid_img,
+            kwargs_lens_light,
+            k=k,
+        )
+
+    @partial(jax.jit, static_argnums=(0, 4, 5, 6, 7, 8, 9, 10))
+    def model(
+        self,
+        kwargs_lens=None,
+        kwargs_source=None,
+        kwargs_lens_light=None,
+        unconvolved=False,
+        supersampled=False,
+        source_add=True,
+        lens_light_add=True,
+        k_lens=None,
+        k_source=None,
+        k_lens_light=None,
+        psf_noise_fft=None,
+    ):
+        model = jnp.zeros((self.ImageNumerics.grid_class.num_grid_points,)).flatten()
+        if source_add is True:
+            source_model = self.source_surface_brightness(
+                kwargs_source,
+                kwargs_lens,
+                k=k_source,
+                k_lens=k_lens,
+            )
+            if self._source_arc_mask_flat is not None:
+                source_model *= self._source_arc_mask_flat
+            model += source_model
+        if lens_light_add is True:
+            model += self.lens_surface_brightness(
+                kwargs_lens_light,
+                k=k_lens_light,
+            )
+        if not supersampled:
+            model = self.ImageNumerics.re_size_convolve(
+                model,
+                unconvolved=unconvolved,
+                kwargs_psf=psf_noise_fft,
+            )
+        return model
+
+    def trace_conjugate_points(self, kwargs_lens, k_lens=None):
+        if self.conjugate_points is not None:
+            x, y = self.conjugate_points.T
+            conj_x, conj_y = self.MassModel.ray_shooting(x, y, kwargs_lens, k=k_lens)
+            return jnp.vstack([conj_x, conj_y]).T
+        return None
+
+    def mask_extent(self, x_grid_src, y_grid_src, npix_src, grid_scale=1):
+        x_left, x_right = x_grid_src.min(), x_grid_src.max()
+        y_bottom, y_top = y_grid_src.min(), y_grid_src.max()
+        cx = 0.5 * (x_left + x_right)
+        cy = 0.5 * (y_bottom + y_top)
+        width = jnp.abs(x_left - x_right)
+        height = jnp.abs(y_bottom - y_top)
+        half_size = 0.5 * grid_scale * jnp.maximum(height, width)
+        x_left = cx - half_size
+        x_right = cx + half_size
+        y_bottom = cy - half_size
+        y_top = cy + half_size
+        x_adapt = jnp.linspace(x_left, x_right, npix_src)
+        y_adapt = jnp.linspace(y_bottom, y_top, npix_src)
+        extent_adapt = [x_adapt[0], x_adapt[-1], y_adapt[0], y_adapt[-1]]
+        return x_adapt, y_adapt, extent_adapt
+
+    @partial(jax.jit, static_argnums=(0, 3, 4, 5))
+    def adapt_source_coordinates(
+        self,
+        x_grid_src,
+        y_grid_src,
+        force=False,
+        npix_src=100,
+        source_grid_scale=1,
+    ):
+        if self._src_adaptive_grid or force:
+            if not force:
+                npix_src, npix_src_y = self.SourceModel.pixel_grid.num_pixel_axes
+                if npix_src_y != npix_src:
+                    raise ValueError('Adaptive source plane grid only works with square grids')
+                grid_scale = self._source_grid_scale
+            else:
+                grid_scale = source_grid_scale
+            if self.Grid.x_is_inverted or self.Grid.y_is_inverted:
+                raise NotImplementedError('invert x and y not yet supported for adaptive source grid')
+            return self.mask_extent(
+                x_grid_src[self._source_arc_mask_outline_flat],
+                y_grid_src[self._source_arc_mask_outline_flat],
+                npix_src,
+                grid_scale,
+            )
+        return None, None, None
+
+    def get_source_coordinates(
+        self,
+        kwargs_lens,
+        force=False,
+        npix_src=100,
+        source_grid_scale=1.0,
+        k_lens=None,
+    ):
+        if (not self._src_adaptive_grid) and (self.SourceModel.pixel_grid is not None):
+            x_grid, y_grid = self.SourceModel.pixel_grid.pixel_coordinates
+            extent = self.SourceModel.pixel_grid.extent
+        else:
+            x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+            x_grid_src, y_grid_src = self.MassModel.ray_shooting(
+                x_grid_img,
+                y_grid_img,
+                kwargs_lens,
+                k=k_lens,
+            )
+            x_grid, y_grid, extent = self.adapt_source_coordinates(
+                x_grid_src,
+                y_grid_src,
+                force=force,
+                npix_src=npix_src,
+                source_grid_scale=source_grid_scale,
+            )
+        return x_grid, y_grid, extent
+
+
 
 def create_lens_image(
     param_list,
@@ -1276,6 +1494,9 @@ def create_lens_image(
     pixel_scale,
     kwargs_numerics=None,
     kwargs_lens_equation_solver=None,
+    source_arc_mask=None,
+    source_grid_scale=1.0,
+    conjugate_points=None,
 ):
     num_pixels = image_data.shape[0]
     psf = PSF(psf_type='PIXEL', kernel_point_source=psf_data, pixel_size=pixel_scale)
@@ -1301,7 +1522,7 @@ def create_lens_image(
     if kwargs_numerics is None:
         kwargs_numerics = {'supersampling_factor': 1}
 
-    return LensImage(
+    return LensImageExtension(
         grid_class=pixel_grid,
         psf_class=psf,
         noise_class=noise,
@@ -1309,6 +1530,9 @@ def create_lens_image(
         lens_light_model_class=lens_light_model,
         source_model_class=source_light_model,
         point_source_model_class=point_source_model,
+        source_arc_mask=source_arc_mask,
+        source_grid_scale=source_grid_scale,
+        conjugate_points=conjugate_points,
         kwargs_numerics=kwargs_numerics,
         kwargs_lens_equation_solver=kwargs_lens_equation_solver,
     )

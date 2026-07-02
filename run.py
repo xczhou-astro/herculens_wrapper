@@ -192,6 +192,17 @@ def build_and_run(config_path=None):
         'nsubdivisions': args.ps_nsubdivisions,
     }
 
+    source_arc_mask = None
+    source_arc_mask_path = getattr(args, 'source_arc_mask_path', None)
+    if source_arc_mask_path is not None:
+        source_arc_mask = get_fits_data(source_arc_mask_path).astype(bool)
+        if args.crop_size is not None:
+            source_arc_mask = center_crop(source_arc_mask, args.crop_size)
+    source_grid_scale = float(getattr(args, 'source_grid_scale', 1.0))
+    conjugate_points = getattr(args, 'conjugate_points', None)
+    if conjugate_points is not None:
+        conjugate_points = np.asarray(conjugate_points, dtype=np.float64)
+
     lens_image = create_lens_image(
         param_list=param_list,
         type_list=type_list,
@@ -201,6 +212,9 @@ def build_and_run(config_path=None):
         pixel_scale=args.pixel_scale,
         kwargs_numerics=kwargs_numerics_fit,
         kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
+        source_arc_mask=source_arc_mask,
+        source_grid_scale=source_grid_scale,
+        conjugate_points=conjugate_points,
     )
 
     fix_components = getattr(args, 'fix_component', [])
