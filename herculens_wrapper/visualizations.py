@@ -315,11 +315,17 @@ def plot_source_plane(
         )
         extent = [-fov / 2, fov / 2, -fov / 2, fov / 2]
 
+    # Initialize adaptive limits defaulting to the full grid extent
+    xmin_sq, xmax_sq = extent[0], extent[1]
+    ymin_sq, ymax_sq = extent[2], extent[3]
+
     # Apply footprint masking to the source plane using the image-plane mask
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None and 'kwargs_lens' in kwargs_result:
         try:
-            x_grid_img, y_grid_img = lens_image.ImageNumerics.coordinates_evaluate
+            x_grid_img, y_grid_img = lens_image.Grid.pixel_coordinates
+            x_grid_img = np.asarray(x_grid_img).flatten()
+            y_grid_img = np.asarray(y_grid_img).flatten()
             x_grid_src, y_grid_src = lens_image.MassModel.ray_shooting(x_grid_img, y_grid_img, kwargs_result['kwargs_lens'])
             mask_flat = np.asarray(mask).flatten()
             if np.any(mask_flat):
@@ -328,16 +334,21 @@ def plot_source_plane(
                 xmin, xmax = x_src_masked.min(), x_src_masked.max()
                 ymin, ymax = y_src_masked.min(), y_src_masked.max()
                 
-                # Add 10% padding buffer
-                dx = xmax - xmin
-                dy = ymax - ymin
-                padding = 0.1
-                xmin -= padding * dx
-                xmax += padding * dx
-                ymin -= padding * dy
-                ymax += padding * dy
+                # Make the footprint mask a square based on the larger direction
+                cx = 0.5 * (xmin + xmax)
+                cy = 0.5 * (ymin + ymax)
+                max_dim = max(xmax - xmin, ymax - ymin)
                 
-                grid_mask = (xx >= xmin) & (xx <= xmax) & (yy >= ymin) & (yy <= ymax)
+                # Add 10% padding buffer
+                padding = 0.1
+                half_size = 0.5 * max_dim * (1.0 + 2.0 * padding)
+                
+                xmin_sq = cx - half_size
+                xmax_sq = cx + half_size
+                ymin_sq = cy - half_size
+                ymax_sq = cy + half_size
+                
+                grid_mask = (xx >= xmin_sq) & (xx <= xmax_sq) & (yy >= ymin_sq) & (yy <= ymax_sq)
                 source_for_plot = np.where(grid_mask, source_for_plot, 0.0)
         except Exception as e:
             print(f'[plot_source_plane] Footprint masking failed: {e}')
@@ -377,8 +388,6 @@ def plot_source_plane(
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title('Point Sources + Caustics')
     # axes[1].legend(fontsize=8)
-    axes[1].set_xlim(extent[0], extent[1])
-    axes[1].set_ylim(extent[2], extent[3])
 
     im2 = axes[2].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
@@ -391,6 +400,8 @@ def plot_source_plane(
     for a in axes:
         a.set_xlabel('arcsec')
         a.set_ylabel('arcsec')
+        a.set_xlim(xmin_sq, xmax_sq)
+        a.set_ylim(ymin_sq, ymax_sq)
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
