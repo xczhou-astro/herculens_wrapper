@@ -42,7 +42,7 @@ def _norm_from_plot_scale(plot_scale, arr):
         if not np.isfinite(vmin) or not np.isfinite(vmax):
             return None, 'linear'
         vmax = max(vmax, vmin * 10.0)
-        vmin = max(vmin, vmax * 1e-12)
+        vmin = max(vmin, vmax * 1e-3)
         return LogNorm(vmin=vmin, vmax=vmax), 'log'
     return None, 'linear'
 
@@ -304,6 +304,7 @@ def plot_source_plane(
     if is_pixelated:
         source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels']) / float(lens_image.Grid.pixel_area)
         extent = list(lens_image.SourceModel.pixel_grid.extent)
+        xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
     else:
         fov = num_pixel * source_pixel_scale
         x = np.linspace(-fov / 2, fov / 2, num_pixel)
@@ -313,6 +314,33 @@ def plot_source_plane(
             lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
         )
         extent = [-fov / 2, fov / 2, -fov / 2, fov / 2]
+
+    # Apply footprint masking to the source plane using the image-plane mask
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None and 'kwargs_lens' in kwargs_result:
+        try:
+            x_grid_img, y_grid_img = lens_image.ImageNumerics.coordinates_evaluate
+            x_grid_src, y_grid_src = lens_image.MassModel.ray_shooting(x_grid_img, y_grid_img, kwargs_result['kwargs_lens'])
+            mask_flat = np.asarray(mask).flatten()
+            if np.any(mask_flat):
+                x_src_masked = np.asarray(x_grid_src)[mask_flat]
+                y_src_masked = np.asarray(y_grid_src)[mask_flat]
+                xmin, xmax = x_src_masked.min(), x_src_masked.max()
+                ymin, ymax = y_src_masked.min(), y_src_masked.max()
+                
+                # Add 10% padding buffer
+                dx = xmax - xmin
+                dy = ymax - ymin
+                padding = 0.1
+                xmin -= padding * dx
+                xmax += padding * dx
+                ymin -= padding * dy
+                ymax += padding * dy
+                
+                grid_mask = (xx >= xmin) & (xx <= xmax) & (yy >= ymin) & (yy <= ymax)
+                source_for_plot = np.where(grid_mask, source_for_plot, 0.0)
+        except Exception as e:
+            print(f'[plot_source_plane] Footprint masking failed: {e}')
 
     norm, cbar_label = _norm_from_plot_scale(plot_scale, source_for_plot)
 
