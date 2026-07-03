@@ -56,7 +56,7 @@ def _image_extent(ny, nx, pixel_scale):
     ]
 
 
-def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear'):
+def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None):
     num = len(plot_data)
     fig, axes = plt.subplots(1, num, figsize=(4 * num + 2, 4))
     if num == 1:
@@ -69,6 +69,8 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
         else:
             norm, cbar_label = None, 'linear'
         im = axes[i].imshow(plot_data[i], origin='lower', cmap='bwr', extent=extent, norm=norm)
+        if contour_mask is not None and i < 2:
+            axes[i].contour(np.asarray(contour_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')
         axes[i].set_title(titles[i])
@@ -89,8 +91,6 @@ def plot_input_data(
     point_source_params_list=None,
     source_arc_mask=None,
 ):
-    if source_arc_mask is not None:
-        image_data = image_data * source_arc_mask
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
@@ -98,6 +98,8 @@ def plot_input_data(
     fig, axes = plt.subplots(1, 3, figsize=(16, 5))
 
     im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    if source_arc_mask is not None:
+        axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     axes[0].set_title('Image data')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
@@ -146,6 +148,8 @@ def plot_input_data(
 
     norm_img, label_img = _norm_from_plot_scale('log', image_data)
     im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_img)
+    if source_arc_mask is not None:
+        axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     axes[0].set_title('Image data (log)')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
@@ -201,16 +205,12 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     model_extended = lens_image.model(
         **kwargs_result, source_add=True, lens_light_add=False, point_source_add=False,
     )
-    if mask is not None:
-        model_extended = model_extended * mask
 
     model_lens_light = np.zeros((ny, nx))
     if 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
-    if mask is not None:
-        model_lens_light = model_lens_light * mask
 
     model_point_sources = np.zeros((ny, nx))
     ra_image_list = []
@@ -219,8 +219,6 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
         model_point_sources = lens_image.model(
             **kwargs_result, source_add=False, lens_light_add=False, point_source_add=True,
         )
-        if mask is not None:
-            model_point_sources = model_point_sources * mask
         theta_x, theta_y, amps = lens_image.PointSourceModel.get_multiple_images(
             kwargs_result['kwargs_point_source'],
             kwargs_lens=kwargs_result['kwargs_lens'],
@@ -235,12 +233,7 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
             print(f'Amplitudes for lensed point source {i}: {amps[i]}')
 
     model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
-    if mask is not None:
-        model_composite = model_composite * mask
-        image_data = image_data * mask
     residuals = (model_composite - image_data) / noise_map
-    if mask is not None:
-        residuals = residuals * mask
 
     n_ps = len(ra_image_list)
     ps_colors = _point_source_colors(n_ps) if n_ps else []
@@ -248,6 +241,8 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     fig, ax = plt.subplots(2, 3, figsize=(17, 10))
 
     im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='bwr', extent=extent)
+    if mask is not None:
+        ax[0, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[0, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[0, 0].set_title('Extended Source (Lensed)')
@@ -262,16 +257,22 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     plt.colorbar(im2, ax=ax[0, 2], label='linear')
 
     im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='bwr', extent=extent)
+    if mask is not None:
+        ax[1, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[1, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[1, 0].set_title('Composite')
     plt.colorbar(im3, ax=ax[1, 0], label='linear')
 
     im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    if mask is not None:
+        ax[1, 1].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 1].set_title('Image Data')
     plt.colorbar(im4, ax=ax[1, 1], label='linear')
 
     im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent)
+    if mask is not None:
+        ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 2].set_title('Residuals (model - data) / noise')
     plt.colorbar(im5, ax=ax[1, 2])
 
@@ -423,15 +424,14 @@ def plot_lens_light_subtracted_image(
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
-    if mask is not None:
-        model_lens_light = model_lens_light * mask
-        image_data = image_data * mask
 
     subtracted = image_data - model_lens_light
 
     fig, ax = plt.subplots(1, 3, figsize=(16, 5))
 
     im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    if mask is not None:
+        ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[0].set_title('Image data')
     plt.colorbar(im0, ax=ax[0], label='linear')
 
@@ -441,9 +441,13 @@ def plot_lens_light_subtracted_image(
 
     if noise_map is not None:
         im2 = ax[2].imshow(subtracted / noise_map, origin='lower', cmap='bwr', extent=extent)
+        if mask is not None:
+            ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
     else:
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent)
+        if mask is not None:
+            ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light')
         plt.colorbar(im2, ax=ax[2], label='linear')
     if noise_map is not None:
@@ -654,8 +658,6 @@ def display_init(
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
         mask = np.asarray(mask)
-        initial_model = initial_model * mask
-        image_data = image_data * mask
 
     init_chi2 = float(np.sum(((initial_model - image_data) / noise_map) ** 2))
     init_reduced, _, _, dof_init = fit_dof_and_reduced_chi2(init_chi2, image_data, num_params)
@@ -672,6 +674,7 @@ def display_init(
         ],
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'initial_guess_model.png'),
+        contour_mask=mask,
     )
 
     is_pixelated = (
@@ -869,10 +872,6 @@ def generate_run_plots(
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
         mask = np.asarray(mask)
-        if best_fit_model is not None:
-            best_fit_model = best_fit_model * mask
-        if image_data is not None:
-            image_data = image_data * mask
 
     if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
@@ -894,6 +893,7 @@ def generate_run_plots(
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'best_fit_model_linear.png'),
         plot_scale='linear',
+        contour_mask=mask,
     ))
 
     _try('best_fit_model_log.png', lambda: display(
@@ -906,6 +906,7 @@ def generate_run_plots(
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'best_fit_model_log.png'),
         plot_scale='log',
+        contour_mask=mask,
     ))
 
     _try('image_plane.png', lambda: plot_image_plane(
@@ -1005,10 +1006,6 @@ def recreate_best_fit_plots_for_run(run_dir):
         except Exception:
             pass
 
-    if source_arc_mask is not None:
-        best_fit_model = best_fit_model * source_arc_mask
-        image_data = image_data * source_arc_mask
-    
     # Try to load pixel_scale from args.json
     pixel_scale = 0.08  # default fallback
     args_json_path = os.path.join(run_dir, 'args.json')
@@ -1046,6 +1043,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             pixel_scale=pixel_scale,
             savefilename=os.path.join(run_dir, 'best_fit_model_linear.png'),
             plot_scale='linear',
+            contour_mask=source_arc_mask,
         )
         print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_linear.png')}")
     except Exception as e:
@@ -1062,6 +1060,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             pixel_scale=pixel_scale,
             savefilename=os.path.join(run_dir, 'best_fit_model_log.png'),
             plot_scale='log',
+            contour_mask=source_arc_mask,
         )
         print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_log.png')}")
     except Exception as e:
