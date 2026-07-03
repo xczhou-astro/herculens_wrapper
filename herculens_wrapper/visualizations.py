@@ -87,7 +87,10 @@ def plot_input_data(
     save_path=None,
     point_source_type_list=None,
     point_source_params_list=None,
+    source_arc_mask=None,
 ):
+    if source_arc_mask is not None:
+        image_data = image_data * source_arc_mask
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
@@ -191,15 +194,23 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None:
+        mask = np.asarray(mask)
+
     model_extended = lens_image.model(
         **kwargs_result, source_add=True, lens_light_add=False, point_source_add=False,
     )
+    if mask is not None:
+        model_extended = model_extended * mask
 
     model_lens_light = np.zeros((ny, nx))
     if 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
+    if mask is not None:
+        model_lens_light = model_lens_light * mask
 
     model_point_sources = np.zeros((ny, nx))
     ra_image_list = []
@@ -208,6 +219,8 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
         model_point_sources = lens_image.model(
             **kwargs_result, source_add=False, lens_light_add=False, point_source_add=True,
         )
+        if mask is not None:
+            model_point_sources = model_point_sources * mask
         theta_x, theta_y, amps = lens_image.PointSourceModel.get_multiple_images(
             kwargs_result['kwargs_point_source'],
             kwargs_lens=kwargs_result['kwargs_lens'],
@@ -222,7 +235,12 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
             print(f'Amplitudes for lensed point source {i}: {amps[i]}')
 
     model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
+    if mask is not None:
+        model_composite = model_composite * mask
+        image_data = image_data * mask
     residuals = (model_composite - image_data) / noise_map
+    if mask is not None:
+        residuals = residuals * mask
 
     n_ps = len(ra_image_list)
     ps_colors = _point_source_colors(n_ps) if n_ps else []
@@ -357,11 +375,19 @@ def plot_lens_light_subtracted_image(
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None:
+        mask = np.asarray(mask)
+
     model_lens_light = np.zeros((ny, nx))
     if 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
+    if mask is not None:
+        model_lens_light = model_lens_light * mask
+        image_data = image_data * mask
+
     subtracted = image_data - model_lens_light
 
     fig, ax = plt.subplots(1, 3, figsize=(16, 5))
@@ -586,6 +612,12 @@ def display_init(
             json.dump(kwargs_init_json, f, indent=4, default=json_serializer)
 
     initial_model = lens_image.model(**kwargs_init)
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None:
+        mask = np.asarray(mask)
+        initial_model = initial_model * mask
+        image_data = image_data * mask
+
     init_chi2 = float(np.sum(((initial_model - image_data) / noise_map) ** 2))
     init_reduced, _, _, dof_init = fit_dof_and_reduced_chi2(init_chi2, image_data, num_params)
     print(
@@ -795,7 +827,14 @@ def generate_run_plots(
     regul_model=None,
     param_list=None,
 ):
-    """Best-effort diagnostic figures; failures are logged and skipped."""
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None:
+        mask = np.asarray(mask)
+        if best_fit_model is not None:
+            best_fit_model = best_fit_model * mask
+        if image_data is not None:
+            image_data = image_data * mask
+
     if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
 
@@ -917,6 +956,19 @@ def recreate_best_fit_plots_for_run(run_dir):
     best_fit_model = data['best_fit_model']
     image_data = data['image_data']
     noise_map = data['noise_map']
+
+    source_arc_mask = None
+    if 'source_arc_mask' in data and data['source_arc_mask'] is not None:
+        try:
+            mask_arr = data['source_arc_mask']
+            if mask_arr.ndim > 0 and mask_arr.dtype != object:
+                source_arc_mask = mask_arr
+        except Exception:
+            pass
+
+    if source_arc_mask is not None:
+        best_fit_model = best_fit_model * source_arc_mask
+        image_data = image_data * source_arc_mask
     
     # Try to load pixel_scale from args.json
     pixel_scale = 0.08  # default fallback

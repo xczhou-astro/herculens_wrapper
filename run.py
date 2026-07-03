@@ -161,6 +161,7 @@ def build_and_run(config_path=None):
             save_path=save_path,
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
+            source_arc_mask=source_arc_mask,
         )
     except Exception as e:
         print(f'[plots] input_data.png skipped: {e}')
@@ -428,6 +429,7 @@ def build_and_run(config_path=None):
                 best_fit_model=np.asarray(best_fit_model),
                 image_data=np.asarray(image_data),
                 noise_map=np.asarray(noise_map),
+                source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
             )
             print(f'Run {n} complete. Outputs in {run_save_path}')
             return metrics
@@ -646,6 +648,7 @@ def build_and_run(config_path=None):
             best_fit_model=np.asarray(best_fit_model),
             image_data=np.asarray(image_data),
             noise_map=np.asarray(noise_map),
+            source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
         )
         print(f'Run complete. Outputs in {save_path}')
         return save_path
