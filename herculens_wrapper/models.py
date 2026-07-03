@@ -1365,20 +1365,23 @@ class LensImageExtension(LensImage):
             k=k,
         )
 
-    @partial(jax.jit, static_argnums=(0, 4, 5, 6, 7, 8, 9, 10))
+    @partial(jax.jit, static_argnums=(0, 5, 6, 7, 8, 9, 10, 11, 12, 13))
     def model(
         self,
         kwargs_lens=None,
         kwargs_source=None,
         kwargs_lens_light=None,
+        kwargs_point_source=None,
         unconvolved=False,
         supersampled=False,
         source_add=True,
         lens_light_add=True,
+        point_source_add=True,
         k_lens=None,
         k_source=None,
         k_lens_light=None,
-        psf_noise_fft=None,
+        k_point_source=None,
+        kwargs_psf=None,
     ):
         model = jnp.zeros((self.ImageNumerics.grid_class.num_grid_points,)).flatten()
         if source_add is True:
@@ -1400,8 +1403,19 @@ class LensImageExtension(LensImage):
             model = self.ImageNumerics.re_size_convolve(
                 model,
                 unconvolved=unconvolved,
-                kwargs_psf=psf_noise_fft,
+                kwargs_psf=kwargs_psf,
             )
+        if point_source_add and getattr(self, 'PointSourceModel', None) is not None:
+            ps_image = self.point_source_image(
+                kwargs_point_source,
+                kwargs_lens,
+                kwargs_solver=self.kwargs_lens_equation_solver,
+                k=k_point_source,
+                kwargs_psf=kwargs_psf,
+            )
+            if model.ndim == 1:
+                ps_image = ps_image.flatten()
+            model += ps_image
         return model
 
     def trace_conjugate_points(self, kwargs_lens, k_lens=None):
