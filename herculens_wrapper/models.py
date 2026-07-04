@@ -424,8 +424,10 @@ def create_prob_model(
     args=None,
 ):
     refine_prior_range = None
+    refine_prior_min_frac = None
     if args is not None:
         refine_prior_range = getattr(args, 'refine_prior_range', None)
+        refine_prior_min_frac = getattr(args, 'refine_prior_min_frac', None)
     
     if refine_prior_range is not None and init_params_path is None:
         print("[create_prob_model] Warning: refine_prior_range is set, but init_params_path is None. Prior range refinement is skipped.")
@@ -436,6 +438,9 @@ def create_prob_model(
         import copy
         
         refine_prior_range = float(refine_prior_range)
+        if refine_prior_min_frac is not None:
+            refine_prior_min_frac = float(refine_prior_min_frac)
+            
         res_path = os.path.join(init_params_path, 'kwargs_result.json')
         sig_path = os.path.join(init_params_path, 'kwargs_sigma.json')
         
@@ -446,7 +451,11 @@ def create_prob_model(
                 with open(sig_path, 'r') as f:
                     kwargs_sigma = json.load(f)
                 
-                print(f"[create_prob_model] Refining parameter prior ranges using {refine_prior_range}-sigma limits from {init_params_path}")
+                msg = f"[create_prob_model] Refining parameter prior ranges using {refine_prior_range}-sigma limits"
+                if refine_prior_min_frac is not None:
+                    msg += f" (with min threshold fraction {refine_prior_min_frac})"
+                msg += f" from {init_params_path}"
+                print(msg)
                 
                 param_list = copy.deepcopy(param_list)
                 
@@ -471,8 +480,17 @@ def create_prob_model(
                                             median_val = res_comp[p_key]
                                             sigma_val = sig_comp[p_key]
                                             if isinstance(median_val, (int, float)) and isinstance(sigma_val, (int, float)):
-                                                low_lim = median_val - refine_prior_range * sigma_val
-                                                high_lim = median_val + refine_prior_range * sigma_val
+                                                half_width = refine_prior_range * sigma_val
+                                                if refine_prior_min_frac is not None:
+                                                    min_half_width = refine_prior_min_frac * abs(median_val)
+                                                    if half_width < min_half_width:
+                                                        half_width = min_half_width
+                                                
+                                                half_width = max(half_width, 1e-6)
+                                                effective_sigma = half_width / refine_prior_range
+                                                
+                                                low_lim = median_val - half_width
+                                                high_lim = median_val + half_width
                                                 original_low = p_val[2]
                                                 original_high = p_val[3]
                                                 
@@ -480,13 +498,13 @@ def create_prob_model(
                                                 high_lim = min(original_high, high_lim)
                                                 
                                                 if low_lim >= high_lim:
-                                                    low_lim = max(original_low, median_val - 0.1 * sigma_val)
-                                                    high_lim = min(original_high, median_val + 0.1 * sigma_val)
+                                                    low_lim = max(original_low, median_val - 0.1 * effective_sigma)
+                                                    high_lim = min(original_high, median_val + 0.1 * effective_sigma)
                                                 
                                                 p_val[2] = float(low_lim)
                                                 p_val[3] = float(high_lim)
                                                 p_val[0] = float(median_val)
-                                                p_val[1] = float(sigma_val)
+                                                p_val[1] = float(effective_sigma)
                                                 
                                                 print(f"  {kw_key}[{i}].{p_key}: refined prior to [{p_val[0]:.4f}, {p_val[1]:.4f}, {p_val[2]:.4f}, {p_val[3]:.4f}]")
             except Exception as e:
