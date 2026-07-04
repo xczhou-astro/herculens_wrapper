@@ -411,6 +411,7 @@ def plot_source_plane(
 
 def plot_lens_light_subtracted_image(
     lens_image, kwargs_result, pixel_scale, image_data, noise_map=None, save_path=None,
+    plot_scale='linear',
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -429,36 +430,75 @@ def plot_lens_light_subtracted_image(
 
     fig, ax = plt.subplots(1, 3, figsize=(16, 5))
 
-    im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    norm_0, label_0 = _norm_from_plot_scale(plot_scale, image_data)
+    im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_0)
     if mask is not None:
         ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[0].set_title('Image data')
-    plt.colorbar(im0, ax=ax[0], label='linear')
+    plt.colorbar(im0, ax=ax[0], label=label_0)
 
-    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent)
+    norm_1, label_1 = _norm_from_plot_scale(plot_scale, model_lens_light)
+    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent, norm=norm_1)
+    
+    # Overlay 1-sigma contours for Gaussian/MGE components (if present)
+    if 'kwargs_lens_light' in kwargs_result:
+        from matplotlib.patches import Ellipse
+        for kw in kwargs_result['kwargs_lens_light']:
+            if isinstance(kw, dict) and 'sigma' in kw:
+                sigma = float(kw['sigma'])
+                center_x = float(kw.get('center_x', 0.0))
+                center_y = float(kw.get('center_y', 0.0))
+                e1 = float(kw.get('e1', 0.0))
+                e2 = float(kw.get('e2', 0.0))
+                
+                eps = np.sqrt(e1**2 + e2**2)
+                if eps > 0.0:
+                    eps = min(eps, 0.999)
+                    q = (1.0 - eps) / (1.0 + eps)
+                    phi = 0.5 * np.arctan2(e2, e1)
+                    angle_deg = phi * (180.0 / np.pi)
+                else:
+                    q = 1.0
+                    angle_deg = 0.0
+                
+                ellipse = Ellipse(
+                    xy=(center_x, center_y),
+                    width=2 * sigma,
+                    height=2 * q * sigma,
+                    angle=angle_deg,
+                    edgecolor='black',
+                    facecolor='none',
+                    linestyle='--',
+                    linewidth=1.2,
+                    alpha=0.5
+                )
+                ax[1].add_patch(ellipse)
+                ax[1].plot(center_x, center_y, '+', color='black', markersize=4, alpha=0.8)
+                
     ax[1].set_title('Lens light model')
-    plt.colorbar(im1, ax=ax[1], label='linear')
+    plt.colorbar(im1, ax=ax[1], label=label_1)
 
     if noise_map is not None:
         im2 = ax[2].imshow(subtracted / noise_map, origin='lower', cmap='bwr', extent=extent)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
+        plt.colorbar(im2, ax=ax[2], label='linear')
     else:
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light')
         plt.colorbar(im2, ax=ax[2], label='linear')
-    if noise_map is not None:
-        plt.colorbar(im2, ax=ax[2])
 
     for a in ax:
         a.set_xlabel('arcsec')
         a.set_ylabel('arcsec')
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, 'lens_light_subtracted_image.png'), dpi=300, bbox_inches='tight')
+    suffix = '_log' if plot_scale == 'log' else ''
+    filename = f'lens_light_subtracted_image{suffix}.png'
+    plt.savefig(os.path.join(save_path, filename), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -924,6 +964,12 @@ def generate_run_plots(
 
     _try('lens_light_subtracted_image.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
+        plot_scale='linear',
+    ))
+    
+    _try('lens_light_subtracted_image_log.png', lambda: plot_lens_light_subtracted_image(
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
+        plot_scale='log',
     ))
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
