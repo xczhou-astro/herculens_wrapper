@@ -58,7 +58,7 @@ def _image_extent(ny, nx, pixel_scale):
 
 def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None):
     num = len(plot_data)
-    fig, axes = plt.subplots(1, num, figsize=(4 * num + 2, 4))
+    fig, axes = plt.subplots(1, num, figsize=(4 * num + 2 * num, 5))
     if num == 1:
         axes = [axes]
     for i in range(num):
@@ -95,7 +95,7 @@ def plot_input_data(
     extent = _image_extent(ny, nx, pixel_scale)
 
     # 1. Linear Scale Plot
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
     if source_arc_mask is not None:
@@ -144,7 +144,7 @@ def plot_input_data(
     plt.close()
 
     # 2. Log Scale Plot
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     norm_img, label_img = _norm_from_plot_scale('log', image_data)
     im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_img)
@@ -238,7 +238,7 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     n_ps = len(ra_image_list)
     ps_colors = _point_source_colors(n_ps) if n_ps else []
 
-    fig, ax = plt.subplots(2, 3, figsize=(17, 10))
+    fig, ax = plt.subplots(2, 3, figsize=(18, 10))
 
     im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='bwr', extent=extent)
     if mask is not None:
@@ -377,26 +377,19 @@ def plot_source_plane(
             print(f'[plot_source_plane] Could not compute caustics: {e}')
 
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
     axes[0].set_title('Extended Source')
     plt.colorbar(im0, ax=axes[0], label=cbar_label)
 
+    im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
         axes[1].scatter(ras, decs, s=30, marker='*', color=colors[i], label=f'PS {i + 1}')
     for caust_x, caust_y in caustics:
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
-    axes[1].set_title('Point Sources + Caustics')
-    # axes[1].legend(fontsize=8)
-
-    im2 = axes[2].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
-    for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
-        axes[2].scatter(ras, decs, s=30, marker='*', color=colors[i])
-    for caust_x, caust_y in caustics:
-        axes[2].plot(caust_x, caust_y, color='lime', lw=1.0)
-    axes[2].set_title('Source Plane Reconstruction')
-    plt.colorbar(im2, ax=axes[2], label=cbar_label)
+    axes[1].set_title('Source Plane Reconstruction')
+    plt.colorbar(im1, ax=axes[1], label=cbar_label)
 
     for a in axes:
         a.set_xlabel('arcsec')
@@ -428,7 +421,7 @@ def plot_lens_light_subtracted_image(
 
     subtracted = image_data - model_lens_light
 
-    fig, ax = plt.subplots(1, 3, figsize=(16, 5))
+    fig, ax = plt.subplots(1, 3, figsize=(18, 5))
 
     norm_0, label_0 = _norm_from_plot_scale(plot_scale, image_data)
     im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_0)
@@ -838,7 +831,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
         print(f"[plot_mass_and_convergence] Could not compute critical lines: {e}")
 
     # 3. Plotting (1x2 grid)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
     extent = _image_extent(ny, nx, pixel_scale)
     
     # --- Panel 0: 2D Convergence Map ---
