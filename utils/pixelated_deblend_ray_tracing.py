@@ -176,7 +176,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     # Set up matplotlib figure
     # Row 0 has 4 panels: Cutout, Combined model, Lens light, Segmented source plane.
     # Row 1 has N panels: Lensed Component 1, 2, ..., N.
-    n_cols = max(4, num_to_show)
+    n_cols = max(5, num_to_show)
     fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols + 1 * n_cols, 10))
     
     # Helpers for rendering in linear/log
@@ -216,8 +216,13 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     src_pixel_scale = (src_extent[1] - src_extent[0]) / nx_src
     src_plot_extent = [src_extent[0], src_extent[1], src_extent[2], src_extent[3]]
     
-    # Panel 4: Segmented Source Plane (always linear scale!)
-    ax_src = axes[0, 3]
+    # Panel 4: Model - Lens Light (log scale)
+    render_im(axes[0, 3], model_combined - model_lens_light, img_extent, "Model - Lens Light", is_log=is_log)
+    if source_arc_mask is not None:
+        axes[0, 3].contour(source_arc_mask, levels=[0.5], colors='lime', extent=img_extent, linewidths=1.0)
+
+    # Panel 5: Segmented Source Plane (always linear scale!)
+    ax_src = axes[0, 4]
     im_src = ax_src.imshow(source_pixels / pixel_area, origin='lower', cmap='bwr', extent=src_plot_extent)
     plt.colorbar(im_src, ax=ax_src, label='flux / arcsec$^2$')
         
@@ -238,7 +243,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     ax_src.set_ylabel('arcsec')
     
     # Hide any unused subplots in row 0
-    for col_idx in range(4, n_cols):
+    for col_idx in range(5, n_cols):
         axes[0, col_idx].axis('off')
     
     # Row 2: Lensed components (log scale)
