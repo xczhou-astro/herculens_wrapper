@@ -10,7 +10,7 @@ from scipy.ndimage import label
 from astropy.io import fits
 
 # Ensure wrapper can be imported
-sys.path.insert(0, '/Users/xczhou/Desktop/modelling/herculens_wrapper')
+sys.path.append('..')
 from herculens_wrapper.models import create_lens_image
 
 
