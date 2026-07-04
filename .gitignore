@@ -19,3 +19,6 @@ sim_sl_with_lens_light.py
 
 setup.py
 herculens_wrapper.egg-info/
+
+utils/__pycache__
+utils/recreate*
