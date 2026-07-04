@@ -352,6 +352,24 @@ def build_and_run(config_path=None):
                     history = {'loss_history': np.asarray(extra['loss_history']).tolist()}
                     with open(os.path.join(run_save_path, 'svi_loss_history.json'), 'w') as f:
                         json.dump(history, f, indent=4)
+                if 'guide' in extra and 'result' in extra:
+                    try:
+                        import jax
+                        rng_key = jax.random.PRNGKey(run_args.random_seed + 12345)
+                        cpu_device = jax.devices('cpu')[0]
+                        params_cpu = jax.tree_util.tree_map(lambda x: jax.device_put(x, cpu_device), extra['result'].params)
+                        with jax.default_device(cpu_device):
+                            guide_samples = extra['guide'].sample_posterior(
+                                rng_key, params_cpu, sample_shape=(2000,)
+                            )
+                        sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in guide_samples.items()}
+                        kwargs_sigma = run_prob_model.params2kwargs(sigma_params)
+                        kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list)
+                        with open(os.path.join(run_save_path, 'kwargs_sigma.json'), 'w') as f:
+                            json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
+                        print(f"[svi] Saved parameter uncertainties to kwargs_sigma.json")
+                    except Exception as e:
+                        print(f"[svi] Failed to compute/save kwargs_sigma.json: {e}")
             elif run_args.sampler == 'optax':
                 best_params, extra = run_optax(run_prob_model, run_args, init_params)
                 if 'loss_history' in extra:
@@ -552,6 +570,24 @@ def build_and_run(config_path=None):
         if sampler in OPTIMIZATION_SAMPLERS:
             if sampler == 'svi':
                 best_params, extra = run_svi(prob_model, image_data, args, init_params)
+                if 'guide' in extra and 'result' in extra:
+                    try:
+                        import jax
+                        rng_key = jax.random.PRNGKey(args.random_seed + 12345)
+                        cpu_device = jax.devices('cpu')[0]
+                        params_cpu = jax.tree_util.tree_map(lambda x: jax.device_put(x, cpu_device), extra['result'].params)
+                        with jax.default_device(cpu_device):
+                            guide_samples = extra['guide'].sample_posterior(
+                                rng_key, params_cpu, sample_shape=(2000,)
+                            )
+                        sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in guide_samples.items()}
+                        kwargs_sigma = prob_model.params2kwargs(sigma_params)
+                        kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, save_path, type_list)
+                        with open(os.path.join(save_path, 'kwargs_sigma.json'), 'w') as f:
+                            json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
+                        print(f"[svi] Saved parameter uncertainties to kwargs_sigma.json")
+                    except Exception as e:
+                        print(f"[svi] Failed to compute/save kwargs_sigma.json: {e}")
             elif sampler == 'optax':
                 best_params, extra = run_optax(prob_model, args, init_params)
 
