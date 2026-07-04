@@ -427,6 +427,9 @@ def create_prob_model(
     if args is not None:
         refine_prior_range = getattr(args, 'refine_prior_range', None)
     
+    if refine_prior_range is not None and init_params_path is None:
+        print("[create_prob_model] Warning: refine_prior_range is set, but init_params_path is None. Prior range refinement is skipped.")
+    
     if init_params_path is not None and refine_prior_range is not None:
         import os
         import json

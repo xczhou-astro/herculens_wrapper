@@ -226,6 +226,7 @@ def normalize_run_args_paths(args):
         'init_params_path',
         'ps_mask_path',
         'image_positions_catalog',
+        'source_arc_mask_path',
     )
     for key in path_keys:
         if hasattr(args, key):
