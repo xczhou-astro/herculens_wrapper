@@ -10,7 +10,7 @@ from matplotlib.patches import Ellipse
 from astropy.io import fits
 
 # Ensure wrapper can be imported
-sys.path.insert(0, '/Users/xczhou/Desktop/modelling/herculens_wrapper')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from herculens_wrapper.models import create_lens_image
 
 

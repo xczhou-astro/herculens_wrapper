@@ -6,15 +6,15 @@ import argparse
 import copy
 import numpy as np
 import matplotlib.pyplot as plt
-from scipy.ndimage import label
 from astropy.io import fits
+from photutils.segmentation import detect_sources, deblend_sources
 
 # Ensure wrapper can be imported
-sys.path.append('..')
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from herculens_wrapper.models import create_lens_image
 
 
-def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log'):
+def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixels=5, contrast=0.001, n_levels=32):
     print(f"Loading outputs from run directory: {run_dir}")
     
     # Load JSON settings
@@ -78,22 +78,39 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log'):
         source_grid_scale=args_dict.get('source_grid_scale', 1.0),
     )
     
-    # Connected component labeling to deblend the source plane
-    print("Deblending source plane components...")
+    # Watershed-based deblending using photutils
+    print("Deblending source plane components using photutils...")
     peak_flux = np.max(source_pixels)
     threshold = threshold_frac * peak_flux
-    binary_mask = source_pixels > threshold
     
-    labeled_array, num_features = label(binary_mask)
-    print(f"Found {num_features} connected source features above threshold of {threshold:.4e} ({threshold_frac*100}% of peak flux {peak_flux:.4e})")
+    segm = detect_sources(source_pixels, threshold, n_pixels=n_pixels)
+    if segm is not None:
+        try:
+            deblended = deblend_sources(source_pixels, segm, n_pixels=n_pixels, contrast=contrast, n_levels=n_levels)
+            if deblended is not None:
+                labeled_array = deblended.data
+                labels = deblended.labels
+            else:
+                labeled_array = segm.data
+                labels = segm.labels
+        except Exception as e:
+            print(f"Warning: photutils deblend failed: {e}. Falling back to initial detection.")
+            labeled_array = segm.data
+            labels = segm.labels
+    else:
+        labeled_array = np.zeros_like(source_pixels, dtype=int)
+        labels = []
+        
+    num_features = len(labels)
+    print(f"Photutils found {num_features} deblended source features above threshold of {threshold:.4e} ({threshold_frac*100}% of peak flux {peak_flux:.4e})")
     
     # Compile components sorted by total flux
     components = []
-    for i in range(1, num_features + 1):
-        mask = (labeled_array == i)
+    for lbl in labels:
+        mask = (labeled_array == lbl)
         flux = np.sum(source_pixels[mask])
         components.append({
-            'id': i,
+            'id': lbl,
             'flux': flux,
             'mask': mask,
         })
@@ -265,6 +282,21 @@ if __name__ == '__main__':
         '--plot_scale', type=str, default='log', choices=['linear', 'log'],
         help='Scale to plot flux profiles (linear or log)'
     )
+    parser.add_argument(
+        '--n_pixels', type=int, default=5,
+        help='Minimum number of connected pixels to detect a component'
+    )
+    parser.add_argument(
+        '--contrast', type=float, default=0.001,
+        help='Fraction of total flux a local peak must have to be deblended (contrast threshold)'
+    )
+    parser.add_argument(
+        '--n_levels', type=int, default=32,
+        help='Number of multi-thresholding levels for watershed deblending'
+    )
     
     args = parser.parse_args()
-    deblend_and_ray_trace(args.run_dir, args.threshold_frac, args.plot_scale)
+    deblend_and_ray_trace(
+        args.run_dir, args.threshold_frac, args.plot_scale,
+        n_pixels=args.n_pixels, contrast=args.contrast, n_levels=args.n_levels
+    )
