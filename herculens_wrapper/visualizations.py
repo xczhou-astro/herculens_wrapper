@@ -322,7 +322,7 @@ def plot_source_plane(
     )
 
     if is_pixelated:
-        source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels']) / float(lens_image.Grid.pixel_area)
+        source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
         extent = list(lens_image.SourceModel.pixel_grid.extent)
         xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
     else:
@@ -351,8 +351,8 @@ def plot_source_plane(
             if np.any(mask_flat):
                 x_src_masked = np.asarray(x_grid_src)[mask_flat]
                 y_src_masked = np.asarray(y_grid_src)[mask_flat]
-                xmin, xmax = x_src_masked.min(), x_src_masked.max()
-                ymin, ymax = y_src_masked.min(), y_src_masked.max()
+                xmin, xmax = float(np.nanmin(x_src_masked)), float(np.nanmax(x_src_masked))
+                ymin, ymax = float(np.nanmin(y_src_masked)), float(np.nanmax(y_src_masked))
                 
                 # Make the footprint mask a square based on the larger direction
                 cx = 0.5 * (xmin + xmax)
@@ -492,20 +492,14 @@ def plot_lens_light_subtracted_image(
 
     if noise_map is not None:
         res_data = subtracted / noise_map
-        if residual_vis_max > 0.0:
-            vmax_res = float(residual_vis_max)
-        else:
-            vmax_res = float(np.max(np.abs(res_data)))
+        vmax_res = float(np.max(np.abs(res_data)))
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
         plt.colorbar(im2, ax=ax[2], label='linear')
     else:
-        if residual_vis_max > 0.0:
-            vmax_res = float(residual_vis_max)
-        else:
-            vmax_res = float(np.max(np.abs(subtracted)))
+        vmax_res = float(np.max(np.abs(subtracted)))
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
