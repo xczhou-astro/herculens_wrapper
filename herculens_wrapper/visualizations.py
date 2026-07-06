@@ -69,7 +69,12 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
         else:
             norm, cbar_label = None, 'linear'
         c_map = 'bwr' if (i == 2 or 'residual' in titles[i].lower() or 'chi' in titles[i].lower()) else 'twilight'
-        im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm)
+        if c_map == 'bwr':
+            vmax = float(np.max(np.abs(plot_data[i])))
+            vmin = -vmax
+        else:
+            vmin, vmax = None, None
+        im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm, vmin=vmin, vmax=vmax)
         if contour_mask is not None and i < 2:
             axes[i].contour(np.asarray(contour_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         axes[i].set_xlabel('arcsec')
@@ -271,7 +276,8 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     ax[1, 1].set_title('Image Data')
     plt.colorbar(im4, ax=ax[1, 1], label='linear')
 
-    im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent)
+    vmax_res = float(np.max(np.abs(residuals)))
+    im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 2].set_title('Residuals (model - data) / noise')
@@ -473,13 +479,16 @@ def plot_lens_light_subtracted_image(
     plt.colorbar(im1, ax=ax[1], label=label_1)
 
     if noise_map is not None:
-        im2 = ax[2].imshow(subtracted / noise_map, origin='lower', cmap='bwr', extent=extent)
+        res_data = subtracted / noise_map
+        vmax_res = float(np.max(np.abs(res_data)))
+        im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
         plt.colorbar(im2, ax=ax[2], label='linear')
     else:
-        im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent)
+        vmax_res = float(np.max(np.abs(subtracted)))
+        im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light')

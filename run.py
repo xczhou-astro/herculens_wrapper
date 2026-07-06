@@ -45,6 +45,95 @@ import numpy as np
 from astropy.io import fits
 
 
+def write_parameter_comparison(save_path, init_params_path, current_kwargs, type_list=None):
+    if type_list is None:
+        type_list = {}
+
+    inherited_kwargs = None
+    if init_params_path:
+        try:
+            init_run = resolve_init_run_dir(init_params_path)
+            init_json_path = os.path.join(init_run, 'kwargs_result.json')
+            if os.path.exists(init_json_path):
+                with open(init_json_path, 'r') as f:
+                    inherited_kwargs = json.load(f)
+        except Exception as e:
+            print(f"[comparison] Warning: failed to load inherited kwargs from {init_params_path}: {e}")
+
+    category_mapping = {
+        'kwargs_lens': ('lens_mass', 'lens_mass_type_list'),
+        'kwargs_lens_light': ('lens_light', 'lens_light_type_list'),
+        'kwargs_source': ('source_light', 'source_light_type_list'),
+        'kwargs_ps': ('point_source', 'point_source_type_list'),
+    }
+
+    output_lines = []
+
+    for kw_key, (category_name, type_key) in category_mapping.items():
+        curr_list = current_kwargs.get(kw_key, [])
+        if not curr_list:
+            continue
+
+        model_types = type_list.get(type_key, [])
+        category_header_written = False
+
+        for idx, comp in enumerate(curr_list):
+            if not isinstance(comp, dict):
+                continue
+
+            model_type = model_types[idx] if idx < len(model_types) else "UNKNOWN"
+            type_count = model_types.count(model_type)
+            if type_count > 1:
+                model_name = f"{model_type}_{idx}"
+            else:
+                model_name = model_type
+
+            model_header_written = False
+
+            for k, val in comp.items():
+                if k == 'pixels' or isinstance(val, dict) or isinstance(val, np.ndarray):
+                    continue
+                if isinstance(val, list):
+                    continue
+                if not isinstance(val, (int, float, np.number)):
+                    continue
+
+                inherited_val = None
+                if inherited_kwargs is not None:
+                    try:
+                        inh_list = inherited_kwargs.get(kw_key, [])
+                        if idx < len(inh_list):
+                            inherited_val = inh_list[idx].get(k, None)
+                    except Exception:
+                        pass
+
+                if len(curr_list) > 1:
+                    key_str = f"{k}_{idx}"
+                else:
+                    key_str = k
+
+                val_curr_str = f"{float(val):.3f}"
+                val_inh_str = f"{float(inherited_val):.3f}" if inherited_val is not None else "null"
+
+                if not category_header_written:
+                    output_lines.append(f"{category_name}:")
+                    category_header_written = True
+
+                if not model_header_written:
+                    output_lines.append(f"     {model_name}:")
+                    model_header_written = True
+
+                output_lines.append(f"            {key_str}: {val_inh_str} -> {val_curr_str}")
+
+    file_path = os.path.join(save_path, 'parameter_changes.txt')
+    try:
+        with open(file_path, 'w') as f:
+            f.write('\n'.join(output_lines) + '\n')
+        print(f"[plots] Saved parameter comparison to {file_path}")
+    except Exception as e:
+        print(f"Failed to write parameter comparison to {file_path}: {e}")
+
+
 def build_and_run(config_path=None):
     if config_path is None:
         if len(sys.argv) > 1 and not str(sys.argv[1]).startswith('-'):
@@ -398,6 +487,7 @@ def build_and_run(config_path=None):
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, run_save_path, type_list)
             with open(os.path.join(run_save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
+            write_parameter_comparison(run_save_path, run_args.init_params_path, kwargs_json, type_list)
 
             num_params_free = num_params
             if type_list.get('source_light_type_list') == ['PIXELATED']:
@@ -595,6 +685,7 @@ def build_and_run(config_path=None):
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list)
             with open(os.path.join(save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
+            write_parameter_comparison(save_path, args.init_params_path, kwargs_json, type_list)
 
             if 'loss_history' in extra:
                 history = {'loss_history': np.asarray(extra['loss_history']).tolist()}
@@ -630,6 +721,7 @@ def build_and_run(config_path=None):
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list)
             with open(os.path.join(save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
+            write_parameter_comparison(save_path, args.init_params_path, kwargs_json, type_list)
 
             # Save MCMC samples
             samples_npz_path = os.path.join(save_path, f'{sampler}_samples.npz')
