@@ -211,6 +211,42 @@ def build_and_run(config_path=None):
         image_data = center_crop(image_data, args.crop_size)
         noise_map = center_crop(noise_map, args.crop_size)
 
+    background_subtract_corner = int(getattr(args, 'background_subtract_corner', 0))
+    background_subtract_which_corner = str(getattr(args, 'background_subtract_which_corner', 'bottom_left')).lower().strip()
+    background_offset = 0.0
+
+    if background_subtract_corner > 0:
+        c = background_subtract_corner
+        if c > image_data.shape[0] or c > image_data.shape[1]:
+            raise ValueError(
+                f"background_subtract_corner={c} is larger than image dimensions {image_data.shape}"
+            )
+        
+        if background_subtract_which_corner == 'bottom_left':
+            corner_region = image_data[:c, :c]
+        elif background_subtract_which_corner == 'bottom_right':
+            corner_region = image_data[:c, -c:]
+        elif background_subtract_which_corner == 'top_left':
+            corner_region = image_data[-c:, :c]
+        elif background_subtract_which_corner == 'top_right':
+            corner_region = image_data[-c:, -c:]
+        else:
+            raise ValueError(
+                f"Unknown background_subtract_which_corner: {background_subtract_which_corner}. "
+                "Must be one of: 'bottom_left', 'bottom_right', 'top_left', 'top_right'"
+            )
+        
+        background_offset = float(np.nanmedian(corner_region))
+        image_data = image_data - background_offset
+        print(
+            f"[bkg] Derived global background offset of {background_offset:.6f} "
+            f"from {background_subtract_which_corner} corner ({c}x{c} pixels) and subtracted it."
+        )
+
+    args.background_offset = background_offset
+    with open(os.path.join(save_path, 'args.json'), 'w') as f:
+        json.dump(vars(args), f, indent=4, default=json_serializer)
+
     source_arc_mask = None
     source_arc_mask_path = getattr(args, 'source_arc_mask_path', None)
     if source_arc_mask_path is not None:
@@ -262,6 +298,9 @@ def build_and_run(config_path=None):
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
             source_arc_mask=source_arc_mask,
+            background_subtract_corner=background_subtract_corner,
+            background_subtract_which_corner=background_subtract_which_corner,
+            background_offset=background_offset,
         )
     except Exception as e:
         print(f'[plots] input_data.png skipped: {e}')
@@ -530,6 +569,7 @@ def build_and_run(config_path=None):
                 point_source_params_list=point_source_params_list,
                 regul_model=getattr(run_prob_model, 'regul_model', None),
                 param_list=param_list,
+                residual_vis_max=getattr(run_args, 'residual_vis_max', 0.0),
             )
 
             np.savez_compressed(
@@ -769,6 +809,7 @@ def build_and_run(config_path=None):
             point_source_params_list=point_source_params_list,
             regul_model=regul_model,
             param_list=param_list,
+            residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
         )
 
         np.savez_compressed(

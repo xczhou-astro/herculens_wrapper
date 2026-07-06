@@ -45,6 +45,10 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     # Load FITS data cutout, noise map, PSF, mask
     print("Loading data FITS files...")
     image_data = fits.getdata(args_dict['data_path']).astype(np.float64)
+    background_offset = float(args_dict.get('background_offset', 0.0))
+    if background_offset != 0.0:
+        image_data = image_data - background_offset
+        print(f"[bkg] Applied stored global background offset: {background_offset:.6f}")
     noise_map = fits.getdata(args_dict['noise_path']).astype(np.float64)
     psf_data = fits.getdata(args_dict['psf_path']).astype(np.float64)
     psf_data = psf_data / np.sum(psf_data) # normalize PSF

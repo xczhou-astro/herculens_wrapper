@@ -56,7 +56,7 @@ def _image_extent(ny, nx, pixel_scale):
     ]
 
 
-def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None):
+def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None, residual_vis_max=0.0):
     num = len(plot_data)
     fig, axes = plt.subplots(1, num, figsize=(4 * num + 2 * num, 5))
     if num == 1:
@@ -70,8 +70,12 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
             norm, cbar_label = None, 'linear'
         c_map = 'bwr' if (i == 2 or 'residual' in titles[i].lower() or 'chi' in titles[i].lower()) else 'twilight'
         if c_map == 'bwr':
-            vmax = float(np.max(np.abs(plot_data[i])))
-            vmin = -vmax
+            if residual_vis_max > 0.0:
+                vmax = float(residual_vis_max)
+                vmin = -vmax
+            else:
+                vmax = float(np.max(np.abs(plot_data[i])))
+                vmin = -vmax
         else:
             vmin, vmax = None, None
         im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm, vmin=vmin, vmax=vmax)
@@ -96,9 +100,14 @@ def plot_input_data(
     point_source_type_list=None,
     point_source_params_list=None,
     source_arc_mask=None,
+    background_subtract_corner=0,
+    background_subtract_which_corner='bottom_left',
+    background_offset=0.0,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
+
+    title_suffix = f" (bkg offset: {background_offset:.4f})" if background_offset != 0.0 else ""
 
     # 1. Linear Scale Plot
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -106,7 +115,7 @@ def plot_input_data(
     im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
     if source_arc_mask is not None:
         axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    axes[0].set_title('Image data')
+    axes[0].set_title(f'Image data{title_suffix}')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
     plt.colorbar(im0, ax=axes[0], label='linear')
@@ -156,7 +165,7 @@ def plot_input_data(
     im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_img)
     if source_arc_mask is not None:
         axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    axes[0].set_title('Image data (log)')
+    axes[0].set_title(f'Image data (log){title_suffix}')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
     plt.colorbar(im0, ax=axes[0], label=label_img)
@@ -200,7 +209,7 @@ def plot_input_data(
     plt.close()
 
 
-def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path):
+def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path, residual_vis_max=0.0):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
@@ -276,7 +285,10 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     ax[1, 1].set_title('Image Data')
     plt.colorbar(im4, ax=ax[1, 1], label='linear')
 
-    vmax_res = float(np.max(np.abs(residuals)))
+    if residual_vis_max > 0.0:
+        vmax_res = float(residual_vis_max)
+    else:
+        vmax_res = float(np.max(np.abs(residuals)))
     im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
@@ -411,7 +423,7 @@ def plot_source_plane(
 
 def plot_lens_light_subtracted_image(
     lens_image, kwargs_result, pixel_scale, image_data, noise_map=None, save_path=None,
-    plot_scale='linear',
+    plot_scale='linear', residual_vis_max=0.0,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -480,14 +492,20 @@ def plot_lens_light_subtracted_image(
 
     if noise_map is not None:
         res_data = subtracted / noise_map
-        vmax_res = float(np.max(np.abs(res_data)))
+        if residual_vis_max > 0.0:
+            vmax_res = float(residual_vis_max)
+        else:
+            vmax_res = float(np.max(np.abs(res_data)))
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
         plt.colorbar(im2, ax=ax[2], label='linear')
     else:
-        vmax_res = float(np.max(np.abs(subtracted)))
+        if residual_vis_max > 0.0:
+            vmax_res = float(residual_vis_max)
+        else:
+            vmax_res = float(np.max(np.abs(subtracted)))
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
@@ -911,6 +929,7 @@ def generate_run_plots(
     point_source_params_list=None,
     regul_model=None,
     param_list=None,
+    residual_vis_max=0.0,
 ):
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
@@ -937,6 +956,7 @@ def generate_run_plots(
         savefilename=os.path.join(save_path, 'best_fit_model_linear.png'),
         plot_scale='linear',
         contour_mask=mask,
+        residual_vis_max=residual_vis_max,
     ))
 
     _try('best_fit_model_log.png', lambda: display(
@@ -950,10 +970,11 @@ def generate_run_plots(
         savefilename=os.path.join(save_path, 'best_fit_model_log.png'),
         plot_scale='log',
         contour_mask=mask,
+        residual_vis_max=residual_vis_max,
     ))
 
     _try('image_plane.png', lambda: plot_image_plane(
-        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path, residual_vis_max=residual_vis_max,
     ))
 
     _try('source_plane_linear.png', lambda: plot_source_plane(
@@ -967,12 +988,12 @@ def generate_run_plots(
 
     _try('lens_light_subtracted_image.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
-        plot_scale='linear',
+        plot_scale='linear', residual_vis_max=residual_vis_max,
     ))
     
     _try('lens_light_subtracted_image_log.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
-        plot_scale='log',
+        plot_scale='log', residual_vis_max=residual_vis_max,
     ))
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
@@ -1058,11 +1079,13 @@ def recreate_best_fit_plots_for_run(run_dir):
     # Try to load pixel_scale from args.json
     pixel_scale = 0.08  # default fallback
     args_json_path = os.path.join(run_dir, 'args.json')
+    residual_vis_max = 0.0
     if os.path.exists(args_json_path):
         try:
             with open(args_json_path, 'r') as f:
                 args_dict = json.load(f)
                 pixel_scale = args_dict.get('pixel_scale', pixel_scale)
+                residual_vis_max = float(args_dict.get('residual_vis_max', 0.0))
         except Exception:
             pass
             
@@ -1093,6 +1116,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             savefilename=os.path.join(run_dir, 'best_fit_model_linear.png'),
             plot_scale='linear',
             contour_mask=source_arc_mask,
+            residual_vis_max=residual_vis_max,
         )
         print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_linear.png')}")
     except Exception as e:
@@ -1110,6 +1134,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             savefilename=os.path.join(run_dir, 'best_fit_model_log.png'),
             plot_scale='log',
             contour_mask=source_arc_mask,
+            residual_vis_max=residual_vis_max,
         )
         print(f"[plots] Saved {os.path.join(run_dir, 'best_fit_model_log.png')}")
     except Exception as e:
