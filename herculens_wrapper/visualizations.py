@@ -68,7 +68,8 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
             norm, cbar_label = _norm_from_plot_scale('log', plot_data[i])
         else:
             norm, cbar_label = None, 'linear'
-        im = axes[i].imshow(plot_data[i], origin='lower', cmap='bwr', extent=extent, norm=norm)
+        c_map = 'bwr' if (i == 2 or 'residual' in titles[i].lower() or 'chi' in titles[i].lower()) else 'twilight'
+        im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm)
         if contour_mask is not None and i < 2:
             axes[i].contour(np.asarray(contour_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         axes[i].set_xlabel('arcsec')
@@ -97,7 +98,7 @@ def plot_input_data(
     # 1. Linear Scale Plot
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
     if source_arc_mask is not None:
         axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     axes[0].set_title('Image data')
@@ -126,13 +127,13 @@ def plot_input_data(
                 k += 1
         axes[0].legend(loc='best', fontsize=8)
 
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='bwr', extent=extent)
+    im1 = axes[1].imshow(noise_map, origin='lower', cmap='twilight', extent=extent)
     axes[1].set_title('Noise map')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     plt.colorbar(im1, ax=axes[1], label='linear')
 
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='bwr')
+    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight')
     axes[2].set_title('PSF kernel')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
@@ -147,7 +148,7 @@ def plot_input_data(
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
     norm_img, label_img = _norm_from_plot_scale('log', image_data)
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_img)
+    im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_img)
     if source_arc_mask is not None:
         axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     axes[0].set_title('Image data (log)')
@@ -175,14 +176,14 @@ def plot_input_data(
         axes[0].legend(loc='best', fontsize=8)
 
     norm_noise, label_noise = _norm_from_plot_scale('log', noise_map)
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='bwr', extent=extent, norm=norm_noise)
+    im1 = axes[1].imshow(noise_map, origin='lower', cmap='twilight', extent=extent, norm=norm_noise)
     axes[1].set_title('Noise map (log)')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     plt.colorbar(im1, ax=axes[1], label=label_noise)
 
     norm_psf, label_psf = _norm_from_plot_scale('log', psf_data)
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='bwr', norm=norm_psf)
+    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight', norm=norm_psf)
     axes[2].set_title('PSF kernel (log)')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
@@ -240,7 +241,7 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
 
     fig, ax = plt.subplots(2, 3, figsize=(18, 10))
 
-    im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='bwr', extent=extent)
+    im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[0, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
@@ -248,15 +249,15 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     ax[0, 0].set_title('Extended Source (Lensed)')
     plt.colorbar(im0, ax=ax[0, 0], label='linear')
 
-    im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent)
+    im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='twilight', extent=extent)
     ax[0, 1].set_title('Lens Light')
     plt.colorbar(im1, ax=ax[0, 1], label='linear')
 
-    im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='bwr', extent=extent)
+    im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='twilight', extent=extent)
     ax[0, 2].set_title('Point Sources')
     plt.colorbar(im2, ax=ax[0, 2], label='linear')
 
-    im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='bwr', extent=extent)
+    im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[1, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
@@ -264,7 +265,7 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     ax[1, 0].set_title('Composite')
     plt.colorbar(im3, ax=ax[1, 0], label='linear')
 
-    im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='bwr', extent=extent)
+    im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[1, 1].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 1].set_title('Image Data')
@@ -379,11 +380,11 @@ def plot_source_plane(
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
+    im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title('Extended Source')
     plt.colorbar(im0, ax=axes[0], label=cbar_label)
 
-    im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='bwr', norm=norm)
+    im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
         axes[1].scatter(ras, decs, s=30, marker='*', color=colors[i], label=f'PS {i + 1}')
     for caust_x, caust_y in caustics:
@@ -424,14 +425,14 @@ def plot_lens_light_subtracted_image(
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
 
     norm_0, label_0 = _norm_from_plot_scale(plot_scale, image_data)
-    im0 = ax[0].imshow(image_data, origin='lower', cmap='bwr', extent=extent, norm=norm_0)
+    im0 = ax[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_0)
     if mask is not None:
         ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[0].set_title('Image data')
     plt.colorbar(im0, ax=ax[0], label=label_0)
 
     norm_1, label_1 = _norm_from_plot_scale(plot_scale, model_lens_light)
-    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='bwr', extent=extent, norm=norm_1)
+    im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='twilight', extent=extent, norm=norm_1)
     
     # Overlay 1-sigma contours for Gaussian/MGE components (if present)
     if 'kwargs_lens_light' in kwargs_result:
@@ -497,7 +498,7 @@ def plot_lens_light_subtracted_image(
 
 def plot_weights(weights_list, save_path):
     plt.figure(figsize=(6, 5))
-    plt.imshow(weights_list[0][0], origin='lower', cmap='bwr')
+    plt.imshow(weights_list[0][0], origin='lower', cmap='twilight')
     plt.colorbar()
     plt.title('Regularization weights')
     plt.savefig(os.path.join(save_path, 'weights_list.png'), dpi=150, bbox_inches='tight')
@@ -836,7 +837,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
     
     # --- Panel 0: 2D Convergence Map ---
     norm_kappa, cbar_label_kappa = _norm_from_plot_scale('log', kappa_map)
-    im_kappa = axes[0].imshow(kappa_map, origin='lower', extent=extent, cmap='bwr', norm=norm_kappa)
+    im_kappa = axes[0].imshow(kappa_map, origin='lower', extent=extent, cmap='twilight', norm=norm_kappa)
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
     axes[0].set_title(r'2D Convergence ($\kappa$) Map')
@@ -861,7 +862,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
     else:
         norm_mag = LogNorm(vmin=0.1, vmax=100.0)
         
-    im_mag = axes[1].imshow(abs_mag_map, origin='lower', extent=extent, cmap='bwr', norm=norm_mag)
+    im_mag = axes[1].imshow(abs_mag_map, origin='lower', extent=extent, cmap='twilight', norm=norm_mag)
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
     axes[1].set_title(r'2D Magnification ($|\mu|$) Map')

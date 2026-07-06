@@ -108,7 +108,7 @@ def prove_mge_correctness(run_dir, order='ascending', num_mges=3):
     fig, ax = plt.subplots(1, 2, figsize=(16, 7))
     
     # ------------------ PANEL 0: 2D MGE Image + Ellipses ------------------
-    im = ax[0].imshow(model_custom_sb, origin='lower', cmap='bwr', extent=extent)
+    im = ax[0].imshow(model_custom_sb, origin='lower', cmap='twilight', extent=extent)
     plt.colorbar(im, ax=ax[0], label='Surface Brightness (flux / arcsec$^2$)')
     
     color_cycle = ['black', 'darkgreen', 'indigo', 'darkred', 'purple', 'teal', 'darkorange']

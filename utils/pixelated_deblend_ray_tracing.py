@@ -182,7 +182,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     # Helpers for rendering in linear/log
     pixel_area = float(lens_image.Grid.pixel_area)
     
-    def render_im(ax, img_raw, extent, title, colormap='bwr', is_log=False):
+    def render_im(ax, img_raw, extent, title, colormap='twilight', is_log=False):
         img = img_raw / pixel_area
         if is_log:
             vmin = np.percentile(img[img > 0], 10) if np.any(img > 0) else 1e-4
@@ -223,7 +223,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
 
     # Panel 5: Segmented Source Plane (always linear scale!)
     ax_src = axes[0, 4]
-    im_src = ax_src.imshow(source_pixels / pixel_area, origin='lower', cmap='bwr', extent=src_plot_extent)
+    im_src = ax_src.imshow(source_pixels / pixel_area, origin='lower', cmap='twilight', extent=src_plot_extent)
     plt.colorbar(im_src, ax=ax_src, label='flux / arcsec$^2$')
         
     # Overlay colors/contours for each component on source plane
