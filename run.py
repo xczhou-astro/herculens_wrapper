@@ -91,11 +91,13 @@ def write_parameter_comparison(save_path, init_params_path, current_kwargs, type
             model_header_written = False
 
             for k, val in comp.items():
-                if k == 'pixels' or isinstance(val, dict) or isinstance(val, np.ndarray):
+                if k == 'pixels' or isinstance(val, dict):
                     continue
-                if isinstance(val, list):
-                    continue
-                if not isinstance(val, (int, float, np.number)):
+                try:
+                    if hasattr(val, 'shape') and val.shape != ():
+                        continue
+                    float_val = float(val)
+                except Exception:
                     continue
 
                 inherited_val = None
@@ -103,7 +105,12 @@ def write_parameter_comparison(save_path, init_params_path, current_kwargs, type
                     try:
                         inh_list = inherited_kwargs.get(kw_key, [])
                         if idx < len(inh_list):
-                            inherited_val = inh_list[idx].get(k, None)
+                            raw_inh = inh_list[idx].get(k, None)
+                            if raw_inh is not None:
+                                if hasattr(raw_inh, 'shape') and raw_inh.shape != ():
+                                    pass
+                                else:
+                                    inherited_val = float(raw_inh)
                     except Exception:
                         pass
 
@@ -112,8 +119,8 @@ def write_parameter_comparison(save_path, init_params_path, current_kwargs, type
                 else:
                     key_str = k
 
-                val_curr_str = f"{float(val):.3f}"
-                val_inh_str = f"{float(inherited_val):.3f}" if inherited_val is not None else "null"
+                val_curr_str = f"{float_val:.3f}"
+                val_inh_str = f"{inherited_val:.3f}" if inherited_val is not None else "null"
 
                 if not category_header_written:
                     output_lines.append(f"{category_name}:")
@@ -125,7 +132,7 @@ def write_parameter_comparison(save_path, init_params_path, current_kwargs, type
 
                 output_lines.append(f"            {key_str}: {val_inh_str} -> {val_curr_str}")
 
-    file_path = os.path.join(save_path, 'parameter_changes.txt')
+    file_path = os.path.join(save_path, 'parameter_shifts.txt')
     try:
         with open(file_path, 'w') as f:
             f.write('\n'.join(output_lines) + '\n')
