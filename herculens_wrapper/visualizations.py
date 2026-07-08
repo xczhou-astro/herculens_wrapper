@@ -79,7 +79,7 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
         else:
             vmin, vmax = None, None
         im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm, vmin=vmin, vmax=vmax)
-        if contour_mask is not None and i < 2:
+        if contour_mask is not None:
             axes[i].contour(np.asarray(contour_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')

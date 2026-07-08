@@ -521,6 +521,17 @@ def build_and_run(config_path=None):
                 np.savez_compressed(samples_npz_path, **npz_dict)
                 print(f"Saved MCMC samples to {samples_npz_path}")
 
+                # Save parameter uncertainties (kwargs_sigma)
+                try:
+                    sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in mcmc_samples.items()}
+                    kwargs_sigma = run_prob_model.params2kwargs(sigma_params)
+                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list)
+                    with open(os.path.join(run_save_path, 'kwargs_sigma.json'), 'w') as f:
+                        json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
+                    print(f"[hmc] Saved parameter uncertainties to kwargs_sigma.json")
+                except Exception as e:
+                    print(f"[hmc] Failed to compute/save kwargs_sigma.json: {e}")
+
                 # Save extra info (excluding flat_samples)
                 extra_json_path = os.path.join(run_save_path, f'{run_args.sampler}_extra.json')
                 extra_dict = {k: v for k, v in extra.items() if k != 'flat_samples'}
@@ -775,6 +786,17 @@ def build_and_run(config_path=None):
             npz_dict = {k: np.asarray(v) for k, v in mcmc_samples.items()}
             np.savez_compressed(samples_npz_path, **npz_dict)
             print(f"Saved MCMC samples to {samples_npz_path}")
+
+            # Save parameter uncertainties (kwargs_sigma)
+            try:
+                sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in mcmc_samples.items()}
+                kwargs_sigma = prob_model.params2kwargs(sigma_params)
+                kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, save_path, type_list)
+                with open(os.path.join(save_path, 'kwargs_sigma.json'), 'w') as f:
+                    json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
+                print(f"[hmc] Saved parameter uncertainties to kwargs_sigma.json")
+            except Exception as e:
+                print(f"[hmc] Failed to compute/save kwargs_sigma.json: {e}")
 
             # Save extra info (excluding flat_samples)
             extra_json_path = os.path.join(save_path, f'{sampler}_extra.json')
