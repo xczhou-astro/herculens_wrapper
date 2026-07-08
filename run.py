@@ -45,6 +45,25 @@ import numpy as np
 from astropy.io import fits
 
 
+def zip_asymmetric_uncertainties(obj_lower, obj_upper):
+    if obj_lower is None or obj_upper is None:
+        return obj_lower
+    if isinstance(obj_lower, dict) and isinstance(obj_upper, dict):
+        res = {}
+        for k in obj_lower:
+            res[k] = zip_asymmetric_uncertainties(obj_lower[k], obj_upper[k])
+        return res
+    elif isinstance(obj_lower, list) and isinstance(obj_upper, list):
+        return [zip_asymmetric_uncertainties(l, u) for l, u in zip(obj_lower, obj_upper)]
+    else:
+        val_l = np.asarray(obj_lower)
+        val_u = np.asarray(obj_upper)
+        if val_l.ndim == 0:
+            return [float(val_l), float(val_u)]
+        else:
+            return np.stack([val_l, val_u], axis=0)
+
+
 def write_parameter_comparison(save_path, init_params_path, current_kwargs, type_list=None):
     if type_list is None:
         type_list = {}
@@ -517,7 +536,10 @@ def build_and_run(config_path=None):
                     with open(os.path.join(run_save_path, 'svi_loss_history.json'), 'w') as f:
                         json.dump(history, f, indent=4)
             elif run_args.sampler in MCMC_SAMPLERS:
-                mcmc_samples, best_params, extra = run_hmc(run_prob_model, run_args, init_params)
+                if run_args.init_params_path is None:
+                    print("[hmc] Skipping HMC run: init_params_path is None.")
+                    return None
+                mcmc_samples, best_params, extra = run_hmc(run_prob_model, run_args, init_params, init_params_path=run_args.init_params_path)
                 flat_samples = extra.get('flat_samples', None)
 
                 # Save MCMC samples
@@ -528,9 +550,15 @@ def build_and_run(config_path=None):
 
                 # Save parameter uncertainties (kwargs_sigma)
                 try:
-                    sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in mcmc_samples.items()}
-                    kwargs_sigma = run_prob_model.params2kwargs(sigma_params)
-                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list)
+                    p16 = {k: np.percentile(np.asarray(v), 16, axis=0) for k, v in mcmc_samples.items()}
+                    p50 = {k: np.percentile(np.asarray(v), 50, axis=0) for k, v in mcmc_samples.items()}
+                    p84 = {k: np.percentile(np.asarray(v), 84, axis=0) for k, v in mcmc_samples.items()}
+                    sigma_params_lower = {k: p50[k] - p16[k] for k in mcmc_samples.keys()}
+                    sigma_params_upper = {k: p84[k] - p50[k] for k in mcmc_samples.keys()}
+                    kwargs_sigma_lower = run_prob_model.params2kwargs(sigma_params_lower)
+                    kwargs_sigma_upper = run_prob_model.params2kwargs(sigma_params_upper)
+                    kwargs_sigma = zip_asymmetric_uncertainties(kwargs_sigma_lower, kwargs_sigma_upper)
+                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list, pixels_filename='kwargs_sigma_pixels.npy')
                     with open(os.path.join(run_save_path, 'kwargs_sigma.json'), 'w') as f:
                         json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
                     print(f"[hmc] Saved parameter uncertainties to kwargs_sigma.json")
@@ -782,7 +810,9 @@ def build_and_run(config_path=None):
             reduced_chi2 = metrics['REDUCED_CHI2']
 
         elif sampler in MCMC_SAMPLERS:
-            mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params)
+            if args.init_params_path is None:
+                raise ValueError("MCMC/HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
+            mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params, init_params_path=args.init_params_path)
             flat_samples = extra.get('flat_samples', None)
 
             kwargs_best = prob_model.params2kwargs(best_params)
@@ -799,9 +829,15 @@ def build_and_run(config_path=None):
 
             # Save parameter uncertainties (kwargs_sigma)
             try:
-                sigma_params = {k: np.std(np.asarray(v), axis=0) for k, v in mcmc_samples.items()}
-                kwargs_sigma = prob_model.params2kwargs(sigma_params)
-                kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, save_path, type_list)
+                p16 = {k: np.percentile(np.asarray(v), 16, axis=0) for k, v in mcmc_samples.items()}
+                p50 = {k: np.percentile(np.asarray(v), 50, axis=0) for k, v in mcmc_samples.items()}
+                p84 = {k: np.percentile(np.asarray(v), 84, axis=0) for k, v in mcmc_samples.items()}
+                sigma_params_lower = {k: p50[k] - p16[k] for k in mcmc_samples.keys()}
+                sigma_params_upper = {k: p84[k] - p50[k] for k in mcmc_samples.keys()}
+                kwargs_sigma_lower = prob_model.params2kwargs(sigma_params_lower)
+                kwargs_sigma_upper = prob_model.params2kwargs(sigma_params_upper)
+                kwargs_sigma = zip_asymmetric_uncertainties(kwargs_sigma_lower, kwargs_sigma_upper)
+                kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, save_path, type_list, pixels_filename='kwargs_sigma_pixels.npy')
                 with open(os.path.join(save_path, 'kwargs_sigma.json'), 'w') as f:
                     json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
                 print(f"[hmc] Saved parameter uncertainties to kwargs_sigma.json")

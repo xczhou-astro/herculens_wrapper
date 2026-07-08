@@ -1032,10 +1032,7 @@ def generate_run_plots(
     if mcmc_samples is not None:
         _try('corner_traced_params.png', lambda: plot_corner_traced_params(mcmc_samples, save_path, param_list=param_list))
 
-    if flat_samples is not None and prob_model is not None and init_params is not None:
-        _try('corner_emcee.png', lambda: plot_corner_emcee(
-            flat_samples, prob_model, init_params, save_path, param_list=param_list,
-        ))
+
 
 
 def recreate_best_fit_plots_for_run(run_dir):

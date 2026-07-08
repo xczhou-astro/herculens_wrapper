@@ -194,15 +194,51 @@ def pixelated_stage_init_from_parametric(params):
     return {k: v for k, v in params.items() if k.startswith(allowed_prefixes)}
 
 
-def run_hmc(prob_model, args, init_params):
-    sampler_type = getattr(args, 'sampler_type_hmc_numpyro', 'nuts').lower()
-    num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 500))
-    num_samples = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
-    num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
-    from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
-    chain_method = resolve_chain_method_hmc_numpyro(args)
-    progress_bar = bool(getattr(args, 'progress_bar_hmc_numpyro', True))
-
+def run_hmc(prob_model, args, init_params, init_params_path=None):
+    if init_params_path is None:
+        raise ValueError("HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
+        
+    import pickle
+    import numpyro.infer.autoguide as autoguide
+    from herculens_wrapper.custom_gibbs import MultiHMCGibbs
+    from herculens_wrapper.utils import resolve_project_path
+    
+    init_dir = resolve_project_path(init_params_path)
+    params_pkl_path = os.path.join(init_dir, 'svi_guide_params.pkl')
+    if not os.path.exists(params_pkl_path):
+        raise FileNotFoundError(f"svi_guide_params.pkl not found in prior run: {init_dir}")
+        
+    print(f"[hmc] Loading SVI guide parameters from {params_pkl_path}...")
+    with open(params_pkl_path, 'rb') as f:
+        guide_params = pickle.load(f)
+        
+    # Recreate and prime the SVI guide
+    guide = autoguide.AutoLowRankMultivariateNormal(prob_model.model)
+    with numpyro.handlers.seed(rng_seed=args.random_seed):
+        guide()
+        
+    # Extract physical parameter medians
+    init_params = guide.median(guide_params)
+    
+    # Classify parameter names dynamically
+    vars_pixel = [k for k in init_params.keys() if 'pixels_wn_' in k]
+    vars_power = [k for k in init_params.keys() if k in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid')]
+    vars_lens_light_hmc = [k for k in init_params.keys() if k.startswith('lens_light_')]
+    vars_mass = [k for k in init_params.keys() if k.startswith('lens_') and not k.startswith('lens_light_')]
+    vars_other = [k for k in init_params.keys() if k not in vars_pixel + vars_power + vars_lens_light_hmc + vars_mass]
+    vars_other = [k for k in vars_other if k != 'pixels_source_grid']
+    
+    print(f"[hmc] Grouped parameters for Gibbs-within-HMC sampling:")
+    print(f"  Pixelated source: {vars_pixel}")
+    print(f"  Matérn power spectrum: {vars_power}")
+    print(f"  Lens light: {vars_lens_light_hmc}")
+    print(f"  Lens mass: {vars_mass}")
+    print(f"  Other parameters: {vars_other}")
+    
+    # Map physical parameters to unconstrained space
+    init_params_unconst = to_unconstrained(prob_model, init_params)
+    init_params_unconst = {k: v.astype(jnp.float64) for k, v in init_params_unconst.items()}
+    
     def init_to_value_or_defer(site, values=None, defer=infer.init_to_median(num_samples=25)):
         if values is None:
             values = {}
@@ -210,59 +246,191 @@ def run_hmc(prob_model, args, init_params):
             if site["name"] in values:
                 return values[site["name"]]
             return defer(site)
-
-    init_fun = partial(init_to_value_or_defer, values=init_params) if init_params else infer.init_to_median(num_samples=25)
-
-    if sampler_type == 'nuts':
-        kernel = infer.NUTS(prob_model.model, init_strategy=init_fun)
-    elif sampler_type == 'hmc':
-        kernel = infer.HMC(prob_model.model, init_strategy=init_fun)
-    else:
-        raise ValueError(f"Unknown sampler_type_hmc_numpyro: {sampler_type}")
-
-    print(f"[{sampler_type}] Running NumPyro MCMC (warmup={num_warmup}, samples={num_samples}, chains={num_chains}, chain_method={chain_method!r})...")
-    mcmc = infer.MCMC(
-        kernel,
-        num_warmup=num_warmup,
-        num_samples=num_samples,
-        num_chains=num_chains,
-        chain_method=chain_method,
-        progress_bar=progress_bar,
+            
+    init_fun = partial(init_to_value_or_defer, values=init_params)
+    
+    # Set up inner kernels
+    # Kernel 1: NUTS for source pixels, Matérn, lens light, and other variables
+    dense_mass_blocks_1 = []
+    if vars_power:
+        dense_mass_blocks_1.append(tuple(vars_power))
+        
+    # Group lens light parameters by component index
+    from collections import defaultdict
+    lens_light_by_idx = defaultdict(list)
+    for k in vars_lens_light_hmc:
+        try:
+            idx = int(k.split('_')[-1])
+            lens_light_by_idx[idx].append(k)
+        except ValueError:
+            pass
+    for idx, params_group in sorted(lens_light_by_idx.items()):
+        dense_mass_blocks_1.append(tuple(params_group))
+        
+    kernel_1 = infer.NUTS(
+        prob_model.model,
+        init_strategy=init_fun,
+        target_accept_prob=0.95,
+        max_tree_depth=10,
+        dense_mass=dense_mass_blocks_1 if dense_mass_blocks_1 else False,
     )
-
+    
+    # Kernel 2: NUTS for lens mass
+    dense_mass_blocks_2 = []
+    lens_mass_by_idx = defaultdict(list)
+    for k in vars_mass:
+        try:
+            idx = int(k.split('_')[-1])
+            lens_mass_by_idx[idx].append(k)
+        except ValueError:
+            pass
+    for idx, params_group in sorted(lens_mass_by_idx.items()):
+        dense_mass_blocks_2.append(tuple(params_group))
+        
+    kernel_2 = infer.NUTS(
+        prob_model.model,
+        init_strategy=init_fun,
+        target_accept_prob=0.9,
+        max_tree_depth=10,
+        dense_mass=dense_mass_blocks_2 if dense_mass_blocks_2 else False,
+    )
+    
+    inner_kernels = [kernel_1, kernel_2]
+    
+    # Outer Gibbs kernel
+    outer_kernel = MultiHMCGibbs(
+        inner_kernels,
+        gibbs_sites_list=[
+            vars_pixel + vars_power + vars_lens_light_hmc + vars_other,
+            vars_mass
+        ],
+    )
+    
+    num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 500))
+    num_samples_total = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
+    checkpoint_interval = int(getattr(args, 'checkpoint_interval_hmc_numpyro', 250))
+    num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
+    from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
+    chain_method = resolve_chain_method_hmc_numpyro(args)
+    progress_bar = bool(getattr(args, 'progress_bar_hmc_numpyro', True))
+    
+    if checkpoint_interval <= 0 or checkpoint_interval > num_samples_total:
+        checkpoint_interval = num_samples_total
+        
+    batch_sizes = []
+    current_samples = 0
+    while current_samples < num_samples_total:
+        size = min(checkpoint_interval, num_samples_total - current_samples)
+        batch_sizes.append(size)
+        current_samples += size
+        
     rng_key = jax.random.PRNGKey(args.random_seed)
-    mcmc.run(rng_key)
-
-    samples = mcmc.get_samples(group_by_chain=False)
+    rng_key, rng_key_ = jax.random.split(rng_key)
+    
+    all_samples = []
+    save_path = getattr(args, 'save_path', '.')
+    os.makedirs(save_path, exist_ok=True)
+    
+    checkpoint_path = os.path.join(save_path, "hmc_checkpoint.pkl")
+    start_batch_idx = 0
+    last_state = None
+    
+    if os.path.exists(checkpoint_path):
+        print(f"[hmc] Found existing checkpoint at {checkpoint_path}. Attempting to resume...")
+        try:
+            with open(checkpoint_path, 'rb') as f:
+                ckpt = pickle.load(f)
+            all_samples = ckpt['all_samples']
+            last_state = ckpt['last_state']
+            start_batch_idx = ckpt['completed_batches']
+            print(f"[hmc] Resuming from batch {start_batch_idx+1} (completed {start_batch_idx} batches).")
+        except Exception as e:
+            print(f"[hmc] Failed to load checkpoint: {e}. Starting from scratch.")
+            all_samples = []
+            last_state = None
+            start_batch_idx = 0
+            
+    for i, size in enumerate(batch_sizes):
+        if i < start_batch_idx:
+            print(f"[hmc] Batch {i+1} already completed. Skipping.")
+            continue
+            
+        print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
+        if i == 0:
+            mcmc = infer.MCMC(
+                outer_kernel,
+                num_warmup=num_warmup,
+                num_samples=size,
+                num_chains=num_chains,
+                progress_bar=progress_bar,
+                chain_method=chain_method,
+            )
+            mcmc.run(
+                rng_key_,
+                init_params=init_params_unconst,
+            )
+        else:
+            # Re-instantiate MCMC for subsequent batches bypassing warmup
+            mcmc = infer.MCMC(
+                outer_kernel,
+                num_warmup=0,
+                num_samples=size,
+                num_chains=num_chains,
+                progress_bar=progress_bar,
+                chain_method=chain_method,
+            )
+            mcmc.post_warmup_state = last_state
+            mcmc.run(
+                last_state.rng_key,
+            )
+            
+        last_state = mcmc.last_state
+        
+        # Get samples from this batch
+        batch_samples = mcmc.get_samples(group_by_chain=False)
+        all_samples.append(batch_samples)
+        
+        batch_path = os.path.join(save_path, f"hmc_samples_batch_{i}.npz")
+        npz_dict = {k: np.asarray(v) for k, v in batch_samples.items()}
+        np.savez_compressed(batch_path, **npz_dict)
+        print(f"[hmc] Saved MCMC batch {i+1} to: {batch_path}")
+        
+        # Save checkpoint pkl for resumption
+        try:
+            with open(checkpoint_path, 'wb') as f:
+                pickle.dump({
+                    'last_state': last_state,
+                    'all_samples': all_samples,
+                    'completed_batches': i + 1,
+                }, f)
+            print(f"[hmc] Saved checkpoint to: {checkpoint_path}")
+        except Exception as e:
+            print(f"[warning] Failed to save checkpoint pkl: {e}")
+            
+    # Concatenate all batches along the sample axis (axis 0)
+    samples = {}
+    for k in all_samples[0].keys():
+        samples[k] = jnp.concatenate([b[k] for b in all_samples], axis=0)
+        
     map_params = tree_median(samples)
-
-    # Flatten unconstrained samples for plotting / trace analysis
+    
+    # Flatten unconstrained samples for trace analysis
     try:
-        unconstrained_samples = mcmc.get_samples(group_by_chain=False, raw_samples=True)
-        from jax.flatten_util import ravel_pytree
-        first_key = list(unconstrained_samples.keys())[0]
-        n_samples = len(unconstrained_samples[first_key])
         flat_samples_list = []
-        for i in range(n_samples):
-            sample_u = {k: v[i] for k, v in unconstrained_samples.items()}
+        n_total_samples = len(samples[list(samples.keys())[0]])
+        for i in range(n_total_samples):
+            sample_c = {k: v[i] for k, v in samples.items()}
+            sample_u = to_unconstrained(prob_model, sample_c)
+            from jax.flatten_util import ravel_pytree
             flat_val, _ = ravel_pytree(sample_u)
             flat_samples_list.append(np.asarray(flat_val))
         flat_samples = np.array(flat_samples_list)
     except Exception as e:
-        print(f"[warning] Failed to get raw unconstrained samples directly: {e}. Falling back to converting constrained samples.")
-        from jax.flatten_util import ravel_pytree
-        first_key = list(samples.keys())[0]
-        n_samples = len(samples[first_key])
-        flat_samples_list = []
-        for i in range(n_samples):
-            sample_c = {k: v[i] for k, v in samples.items()}
-            sample_u = to_unconstrained(prob_model, sample_c)
-            flat_val, _ = ravel_pytree(sample_u)
-            flat_samples_list.append(np.asarray(flat_val))
-        flat_samples = np.array(flat_samples_list)
-
+        print(f"[warning] Failed to flatten samples: {e}")
+        flat_samples = None
+        
     extra_fields = {
         'flat_samples': flat_samples,
     }
-
+    
     return samples, map_params, extra_fields
