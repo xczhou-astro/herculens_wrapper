@@ -503,8 +503,13 @@ def build_and_run(config_path=None):
                         with open(os.path.join(run_save_path, 'kwargs_sigma.json'), 'w') as f:
                             json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
                         print(f"[svi] Saved parameter uncertainties to kwargs_sigma.json")
+                        
+                        import pickle
+                        with open(os.path.join(run_save_path, 'svi_guide_params.pkl'), 'wb') as f:
+                            pickle.dump(extra['result'].params, f)
+                        print(f"[svi] Saved guide parameters to svi_guide_params.pkl")
                     except Exception as e:
-                        print(f"[svi] Failed to compute/save kwargs_sigma.json: {e}")
+                        print(f"[svi] Failed to compute/save SVI parameters or uncertainties: {e}")
             elif run_args.sampler == 'optax':
                 best_params, extra = run_optax(run_prob_model, run_args, init_params)
                 if 'loss_history' in extra:
@@ -734,8 +739,13 @@ def build_and_run(config_path=None):
                         with open(os.path.join(save_path, 'kwargs_sigma.json'), 'w') as f:
                             json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
                         print(f"[svi] Saved parameter uncertainties to kwargs_sigma.json")
+                        
+                        import pickle
+                        with open(os.path.join(save_path, 'svi_guide_params.pkl'), 'wb') as f:
+                            pickle.dump(extra['result'].params, f)
+                        print(f"[svi] Saved guide parameters to svi_guide_params.pkl")
                     except Exception as e:
-                        print(f"[svi] Failed to compute/save kwargs_sigma.json: {e}")
+                        print(f"[svi] Failed to compute/save SVI parameters or uncertainties: {e}")
             elif sampler == 'optax':
                 best_params, extra = run_optax(prob_model, args, init_params)
 

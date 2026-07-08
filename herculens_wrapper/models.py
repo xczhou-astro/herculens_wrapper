@@ -21,6 +21,25 @@ from herculens.LightModel.light_model import LightModel
 from herculens.MassModel.mass_model import MassModel
 from herculens.PointSourceModel.point_source_model import PointSourceModel
 
+# Monkey patch LightModel.surface_brightness to clean extra keys from kwargs_list (kwargs_source)
+_original_surface_brightness = LightModel.surface_brightness
+
+def _patched_surface_brightness(self, x, y, kwargs_list, k=None, **kwargs):
+    if kwargs_list is not None:
+        clean_kwargs_list = []
+        for kw in kwargs_list:
+            if isinstance(kw, dict):
+                clean_kw = {key: val for key, val in kw.items() 
+                            if key not in ['n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid']}
+                clean_kwargs_list.append(clean_kw)
+            else:
+                clean_kwargs_list.append(kw)
+        kwargs_list = clean_kwargs_list
+    return _original_surface_brightness(self, x, y, kwargs_list, k=k, **kwargs)
+
+LightModel.surface_brightness = _patched_surface_brightness
+
+
 def _split_scheduler(
     max_iterations,
     init_value=0.01,
@@ -952,7 +971,23 @@ def create_prob_model(
                                 n_value=pixelated_prior.get('n_value', None),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
-                            kwargs_source = [{'pixels': source_pixels}]
+                            n_val = params.get('n_source_grid', pixelated_prior.get('n_value', None))
+                            rho_val = params.get('rho_source_grid', None)
+                            sigma_val = params.get('sigma_source_grid', None)
+                            
+                            if n_val is not None:
+                                n_val = jnp.ravel(jnp.asarray(n_val))[0]
+                            if rho_val is not None:
+                                rho_val = jnp.ravel(jnp.asarray(rho_val))[0]
+                            if sigma_val is not None:
+                                sigma_val = jnp.ravel(jnp.asarray(sigma_val))[0]
+                                
+                            kwargs_source = [{
+                                'pixels': source_pixels,
+                                'n_source_grid': n_val,
+                                'rho_source_grid': rho_val,
+                                'sigma_source_grid': sigma_val,
+                            }]
             else:
                 kwargs_source = []
                 if fix_source_light and kwargs_source_light_fixed is not None:
