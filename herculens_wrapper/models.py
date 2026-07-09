@@ -1048,6 +1048,19 @@ def create_prob_model(
     model_instance.starlet = starlet
     model_instance.regul_weights = regul_weights
     model_instance.nscales = nscales
+    model_instance.lens_image = lens_image
+    model_instance.image_data = image_data
+    model_instance.noise_map = noise_map
+    model_instance.param_list = param_list
+    p_scale = 0.08
+    try:
+        p_scale = float(lens_image.Grid.pixel_width)
+    except Exception:
+        pass
+    if args is not None:
+        model_instance.pixel_scale = getattr(args, 'pixel_scale', p_scale)
+    else:
+        model_instance.pixel_scale = p_scale
     return model_instance
 
 

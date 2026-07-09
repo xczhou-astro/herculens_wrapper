@@ -209,7 +209,7 @@ def plot_input_data(
     plt.close()
 
 
-def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path, residual_vis_max=0.0):
+def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path, residual_vis_max=0.0, output_filename='image_plane.png'):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
@@ -300,7 +300,7 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
         a.set_ylabel('arcsec')
 
     plt.tight_layout()
-    plt.savefig(os.path.join(save_path, 'image_plane.png'), dpi=300, bbox_inches='tight')
+    plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -326,14 +326,28 @@ def plot_source_plane(
         extent = list(lens_image.SourceModel.pixel_grid.extent)
         xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
     else:
-        fov = num_pixel * source_pixel_scale
-        x = np.linspace(-fov / 2, fov / 2, num_pixel)
-        y = np.linspace(-fov / 2, fov / 2, num_pixel)
-        xx, yy = np.meshgrid(x, y)
+        mask = getattr(lens_image, 'source_arc_mask', None)
+        if mask is None:
+            try:
+                ny, nx = lens_image.Grid.num_pixel_axes
+                p_scale = float(lens_image.Grid.pixel_width)
+            except Exception:
+                ny, nx = num_pixel, num_pixel
+                p_scale = source_pixel_scale
+            extent = _image_extent(ny, nx, p_scale)
+            x = np.linspace(extent[0], extent[1], nx)
+            y = np.linspace(extent[2], extent[3], ny)
+            xx, yy = np.meshgrid(x, y)
+        else:
+            fov = num_pixel * source_pixel_scale
+            x = np.linspace(-fov / 2, fov / 2, num_pixel)
+            y = np.linspace(-fov / 2, fov / 2, num_pixel)
+            xx, yy = np.meshgrid(x, y)
+            extent = [-fov / 2, fov / 2, -fov / 2, fov / 2]
+
         source_for_plot = np.asarray(
             lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
         )
-        extent = [-fov / 2, fov / 2, -fov / 2, fov / 2]
 
     # Initialize adaptive limits defaulting to the full grid extent
     xmin_sq, xmax_sq = extent[0], extent[1]
@@ -351,8 +365,10 @@ def plot_source_plane(
             if np.any(mask_flat):
                 x_src_masked = np.asarray(x_grid_src)[mask_flat]
                 y_src_masked = np.asarray(y_grid_src)[mask_flat]
-                xmin, xmax = float(np.nanmin(x_src_masked)), float(np.nanmax(x_src_masked))
-                ymin, ymax = float(np.nanmin(y_src_masked)), float(np.nanmax(y_src_masked))
+                xmin = float(np.nanpercentile(x_src_masked, 0.5))
+                xmax = float(np.nanpercentile(x_src_masked, 99.5))
+                ymin = float(np.nanpercentile(y_src_masked, 0.5))
+                ymax = float(np.nanpercentile(y_src_masked, 99.5))
                 
                 # Make the footprint mask a square based on the larger direction
                 cx = 0.5 * (xmin + xmax)
@@ -363,10 +379,11 @@ def plot_source_plane(
                 padding = 0.1
                 half_size = 0.5 * max_dim * (1.0 + 2.0 * padding)
                 
-                xmin_sq = cx - half_size
-                xmax_sq = cx + half_size
-                ymin_sq = cy - half_size
-                ymax_sq = cy + half_size
+                # Clip the viewport to the actual evaluated grid extent
+                xmin_sq = max(cx - half_size, extent[0])
+                xmax_sq = min(cx + half_size, extent[1])
+                ymin_sq = max(cy - half_size, extent[2])
+                ymax_sq = min(cy + half_size, extent[3])
                 
                 grid_mask = (xx >= xmin_sq) & (xx <= xmax_sq) & (yy >= ymin_sq) & (yy <= ymax_sq)
                 source_for_plot = np.where(grid_mask, source_for_plot, 0.0)

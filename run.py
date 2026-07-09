@@ -174,7 +174,8 @@ def build_and_run(config_path=None):
     spec.loader.exec_module(config_module)
 
     args = run_arguments_namespace(config_module, config_path)
-    args = normalize_run_args_paths(args)
+    config_dir = os.path.dirname(os.path.abspath(config_path))
+    args = normalize_run_args_paths(args, config_dir=config_dir)
     _configure_cuda_from_args(args)
 
     if args.save_path is None:

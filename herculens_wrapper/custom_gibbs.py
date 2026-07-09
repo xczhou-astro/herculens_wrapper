@@ -75,11 +75,10 @@ class MultiHMCGibbs(MCMCKernel):
         )
 
     def postprocess_fn(self, args, kwargs):
-        # All kernels use the same model just conditioned on different sites.  The conditioning
-        # does not change the `postprocess_fn`, so just pick one and use it in without passing in
-        # a `_cond_sites` kwarg.
+        from numpyro.infer.util import constrain_fn
+        base_model = self.inner_kernels[0].model
         _ = kwargs.pop("_cond_sites", {})
-        return self.inner_kernels[0].postprocess_fn(args, kwargs)
+        return partial(constrain_fn, base_model, args, kwargs)
 
     def init(self, rng_key, num_warmup, init_params, model_args, model_kwargs):
         model_kwargs = {} if model_kwargs is None else model_kwargs.copy()

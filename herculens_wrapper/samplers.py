@@ -44,6 +44,78 @@ def tree_median(tree):
     return jax.tree_util.tree_map(lambda x: jnp.median(x, axis=0), tree)
 
 
+def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=None):
+    try:
+        import arviz as az
+        import matplotlib.pyplot as plt
+        import os
+        import numpy as np
+
+        # Focus on lens mass and power spectrum related parameters
+        target_keys = [
+            k for k in samples.keys() 
+            if (('lens_' in k and 'lens_light_' not in k) or k in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid'))
+        ]
+
+        if not target_keys:
+            return
+
+        # Sort the target keys following the order defined in the mass configuration if available
+        ordered_keys = []
+        if prob_model is not None and hasattr(prob_model, 'param_list'):
+            lens_mass_params_list = prob_model.param_list.get('lens_mass_params_list', [])
+            for i, mass_profile in enumerate(lens_mass_params_list):
+                for param_name in mass_profile.keys():
+                    expected_key = f"lens_{param_name}_{i}"
+                    if expected_key in target_keys and expected_key not in ordered_keys:
+                        ordered_keys.append(expected_key)
+
+        # Append any remaining target_keys (like power spectrum related parameters)
+        for k in target_keys:
+            if k not in ordered_keys:
+                ordered_keys.append(k)
+
+        # Format the data for arviz: dict of shape (num_chains, samples_per_chain)
+        arviz_data = {}
+        for k in ordered_keys:
+            val = np.asarray(samples[k])
+            total_samples = val.shape[0]
+            samples_per_chain = total_samples // num_chains
+            if samples_per_chain > 0:
+                arviz_data[k] = val.reshape((num_chains, samples_per_chain))
+
+        if not arviz_data:
+            return
+
+        # Convert dictionary to InferenceData first to support new ArviZ 1.2+ API
+        idata = az.from_dict({'posterior': arviz_data})
+
+        # 1. Generate convergence summary using arviz
+        try:
+            summary_df = az.summary(idata)
+            summary_path = os.path.join(target_dir, f"mcmc_summary_{suffix}.txt")
+            with open(summary_path, 'w') as f:
+                f.write(summary_df.to_string())
+            print(f"[hmc] Saved arviz summary to {summary_path}")
+        except Exception as es:
+            print(f"[warning] Failed to compute arviz summary: {es}")
+
+        # 2. Generate trace and density plots using arviz
+        try:
+            axes = az.plot_trace_dist(idata, var_names=ordered_keys)
+            fig = plt.gcf()
+            fig.tight_layout()
+            plot_path = os.path.join(target_dir, f"mcmc_diagnostics_{suffix}.png")
+            fig.savefig(plot_path, dpi=200, bbox_inches='tight')
+            plt.close('all')
+            print(f"[hmc] Saved arviz diagnostics plots to {plot_path}")
+        except Exception as ep:
+            print(f"[warning] Failed to plot arviz trace: {ep}")
+
+    except Exception as e:
+        print(f"[warning] Failed to generate arviz diagnostics: {e}")
+
+
 def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None):
     if num_params_free is None:
         num_params_free = num_params
@@ -219,6 +291,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         
     # Extract physical parameter medians
     init_params = guide.median(guide_params)
+    init_params = {k: v for k, v in init_params.items() if k != 'pixels_source_grid'}
     
     # Classify parameter names dynamically
     vars_pixel = [k for k in init_params.keys() if 'pixels_wn_' in k]
@@ -365,9 +438,15 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 progress_bar=progress_bar,
                 chain_method=chain_method,
             )
+            init_params_unconst_chain = init_params_unconst
+            if num_chains > 1 and init_params_unconst is not None:
+                init_params_unconst_chain = jax.tree_util.tree_map(
+                    lambda x: jnp.broadcast_to(x, (num_chains,) + jnp.shape(x)),
+                    init_params_unconst
+                )
             mcmc.run(
                 rng_key_,
-                init_params=init_params_unconst,
+                init_params=init_params_unconst_chain,
             )
         else:
             # Re-instantiate MCMC for subsequent batches bypassing warmup
@@ -407,6 +486,76 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         except Exception as e:
             print(f"[warning] Failed to save checkpoint pkl: {e}")
             
+        # Generate intermediate diagnostics after each batch (image plane and source plane plots)
+        try:
+            # 1. Concatenate all samples collected so far
+            temp_samples = {}
+            for k in all_samples[0].keys():
+                temp_samples[k] = jnp.concatenate([b[k] for b in all_samples], axis=0)
+            
+            # 2. Compute current medians
+            temp_medians = {k: np.median(np.asarray(v), axis=0) for k, v in temp_samples.items()}
+            temp_kwargs = prob_model.params2kwargs(temp_medians)
+            
+            # 3. Create diagnostics subfolder
+            diag_dir = os.path.join(save_path, 'diagnostics')
+            os.makedirs(diag_dir, exist_ok=True)
+            
+            # 4. Generate plots using current medians
+            from herculens_wrapper.visualizations import plot_image_plane, plot_source_plane
+            
+            img_data = getattr(prob_model, 'image_data', None)
+            ns_map = getattr(prob_model, 'noise_map', None)
+            l_image = getattr(prob_model, 'lens_image', None)
+            p_scale = getattr(prob_model, 'pixel_scale', 0.08)
+            
+            if img_data is not None and l_image is not None:
+                # Image plane plot
+                try:
+                    plot_image_plane(
+                        l_image,
+                        temp_kwargs,
+                        p_scale,
+                        img_data,
+                        ns_map,
+                        diag_dir,
+                        output_filename=f"image_plane_batch_{i}.png",
+                    )
+                    print(f"[hmc] Saved intermediate image plane visualization to {diag_dir}/image_plane_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate image plane: {ex}")
+                
+                # Source plane plot (linear)
+                try:
+                    plot_source_plane(
+                        l_image,
+                        temp_kwargs,
+                        diag_dir,
+                        plot_scale='linear',
+                        output_filename=f"source_plane_linear_batch_{i}.png",
+                    )
+                    print(f"[hmc] Saved intermediate source plane (linear) visualization to {diag_dir}/source_plane_linear_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate source plane linear: {ex}")
+                    
+                # Source plane plot (log)
+                try:
+                    plot_source_plane(
+                        l_image,
+                        temp_kwargs,
+                        diag_dir,
+                        plot_scale='log',
+                        output_filename=f"source_plane_log_batch_{i}.png",
+                    )
+                    print(f"[hmc] Saved intermediate source plane (log) visualization to {diag_dir}/source_plane_log_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate source plane log: {ex}")
+                
+                # Save ArviZ diagnostics for this batch
+                save_hmc_diagnostics(temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model)
+        except Exception as e:
+            print(f"[warning] Failed to generate intermediate diagnostics: {e}")
+            
     # Concatenate all batches along the sample axis (axis 0)
     samples = {}
     for k in all_samples[0].keys():
@@ -428,6 +577,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     except Exception as e:
         print(f"[warning] Failed to flatten samples: {e}")
         flat_samples = None
+        
+    # Save final ArviZ diagnostics
+    save_hmc_diagnostics(samples, num_chains, save_path, "final", prob_model=prob_model)
         
     extra_fields = {
         'flat_samples': flat_samples,

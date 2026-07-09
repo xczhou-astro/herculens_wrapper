@@ -8,6 +8,7 @@ herculens/
 # Ignore python caches
 __pycache__/
 **/__pycache__/
+**/.ipynb_checkpoints/
 
 # Ignore OS-generated files
 .DS_Store

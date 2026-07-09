@@ -79,14 +79,15 @@ def fit_dof_and_reduced_chi2(chi2, image_data, num_params, mask_bool=None):
     return float(chi2 / dof), n_data, n_fit, dof
 
 
-def resolve_project_path(path):
-    """Resolve a config path relative to the project root (parent of herculens_wrapper)."""
+def resolve_project_path(path, config_dir=None):
+    """Resolve a config path relative to the config_dir (if provided) or project root."""
     if path is None:
         return None
     path = str(path)
     if os.path.isabs(path):
         return os.path.abspath(path)
-    return os.path.abspath(os.path.join(PROJECT_ROOT, path))
+    base_dir = config_dir if config_dir is not None else PROJECT_ROOT
+    return os.path.abspath(os.path.join(base_dir, path))
 
 
 def _resolve_single_config_spec(spec):
@@ -216,8 +217,8 @@ def resolve_init_run_dir(init_params_path):
     return os.path.dirname(path)
 
 
-def normalize_run_args_paths(args):
-    """Resolve relative filesystem paths in the run namespace against PROJECT_ROOT."""
+def normalize_run_args_paths(args, config_dir=None):
+    """Resolve relative filesystem paths in the run namespace against config_dir or PROJECT_ROOT."""
     path_keys = (
         'data_path',
         'noise_path',
@@ -232,7 +233,7 @@ def normalize_run_args_paths(args):
         if hasattr(args, key):
             value = getattr(args, key)
             if value is not None and isinstance(value, str):
-                setattr(args, key, resolve_project_path(value))
+                setattr(args, key, resolve_project_path(value, config_dir=config_dir))
     return args
 
 
