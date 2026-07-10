@@ -502,7 +502,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             os.makedirs(diag_dir, exist_ok=True)
             
             # 4. Generate plots using current medians
-            from herculens_wrapper.visualizations import plot_image_plane, plot_source_plane
+            from herculens_wrapper.visualizations import plot_image_plane, plot_source_plane, display
             
             img_data = getattr(prob_model, 'image_data', None)
             ns_map = getattr(prob_model, 'noise_map', None)
@@ -524,6 +524,47 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     print(f"[hmc] Saved intermediate image plane visualization to {diag_dir}/image_plane_batch_{i}.png")
                 except Exception as ex:
                     print(f"[warning] Failed to plot intermediate image plane: {ex}")
+                
+                # Best fit model plots (linear and log)
+                try:
+                    best_fit_model = l_image.model(**temp_kwargs)
+                    chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
+                    mask = getattr(l_image, 'source_arc_mask', None)
+                    if mask is not None:
+                        mask = np.asarray(mask)
+                    residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
+                    
+                    display(
+                        [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                        titles=[
+                            'Best fit model',
+                            'Image data',
+                            f'Residuals (chi^2 = {chi2:.2f})',
+                        ],
+                        pixel_scale=p_scale,
+                        savefilename=os.path.join(diag_dir, f"best_fit_model_linear_batch_{i}.png"),
+                        plot_scale='linear',
+                        contour_mask=mask,
+                        residual_vis_max=residual_vis_max,
+                    )
+                    print(f"[hmc] Saved intermediate best fit model (linear) visualization to {diag_dir}/best_fit_model_linear_batch_{i}.png")
+                    
+                    display(
+                        [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                        titles=[
+                            'Best fit model',
+                            'Image data',
+                            f'Residuals (chi^2 = {chi2:.2f})',
+                        ],
+                        pixel_scale=p_scale,
+                        savefilename=os.path.join(diag_dir, f"best_fit_model_log_batch_{i}.png"),
+                        plot_scale='log',
+                        contour_mask=mask,
+                        residual_vis_max=residual_vis_max,
+                    )
+                    print(f"[hmc] Saved intermediate best fit model (log) visualization to {diag_dir}/best_fit_model_log_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate best fit model: {ex}")
                 
                 # Source plane plot (linear)
                 try:
