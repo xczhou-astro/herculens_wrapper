@@ -40,8 +40,7 @@ def init_params_unconstrained(prob_model, init_params):
 
 def tree_median(tree):
     import jax
-    import jax.numpy as jnp
-    return jax.tree_util.tree_map(lambda x: jnp.median(x, axis=0), tree)
+    return jax.tree_util.tree_map(lambda x: np.median(x, axis=0), tree)
 
 
 def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=None):
@@ -467,6 +466,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         
         # Get samples from this batch
         batch_samples = mcmc.get_samples(group_by_chain=False)
+        # Convert to CPU NumPy arrays to prevent GPU OOM
+        batch_samples = {k: np.asarray(v) for k, v in batch_samples.items()}
         all_samples.append(batch_samples)
         
         batch_path = os.path.join(save_path, f"hmc_samples_batch_{i}.npz")
@@ -491,7 +492,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             # 1. Concatenate all samples collected so far
             temp_samples = {}
             for k in all_samples[0].keys():
-                temp_samples[k] = jnp.concatenate([b[k] for b in all_samples], axis=0)
+                temp_samples[k] = np.concatenate([b[k] for b in all_samples], axis=0)
             
             # 2. Compute current medians
             temp_medians = {k: np.median(np.asarray(v), axis=0) for k, v in temp_samples.items()}
@@ -600,7 +601,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     # Concatenate all batches along the sample axis (axis 0)
     samples = {}
     for k in all_samples[0].keys():
-        samples[k] = jnp.concatenate([b[k] for b in all_samples], axis=0)
+        samples[k] = np.concatenate([b[k] for b in all_samples], axis=0)
         
     map_params = tree_median(samples)
     
