@@ -288,8 +288,21 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     with numpyro.handlers.seed(rng_seed=args.random_seed):
         guide()
         
+    # Get active latent sample sites from the current guide/model
+    active_sites = [
+        name for name, site in guide.prototype_trace.items()
+        if site["type"] == "sample" and not site["is_observed"]
+    ]
+    
     # Extract physical parameter medians
-    init_params = guide.median(guide_params)
+    try:
+        init_params_from_guide = guide.median(guide_params)
+        init_params = {k: v for k, v in init_params_from_guide.items() if k in active_sites}
+    except Exception as e:
+        print(f"[warning] Failed to extract init_params from SVI guide due to model mismatch ({e}). "
+              f"Falling back to parameters loaded from kwargs_result.json.")
+        init_params = {k: v for k, v in init_params.items() if k in active_sites}
+        
     init_params = {k: v for k, v in init_params.items() if k != 'pixels_source_grid'}
     
     # Classify parameter names dynamically
@@ -413,6 +426,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             with open(checkpoint_path, 'rb') as f:
                 ckpt = pickle.load(f)
             all_samples = ckpt['all_samples']
+            # Convert loaded samples to CPU NumPy arrays to prevent GPU OOM if checkpoint is old
+            all_samples = [
+                {k: np.asarray(v) for k, v in batch.items()}
+                for batch in all_samples
+            ]
             last_state = ckpt['last_state']
             start_batch_idx = ckpt['completed_batches']
             print(f"[hmc] Resuming from batch {start_batch_idx+1} (completed {start_batch_idx} batches).")
@@ -597,6 +615,12 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 save_hmc_diagnostics(temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model)
         except Exception as e:
             print(f"[warning] Failed to generate intermediate diagnostics: {e}")
+            
+        # Free MCMC object and trigger garbage collection to release GPU memory
+        if 'mcmc' in locals():
+            del mcmc
+        import gc
+        gc.collect()
             
     # Concatenate all batches along the sample axis (axis 0)
     samples = {}

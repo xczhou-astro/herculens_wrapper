@@ -2,6 +2,10 @@ import json
 import os
 from functools import partial
 
+def safe_float(val, default):
+    return float(val) if val is not None else default
+
+
 import jax
 import optax
 import numpy as np
@@ -211,12 +215,13 @@ class PowerSpectrum:
         sigma_low=1e-5,
         sigma_high=10,
         positive=True,
+        n_low=0.0001,
     ):
         with numpyro.plate(f'{plate_name} power spectrum params - [1]', 1):
             if n_value is None:
                 n = numpyro.sample(
                     f'n_{param_name}',
-                    TruncatedWedge(-1, 0.0001, n_high),
+                    TruncatedWedge(-1, n_low, n_high),
                 )
             else:
                 n = numpyro.deterministic(f'n_{param_name}', jnp.atleast_1d(n_value))
@@ -301,8 +306,10 @@ class PowerSpectrum:
                 k_values,
                 k_zero=pixelated_prior.get('power_init_k_zero', None),
                 n_value=pixelated_prior.get('n_value'),
-                sigma_low=float(pixelated_prior.get('sigma_low', 1e-5)),
-                sigma_high=float(pixelated_prior.get('sigma_high', 10.0)),
+                n_low=safe_float(pixelated_prior.get('n_value_low'), 0.0001),
+                n_high=safe_float(pixelated_prior.get('n_value_high'), 100.0),
+                sigma_low=safe_float(pixelated_prior.get('sigma_low'), 1e-5),
+                sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
                 positive=bool(pixelated_prior.get('positive', True)),
             )
             numpyro.sample('obs', dist.Normal(source['pixels'], noise_level).to_event(2), obs=image_obs)
@@ -730,8 +737,10 @@ def create_prob_model(
                                 k_values,
                                 k_zero=pixelated_prior.get('k_zero', None),
                                 n_value=pixelated_prior.get('n_value', None),
-                                sigma_low=float(pixelated_prior.get('sigma_low', 1e-5)),
-                                sigma_high=float(pixelated_prior.get('sigma_high', 10.0)),
+                                n_low=safe_float(pixelated_prior.get('n_value_low'), 0.0001),
+                                n_high=safe_float(pixelated_prior.get('n_value_high'), 100.0),
+                                sigma_low=safe_float(pixelated_prior.get('sigma_low'), 1e-5),
+                                sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
                             prior_source_light = [{'pixels': res['pixels']}]
