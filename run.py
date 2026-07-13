@@ -590,7 +590,11 @@ def build_and_run(config_path=None):
                 else:
                     num_params_free = num_params - (ny * nx)
 
-            best_fit_model = lens_image.model(**kwargs_best)
+            if run_args.sampler in MCMC_SAMPLERS and mcmc_samples is not None and 'model_image' in mcmc_samples:
+                img_arr = np.asarray(mcmc_samples['model_image'])
+                best_fit_model = np.median(img_arr, axis=tuple(range(img_arr.ndim - 2)))
+            else:
+                best_fit_model = lens_image.model(**kwargs_best)
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
             log_likelihood = float(run_prob_model.log_likelihood(best_params))
             metrics = save_metrics(
@@ -851,7 +855,11 @@ def build_and_run(config_path=None):
             with open(extra_json_path, 'w') as f:
                 json.dump(extra_dict, f, indent=4, default=json_serializer)
 
-            best_fit_model = lens_image.model(**kwargs_best)
+            if sampler in MCMC_SAMPLERS and mcmc_samples is not None and 'model_image' in mcmc_samples:
+                img_arr = np.asarray(mcmc_samples['model_image'])
+                best_fit_model = np.median(img_arr, axis=tuple(range(img_arr.ndim - 2)))
+            else:
+                best_fit_model = lens_image.model(**kwargs_best)
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
             log_likelihood = float(prob_model.log_likelihood(best_params))
             metrics = save_metrics(

@@ -81,7 +81,7 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
             total_samples = val.shape[0]
             samples_per_chain = total_samples // num_chains
             if samples_per_chain > 0:
-                arviz_data[k] = val.reshape((num_chains, samples_per_chain))
+                arviz_data[k] = val.reshape((num_chains, samples_per_chain) + val.shape[1:])
 
         if not arviz_data:
             return
@@ -269,6 +269,19 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     if init_params_path is None:
         raise ValueError("HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
         
+    def _concatenate_batches(all_samples, num_chains):
+        samples = {}
+        for k in all_samples[0].keys():
+            reshaped_batches = []
+            for b in all_samples:
+                val = b[k]
+                batch_samples_per_chain = val.shape[0] // num_chains
+                reshaped_val = val.reshape((num_chains, batch_samples_per_chain) + val.shape[1:])
+                reshaped_batches.append(reshaped_val)
+            concat_val = np.concatenate(reshaped_batches, axis=1)
+            samples[k] = concat_val.reshape((-1,) + concat_val.shape[2:])
+        return samples
+
     import pickle
     import numpyro.infer.autoguide as autoguide
     from herculens_wrapper.custom_gibbs import MultiHMCGibbs
@@ -508,9 +521,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         # Generate intermediate diagnostics after each batch (image plane and source plane plots)
         try:
             # 1. Concatenate all samples collected so far
-            temp_samples = {}
-            for k in all_samples[0].keys():
-                temp_samples[k] = np.concatenate([b[k] for b in all_samples], axis=0)
+            temp_samples = _concatenate_batches(all_samples, num_chains)
             
             # 2. Compute current medians
             temp_medians = {k: np.median(np.asarray(v), axis=0) for k, v in temp_samples.items()}
@@ -546,7 +557,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 
                 # Best fit model plots (linear and log)
                 try:
-                    best_fit_model = l_image.model(**temp_kwargs)
+                    if 'model_image' in temp_samples:
+                        best_fit_model = np.median(temp_samples['model_image'], axis=0)
+                    else:
+                        best_fit_model = l_image.model(**temp_kwargs)
                     chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
                     mask = getattr(l_image, 'source_arc_mask', None)
                     if mask is not None:
@@ -622,10 +636,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         import gc
         gc.collect()
             
-    # Concatenate all batches along the sample axis (axis 0)
-    samples = {}
-    for k in all_samples[0].keys():
-        samples[k] = np.concatenate([b[k] for b in all_samples], axis=0)
+    # Concatenate all batches along the sample axis
+    samples = _concatenate_batches(all_samples, num_chains)
         
     map_params = tree_median(samples)
     

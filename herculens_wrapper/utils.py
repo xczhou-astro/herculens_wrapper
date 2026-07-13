@@ -179,6 +179,17 @@ def log_jax_device_layout(args):
 
     n_devices = jax.local_device_count()
     n_config_gpus = count_configured_gpus(args.gpus)
+
+    devices = jax.devices()
+    for i, device in enumerate(devices):
+        stats = device.memory_stats()
+        bytes_limit = stats['bytes_limit'] / 1024**2
+        bytes_in_use = stats['bytes_in_use'] / 1024**2
+        # bytes_reserved = stats['bytes_reserved'] / 1024 ** 2
+        bytes_available = bytes_limit - bytes_in_use
+
+        print(f'Device {i}: {bytes_in_use:.2f} MB in use, {bytes_available:.2f} MB available')
+
     n_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
     print(
         f'JAX devices: {jax.devices()} '

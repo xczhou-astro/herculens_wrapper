@@ -862,6 +862,7 @@ def create_prob_model(
                 model_params['kwargs_point_source'] = prior_point_source
 
             model_image = lens_image.model(**model_params)
+            numpyro.deterministic('model_image', model_image)
             model_var = noise.C_D_model(model_image)
             model_std = jnp.sqrt(model_var)
             obs = jnp.asarray(image_data)

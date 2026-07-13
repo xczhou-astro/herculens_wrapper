@@ -23,3 +23,5 @@ herculens_wrapper.egg-info/
 
 utils/__pycache__
 utils/recreate*
+
+power_spectrum_source_model*
