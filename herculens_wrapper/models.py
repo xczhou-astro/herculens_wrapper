@@ -1062,6 +1062,7 @@ def create_prob_model(
     model_instance.image_data = image_data
     model_instance.noise_map = noise_map
     model_instance.param_list = param_list
+    model_instance.type_list = type_list
     p_scale = 0.08
     try:
         p_scale = float(lens_image.Grid.pixel_width)

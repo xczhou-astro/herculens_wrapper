@@ -404,7 +404,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         ],
     )
     
-    num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 500))
+    num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 1000))
     num_samples_total = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
     checkpoint_interval = int(getattr(args, 'checkpoint_interval_hmc_numpyro', 250))
     num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
@@ -530,6 +530,25 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             # 3. Create diagnostics subfolder
             diag_dir = os.path.join(save_path, 'diagnostics')
             os.makedirs(diag_dir, exist_ok=True)
+            
+            # Write intermediate kwargs_result JSON to diagnostics
+            try:
+                from herculens_wrapper.utils import kwargs_best_to_json_pixelated_npy, json_serializer
+                
+                type_list = getattr(prob_model, 'type_list', {})
+                temp_kwargs_json = kwargs_best_to_json_pixelated_npy(
+                    temp_kwargs, 
+                    diag_dir, 
+                    type_list, 
+                    pixels_filename=f'kwargs_source_pixels_batch_{i}.npy'
+                )
+                
+                kwargs_json_path = os.path.join(diag_dir, f'kwargs_result_batch_{i}.json')
+                with open(kwargs_json_path, 'w') as f:
+                    json.dump(temp_kwargs_json, f, indent=4, default=json_serializer)
+                print(f"[hmc] Saved intermediate kwargs_result JSON to {kwargs_json_path}")
+            except Exception as ex_json:
+                print(f"[warning] Failed to save intermediate kwargs_result JSON: {ex_json}")
             
             # 4. Generate plots using current medians
             from herculens_wrapper.visualizations import plot_image_plane, plot_source_plane, display

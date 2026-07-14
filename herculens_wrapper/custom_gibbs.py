@@ -114,7 +114,7 @@ class MultiHMCGibbs(MCMCKernel):
                         if name in kernel._cond_sites:
                             cond_sites_kdx[name] = init_params_constrained[name]
                         elif name in init_params:
-                            init_params_kdx[name] = init_params[name]
+                            init_params_kdx[name] = init_params_constrained[name]
                     elif name in kernel._cond_sites:
                         cond_sites_kdx[name] = site["value"]
                 model_kwargs_kdx = model_kwargs | {'_cond_sites': cond_sites_kdx}
