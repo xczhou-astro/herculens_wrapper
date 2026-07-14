@@ -583,11 +583,10 @@ def plot_loss_curve(loss_curve, save_path, lr_curve=None):
 
     primary_loss = loss_curve_2d[:, 0]
     best_loss = float(np.nanmin(primary_loss))
-    y_tail_delta = (y_tail[:, 0] if y_tail.ndim == 2 else y_tail) - best_loss
-    ax_tail.plot(x_tail, y_tail_delta, color='tab:red', linewidth=2.0, label='Tail mean (delta)')
-    ax_tail.axhline(0.0, color='k', linestyle='--', linewidth=1.0)
+    y_tail_smoothed = y_tail[:, 0] if y_tail.ndim == 2 else y_tail
+    ax_tail.plot(x_tail, y_tail_smoothed, color='tab:red', linewidth=2.0, label='Tail mean')
     ax_tail.set_xlabel('Iteration')
-    ax_tail.set_ylabel('Delta loss to best')
+    ax_tail.set_ylabel('Loss')
     ax_tail.set_title(f'Loss Tail (last 20%, best={best_loss:.6f})')
     ax_tail.grid(True, alpha=0.3)
     ax_tail.legend(loc='upper right')
