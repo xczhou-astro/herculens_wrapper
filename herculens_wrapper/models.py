@@ -428,6 +428,19 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
                 else:
                     kwargs_model[k] = v
         kwargs['kwargs_source'].append(kwargs_model)
+
+    # 4. Point source
+    kwargs_point_source = []
+    for model in param_list.get('point_source_params_list', []):
+        kwargs_model = {}
+        for k, v in model.items():
+            if isinstance(v, list):
+                kwargs_model[k] = v[0]
+            else:
+                kwargs_model[k] = v
+        kwargs_point_source.append(kwargs_model)
+    if len(kwargs_point_source) > 0:
+        kwargs['kwargs_point_source'] = kwargs_point_source
         
     return kwargs
 

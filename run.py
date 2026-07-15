@@ -15,6 +15,7 @@ import os
 import shlex
 import sys
 import time
+from datetime import datetime
 
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _PROJECT_ROOT not in sys.path:
@@ -185,6 +186,10 @@ def build_and_run(config_path=None):
         )
 
     save_path = args.save_path
+
+    if os.path.exists(save_path):
+        raise ValueError('Save path already exists: ' + save_path)
+
     os.makedirs(save_path, exist_ok=True)
     print(f'Starting run in: {save_path} (sampler={args.sampler!r})')
 
@@ -909,6 +914,14 @@ def build_and_run(config_path=None):
 
 if __name__ == '__main__':
     start_time = time.time()
+    start = datetime.now()
+    formatted_start = start.strftime("%Y-%m-%d %H:%M:%S")
+    print(f'Start at {formatted_start}')
+    
     build_and_run()
+    end = datetime.now()
+    formatted_end = end.strftime("%Y-%m-%d %H:%M:%S")
     end_time = time.time()
     print(f'Time taken: {end_time - start_time} seconds')
+
+    print(f'End at {formatted_end}')

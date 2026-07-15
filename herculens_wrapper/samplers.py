@@ -301,6 +301,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     with numpyro.handlers.seed(rng_seed=args.random_seed):
         guide()
         
+    # medians = guide.median(guide_params)
+
     # Get active latent sample sites from the current guide/model
     active_sites = [
         name for name, site in guide.prototype_trace.items()
