@@ -3,6 +3,7 @@
 from numpyro.distributions import biject_to
 import json
 import os
+import pickle
 
 import numpy as np
 import optax
@@ -283,73 +284,20 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             samples[k] = concat_val.reshape((-1,) + concat_val.shape[2:])
         return samples
 
-    import pickle
-    import numpyro.infer.autoguide as autoguide
     from herculens_wrapper.custom_gibbs import MultiHMCGibbs
-    from herculens_wrapper.utils import resolve_project_path
-    
-    init_dir = resolve_project_path(init_params_path)
-    params_pkl_path = os.path.join(init_dir, 'svi_guide_params.pkl')
-    if not os.path.exists(params_pkl_path):
-        raise FileNotFoundError(f"svi_guide_params.pkl not found in prior run: {init_dir}")
-        
-    print(f"[hmc] Loading SVI guide parameters from {params_pkl_path}...")
-    with open(params_pkl_path, 'rb') as f:
-        guide_params = pickle.load(f)
-        
-    # Recreate and prime the SVI guide
-    guide = autoguide.AutoLowRankMultivariateNormal(prob_model.model)
-    with numpyro.handlers.seed(rng_seed=args.random_seed):
-        guide()
-        
-    # medians = guide.median(guide_params)
-
-    # Get active latent sample sites from the current guide/model
-    active_sites = [
-        name for name, site in guide.prototype_trace.items()
-        if site["type"] == "sample" and not site["is_observed"]
-    ]
-    
     from numpyro.handlers import trace, seed
-    from numpyro.distributions.transforms import biject_to
-    from herculens_wrapper.models import create_prob_model
-
-    # Rebuild full SVI model trace (without fixed components) to map guide_params correctly
-    svi_prob_model = create_prob_model(
-        prob_model.param_list,
-        prob_model.type_list,
-        prob_model.lens_image,
-        prob_model.image_data,
-        prob_model.noise_map,
-        fix_lens_light=False,
-        fix_lens_mass=False,
-        fix_source_light=False,
-        args=args
-    )
-
-    with seed(rng_seed=42):
-        svi_model_trace = trace(svi_prob_model.model).get_trace()
-
-    execution_order_sites = [
-        name for name, site in svi_model_trace.items()
+    
+    # Trace the model to find active latent sample sites
+    with seed(rng_seed=args.random_seed):
+        model_trace = trace(prob_model.model).get_trace()
+        
+    active_sites = [
+        name for name, site in model_trace.items()
         if site["type"] == "sample" and not site["is_observed"]
     ]
-
-    flat_loc = guide_params['auto_loc']
-    execution_medians = {}
-    idx = 0
-    for name in execution_order_sites:
-        site = svi_model_trace[name]
-        shape = site['value'].shape
-        size = jnp.size(site['value'])
-        unconstrained_val = flat_loc[idx : idx + size].reshape(shape)
-        # Apply bijector corresponding to the site's support constraint
-        constrained_val = biject_to(site['fn'].support)(unconstrained_val)
-        execution_medians[name] = constrained_val
-        idx += size
-
-    # Filter parameter medians to only keep the active sites for this HMC model
-    init_params = {k: v for k, v in execution_medians.items() if k in active_sites}
+    
+    # Filter the input physical init_params to only keep active sites
+    init_params = {k: v for k, v in init_params.items() if k in active_sites}
     init_params = {k: v for k, v in init_params.items() if k != 'pixels_source_grid'}
 
     # print(init_params)

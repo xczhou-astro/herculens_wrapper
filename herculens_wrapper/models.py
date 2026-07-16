@@ -34,7 +34,7 @@ def _patched_surface_brightness(self, x, y, kwargs_list, k=None, **kwargs):
         for kw in kwargs_list:
             if isinstance(kw, dict):
                 clean_kw = {key: val for key, val in kw.items() 
-                            if key not in ['n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid']}
+                            if key not in ['pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid']}
                 clean_kwargs_list.append(clean_kw)
             else:
                 clean_kwargs_list.append(kw)
@@ -585,6 +585,10 @@ def create_prob_model(
                     npy_path = os.path.join(init_dir, npy_name)
                     ks0 = dict(ks[0])
                     ks0['pixels'] = np.load(npy_path)
+                    if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+                        npy_wn_name = ks0['pixels_wn'].get('file')
+                        npy_wn_path = os.path.join(init_dir, npy_wn_name)
+                        ks0['pixels_wn'] = np.load(npy_wn_path)
                     ks = list(ks)
                     ks[0] = ks0
                     init_info['kwargs_source'] = ks
@@ -1007,6 +1011,7 @@ def create_prob_model(
                                 
                             kwargs_source = [{
                                 'pixels': source_pixels,
+                                'pixels_wn': params.get('pixels_wn_source_grid'),
                                 'n_source_grid': n_val,
                                 'rho_source_grid': rho_val,
                                 'sigma_source_grid': sigma_val,
@@ -1262,6 +1267,10 @@ def get_init_params(
                 npy_path = os.path.join(init_dir, npy_name)
                 ks0 = dict(ks[0])
                 ks0['pixels'] = np.load(npy_path)
+                if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+                    npy_wn_name = ks0['pixels_wn'].get('file')
+                    npy_wn_path = os.path.join(init_dir, npy_wn_name)
+                    ks0['pixels_wn'] = np.load(npy_wn_path)
                 ks = list(ks)
                 ks[0] = ks0
                 init_info['kwargs_source'] = ks
@@ -1311,20 +1320,16 @@ def get_init_params(
                     print("[Init] Loading target source image directly for wavelet_penalty...")
                     loaded_params['source_pixels'] = pixels_proj
                 else:
-                    ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
-                    k_grid = PowerSpectrum.K_grid((ny, nx))
-                    k_values = k_grid.k
-                    pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
-                    
-                    print("[Init] Fitting Matérn power spectrum parameters to target source image...")
-                    power_fit = PowerSpectrum.fit_power_spectrum_init(
-                        pixels_proj,
-                        k_values,
-                        pixelated_prior,
-                        seed=random_seed + 7919,
-                        progress_bar=False,
-                    )
-                    loaded_params.update(power_fit)
+                    ks0 = ks[0]
+                    if 'pixels_wn' not in ks0:
+                        raise KeyError(
+                            "Matérn power spectrum parameters and pixels_wn must be present in the prior run (kwargs_result.json / kwargs_source_pixels_wn.npy)."
+                        )
+                    print("[Init] Loading Matérn power spectrum parameters and pixels_wn directly from prior run...")
+                    loaded_params['pixels_wn_source_grid'] = jnp.asarray(ks0['pixels_wn'], dtype=jnp.float64)
+                    loaded_params['n_source_grid'] = jnp.asarray(ks0['n_source_grid'], dtype=jnp.float64)
+                    loaded_params['rho_source_grid'] = jnp.asarray(ks0['rho_source_grid'], dtype=jnp.float64)
+                    loaded_params['sigma_source_grid'] = jnp.asarray(ks0['sigma_source_grid'], dtype=jnp.float64)
 
             n_matched = 0
             n_skipped = 0

@@ -183,12 +183,14 @@ def log_jax_device_layout(args):
     devices = jax.devices()
     for i, device in enumerate(devices):
         stats = device.memory_stats()
-        bytes_limit = stats['bytes_limit'] / 1024**2
-        bytes_in_use = stats['bytes_in_use'] / 1024**2
-        # bytes_reserved = stats['bytes_reserved'] / 1024 ** 2
-        bytes_available = bytes_limit - bytes_in_use
-
-        print(f'Device {i}: {bytes_in_use:.2f} MB in use, {bytes_available:.2f} MB available')
+        if stats is not None:
+            bytes_limit = stats['bytes_limit'] / 1024**2
+            bytes_in_use = stats['bytes_in_use'] / 1024**2
+            # bytes_reserved = stats['bytes_reserved'] / 1024 ** 2
+            bytes_available = bytes_limit - bytes_in_use
+            print(f'Device {i}: {bytes_in_use:.2f} MB in use, {bytes_available:.2f} MB available')
+        else:
+            print(f'Device {i}: (No memory stats available)')
 
     n_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
     print(
@@ -288,11 +290,16 @@ def kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list, pixels_
     out = copy.deepcopy(kwargs_best)
     if type_list.get('source_light_type_list') == ['PIXELATED']:
         ks = out.get('kwargs_source', [])
-        if ks and isinstance(ks[0], dict) and 'pixels' in ks[0]:
-            pixels = np.asarray(ks[0]['pixels'])
-            np.save(os.path.join(save_path, pixels_filename), pixels)
+        if ks and isinstance(ks[0], dict):
             ks0 = dict(ks[0])
-            ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
+            if 'pixels' in ks0 and ks0['pixels'] is not None:
+                pixels = np.asarray(ks0['pixels'])
+                np.save(os.path.join(save_path, pixels_filename), pixels)
+                ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
+            if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
+                pixels_wn = np.asarray(ks0['pixels_wn'])
+                np.save(os.path.join(save_path, 'kwargs_source_pixels_wn.npy'), pixels_wn)
+                ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': 'kwargs_source_pixels_wn.npy'}
             ks = list(ks)
             ks[0] = ks0
             out['kwargs_source'] = ks
