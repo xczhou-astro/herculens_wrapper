@@ -1,5 +1,6 @@
 """Herculens inference backends: point optimization and posterior sampling."""
 
+from numpyro.distributions import biject_to
 import json
 import os
 
@@ -309,17 +310,80 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         if site["type"] == "sample" and not site["is_observed"]
     ]
     
-    # Extract physical parameter medians
-    try:
-        init_params_from_guide = guide.median(guide_params)
-        init_params = {k: v for k, v in init_params_from_guide.items() if k in active_sites}
-    except Exception as e:
-        print(f"[warning] Failed to extract init_params from SVI guide due to model mismatch ({e}). "
-              f"Falling back to parameters loaded from kwargs_result.json.")
-        init_params = {k: v for k, v in init_params.items() if k in active_sites}
-        
+    from numpyro.handlers import trace, seed
+    from numpyro.distributions.transforms import biject_to
+    from herculens_wrapper.models import create_prob_model
+
+    # Rebuild full SVI model trace (without fixed components) to map guide_params correctly
+    svi_prob_model = create_prob_model(
+        prob_model.param_list,
+        prob_model.type_list,
+        prob_model.lens_image,
+        prob_model.image_data,
+        prob_model.noise_map,
+        fix_lens_light=False,
+        fix_lens_mass=False,
+        fix_source_light=False,
+        args=args
+    )
+
+    with seed(rng_seed=42):
+        svi_model_trace = trace(svi_prob_model.model).get_trace()
+
+    execution_order_sites = [
+        name for name, site in svi_model_trace.items()
+        if site["type"] == "sample" and not site["is_observed"]
+    ]
+
+    flat_loc = guide_params['auto_loc']
+    execution_medians = {}
+    idx = 0
+    for name in execution_order_sites:
+        site = svi_model_trace[name]
+        shape = site['value'].shape
+        size = jnp.size(site['value'])
+        unconstrained_val = flat_loc[idx : idx + size].reshape(shape)
+        # Apply bijector corresponding to the site's support constraint
+        constrained_val = biject_to(site['fn'].support)(unconstrained_val)
+        execution_medians[name] = constrained_val
+        idx += size
+
+    # Filter parameter medians to only keep the active sites for this HMC model
+    init_params = {k: v for k, v in execution_medians.items() if k in active_sites}
     init_params = {k: v for k, v in init_params.items() if k != 'pixels_source_grid'}
-    
+
+    # print(init_params)
+
+    # debug
+    # from herculens_wrapper.models import PowerSpectrum
+    # ny, nx = 50, 50
+    # k_grid = PowerSpectrum.K_grid((ny, nx))
+    # k_values = k_grid.k
+
+    # pixels_wn = init_params['pixels_wn_source_grid']
+    # n = init_params['n_source_grid']
+    # rho = init_params['rho_source_grid']
+    # sigma = init_params['sigma_source_grid']
+
+    # params = {
+    #     'pixels_wn_source_grid': jnp.asarray(pixels_wn),
+    #     'n_source_grid': jnp.asarray(n),
+    #     'rho_source_grid': jnp.asarray(rho),
+    #     'sigma_source_grid': jnp.asarray(sigma),
+    # }
+    # # 4. Generate the final physical pixels_source_grid
+    # pixels_source_grid = PowerSpectrum.pixels_from_params(
+    #     params,
+    #     param_name='source_grid',
+    #     k_values=k_values,
+    #     positive=True,   # Softplus positivity constraint (standard in SVI/HMC)
+    #     k_zero=0.0       # k_zero value used in prior (normally 0.0)
+    # )
+    # import matplotlib.pyplot as plt
+    # plt.imshow(pixels_source_grid, cmap='twilight')
+    # plt.savefig('debug.png')
+
+
     # Classify parameter names dynamically
     vars_pixel = [k for k in init_params.keys() if 'pixels_wn_' in k]
     vars_power = [k for k in init_params.keys() if k in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid')]
@@ -349,62 +413,102 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             
     init_fun = partial(init_to_value_or_defer, values=init_params)
     
-    # Set up inner kernels
-    # Kernel 1: NUTS for source pixels, Matérn, lens light, and other variables
-    dense_mass_blocks_1 = []
-    if vars_power:
-        dense_mass_blocks_1.append(tuple(vars_power))
-        
-    # Group lens light parameters by component index
-    from collections import defaultdict
-    lens_light_by_idx = defaultdict(list)
-    for k in vars_lens_light_hmc:
-        try:
-            idx = int(k.split('_')[-1])
-            lens_light_by_idx[idx].append(k)
-        except ValueError:
-            pass
-    for idx, params_group in sorted(lens_light_by_idx.items()):
-        dense_mass_blocks_1.append(tuple(params_group))
-        
-    kernel_1 = infer.NUTS(
-        prob_model.model,
-        init_strategy=init_fun,
-        target_accept_prob=0.95,
-        max_tree_depth=10,
-        dense_mass=dense_mass_blocks_1 if dense_mass_blocks_1 else False,
-    )
+    disable_gibbs = bool(getattr(args, 'disable_gibbs', False))
     
-    # Kernel 2: NUTS for lens mass
-    dense_mass_blocks_2 = []
-    lens_mass_by_idx = defaultdict(list)
-    for k in vars_mass:
-        try:
-            idx = int(k.split('_')[-1])
-            lens_mass_by_idx[idx].append(k)
-        except ValueError:
-            pass
-    for idx, params_group in sorted(lens_mass_by_idx.items()):
-        dense_mass_blocks_2.append(tuple(params_group))
+    if disable_gibbs:
+        print("[hmc] Gibbs sampling is disabled. Running joint NUTS sampler...")
+        dense_mass_blocks = []
+        if vars_power:
+            dense_mass_blocks.append(tuple(vars_power))
+            
+        from collections import defaultdict
         
-    kernel_2 = infer.NUTS(
-        prob_model.model,
-        init_strategy=init_fun,
-        target_accept_prob=0.9,
-        max_tree_depth=10,
-        dense_mass=dense_mass_blocks_2 if dense_mass_blocks_2 else False,
-    )
-    
-    inner_kernels = [kernel_1, kernel_2]
-    
-    # Outer Gibbs kernel
-    outer_kernel = MultiHMCGibbs(
-        inner_kernels,
-        gibbs_sites_list=[
-            vars_pixel + vars_power + vars_lens_light_hmc + vars_other,
-            vars_mass
-        ],
-    )
+        # Group lens light parameters by component index
+        lens_light_by_idx = defaultdict(list)
+        for k in vars_lens_light_hmc:
+            try:
+                idx = int(k.split('_')[-1])
+                lens_light_by_idx[idx].append(k)
+            except ValueError:
+                pass
+        for idx, params_group in sorted(lens_light_by_idx.items()):
+            dense_mass_blocks.append(tuple(params_group))
+            
+        # Group lens mass parameters by component index
+        lens_mass_by_idx = defaultdict(list)
+        for k in vars_mass:
+            try:
+                idx = int(k.split('_')[-1])
+                lens_mass_by_idx[idx].append(k)
+            except ValueError:
+                pass
+        for idx, params_group in sorted(lens_mass_by_idx.items()):
+            dense_mass_blocks.append(tuple(params_group))
+            
+        outer_kernel = infer.NUTS(
+            prob_model.model,
+            init_strategy=init_fun,
+            target_accept_prob=0.9,
+            max_tree_depth=10,
+            dense_mass=dense_mass_blocks if dense_mass_blocks else False,
+        )
+    else:
+        # Set up inner kernels
+        # Kernel 1: NUTS for source pixels, Matérn, lens light, and other variables
+        dense_mass_blocks_1 = []
+        if vars_power:
+            dense_mass_blocks_1.append(tuple(vars_power))
+            
+        # Group lens light parameters by component index
+        from collections import defaultdict
+        lens_light_by_idx = defaultdict(list)
+        for k in vars_lens_light_hmc:
+            try:
+                idx = int(k.split('_')[-1])
+                lens_light_by_idx[idx].append(k)
+            except ValueError:
+                pass
+        for idx, params_group in sorted(lens_light_by_idx.items()):
+            dense_mass_blocks_1.append(tuple(params_group))
+            
+        kernel_1 = infer.NUTS(
+            prob_model.model,
+            init_strategy=init_fun,
+            target_accept_prob=0.95,
+            max_tree_depth=10,
+            dense_mass=dense_mass_blocks_1 if dense_mass_blocks_1 else False,
+        )
+        
+        # Kernel 2: NUTS for lens mass
+        dense_mass_blocks_2 = []
+        lens_mass_by_idx = defaultdict(list)
+        for k in vars_mass:
+            try:
+                idx = int(k.split('_')[-1])
+                lens_mass_by_idx[idx].append(k)
+            except ValueError:
+                pass
+        for idx, params_group in sorted(lens_mass_by_idx.items()):
+            dense_mass_blocks_2.append(tuple(params_group))
+            
+        kernel_2 = infer.NUTS(
+            prob_model.model,
+            init_strategy=init_fun,
+            target_accept_prob=0.9,
+            max_tree_depth=10,
+            dense_mass=dense_mass_blocks_2 if dense_mass_blocks_2 else False,
+        )
+        
+        inner_kernels = [kernel_1, kernel_2]
+        
+        # Outer Gibbs kernel
+        outer_kernel = MultiHMCGibbs(
+            inner_kernels,
+            gibbs_sites_list=[
+                vars_pixel + vars_power + vars_lens_light_hmc + vars_other,
+                vars_mass
+            ],
+        )
     
     num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 1000))
     num_samples_total = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
@@ -460,7 +564,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             print(f"[hmc] Batch {i+1} already completed. Skipping.")
             continue
             
-        print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
+        if disable_gibbs:
+            print(f"[hmc] Running joint NUTS batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
+        else:
+            print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
         if i == 0:
             mcmc = infer.MCMC(
                 outer_kernel,
