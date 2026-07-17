@@ -721,7 +721,11 @@ def display_init(
     """Plot the initial guess model before inference."""
     kwargs_init = prob_model.params2kwargs(init_params)
     if save_path is not None and type_list is not None:
-        kwargs_init_json = kwargs_best_to_json_pixelated_npy(kwargs_init, save_path, type_list)
+        kwargs_init_json = kwargs_best_to_json_pixelated_npy(
+            kwargs_init, save_path, type_list,
+            pixels_filename='kwargs_source_pixels_init.npy',
+            pixels_wn_filename='kwargs_source_pixels_wn_init.npy'
+        )
         with open(os.path.join(save_path, 'kwargs_init.json'), 'w') as f:
             json.dump(kwargs_init_json, f, indent=4, default=json_serializer)
 

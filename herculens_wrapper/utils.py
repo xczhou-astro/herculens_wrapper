@@ -121,9 +121,17 @@ def run_arguments_namespace(config_module, config_path):
     cfg = config_module.arguments()
     if not isinstance(cfg, dict):
         raise TypeError("config.arguments() must return a dict.")
-    if cfg.get('sampler') not in SAMPLER_CHOICES:
+    sampler_val = cfg.get('sampler')
+    if isinstance(sampler_val, list):
+        for s in sampler_val:
+            if s not in SAMPLER_CHOICES:
+                raise ValueError(
+                    f"Unknown sampler {s!r} in list. "
+                    f"Choose one of: {sorted(SAMPLER_CHOICES)}"
+                )
+    elif sampler_val not in SAMPLER_CHOICES:
         raise ValueError(
-            f"Unknown sampler {cfg.get('sampler')!r}. "
+            f"Unknown sampler {sampler_val!r}. "
             f"Choose one of: {sorted(SAMPLER_CHOICES)}"
         )
     ns = SimpleNamespace(**cfg)
@@ -285,7 +293,11 @@ def pytree_flat_param_labels(params_pytree):
     return labels
 
 
-def kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list, pixels_filename='kwargs_source_pixels.npy'):
+def kwargs_best_to_json_pixelated_npy(
+    kwargs_best, save_path, type_list, 
+    pixels_filename='kwargs_source_pixels.npy',
+    pixels_wn_filename='kwargs_source_pixels_wn.npy'
+):
     import copy
     out = copy.deepcopy(kwargs_best)
     if type_list.get('source_light_type_list') == ['PIXELATED']:
@@ -298,8 +310,8 @@ def kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list, pixels_
                 ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
             if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
                 pixels_wn = np.asarray(ks0['pixels_wn'])
-                np.save(os.path.join(save_path, 'kwargs_source_pixels_wn.npy'), pixels_wn)
-                ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': 'kwargs_source_pixels_wn.npy'}
+                np.save(os.path.join(save_path, pixels_wn_filename), pixels_wn)
+                ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename}
             ks = list(ks)
             ks[0] = ks0
             out['kwargs_source'] = ks

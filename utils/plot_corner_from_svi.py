@@ -32,6 +32,7 @@ from herculens_wrapper.utils import (
 configure_import_paths()
 
 import jax
+jax.config.update('jax_enable_x64', True)
 import numpyro.infer.autoguide as autoguide
 
 from herculens_wrapper.models import (

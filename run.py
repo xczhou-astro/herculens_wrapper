@@ -8,6 +8,8 @@ Pipeline: run optax/jaxopt first, then set init_params_path to that run
 directory and switch sampler to emcee or hmc_* for MCMC warm-started at the MAP.
 """
 
+import jax
+jax.config.update('jax_enable_x64', True)
 import datetime
 import importlib.util
 import json
@@ -187,8 +189,8 @@ def build_and_run(config_path=None):
 
     save_path = args.save_path
 
-    if os.path.exists(save_path):
-        raise ValueError('Save path already exists: ' + save_path)
+    # if os.path.exists(save_path):
+    #     raise ValueError('Save path already exists: ' + save_path)
 
     os.makedirs(save_path, exist_ok=True)
     print(f'Starting run in: {save_path} (sampler={args.sampler!r})')
@@ -412,10 +414,10 @@ def build_and_run(config_path=None):
     n_runs = int(getattr(args, 'n_runs', 1))
     sampler = args.sampler
 
-    if sampler != 'svi':
+    if sampler != 'svi' and not getattr(args, 'pipeline', False):
         n_runs = 1
 
-    def run_one_iteration(n, run_save_path, run_seed):
+    def run_one_iteration(n, run_save_path, run_seed, sampler_override=None, init_params_path_override=None):
         from types import SimpleNamespace
         import shutil
 
@@ -423,12 +425,30 @@ def build_and_run(config_path=None):
         run_args = SimpleNamespace(**vars(args))
         run_args.save_path = run_save_path
         run_args.random_seed = run_seed
+        if sampler_override is not None:
+            run_args.sampler = sampler_override
+        if init_params_path_override is not None:
+            run_args.init_params_path = init_params_path_override
 
+        # Redirect logging for this individual run
+        run_log_path = os.path.join(run_save_path, 'log.txt')
+        run_log_file = open(run_log_path, 'w')
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
 
+        start_dt = datetime.now()
+        formatted_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        run_log_file.write(f"Start at {formatted_start}\n")
+        run_log_file.flush()
+
+        sys.stdout = Tee(sys.stdout, run_log_file)
+        sys.stderr = Tee(sys.stderr, run_log_file)
 
         print(f"\n========================================")
         print(f"Starting Run {n} (seed={run_seed})")
         print(f"========================================")
+
+        run_successful = False
 
         try:
             run_prob_model = create_prob_model(
@@ -641,6 +661,7 @@ def build_and_run(config_path=None):
                 source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
             )
             print(f'Run {n} complete. Outputs in {run_save_path}')
+            run_successful = True
             return metrics
 
         except Exception as e:
@@ -648,7 +669,141 @@ def build_and_run(config_path=None):
             traceback.print_exc()
             print(f"Run {n} failed: {e}")
             return None
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
+            if run_successful:
+                end_dt = datetime.now()
+                formatted_end = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+                run_log_file.write(f"End at {formatted_end}\n")
+            run_log_file.close()
 
+
+    if getattr(args, 'pipeline', False):
+        def is_run_finished(run_path):
+            log_path = os.path.join(run_path, 'log.txt')
+            if not os.path.exists(log_path):
+                return False
+            try:
+                with open(log_path, 'r') as f:
+                    lines = f.readlines()
+                if not lines:
+                    return False
+                for line in reversed(lines[-5:]):
+                    if "End at" in line:
+                        return True
+            except Exception:
+                pass
+            return False
+
+        print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
+        print(f'Starting automated pipeline run in: {save_path} (n_runs={n_runs})')
+        samplers_list = args.sampler
+        if not isinstance(samplers_list, list):
+            samplers_list = [samplers_list]
+
+        # Stage 1: SVI (or the first sampler)
+        stage1_sampler = samplers_list[0]
+        stage1_save_path = os.path.join(save_path, stage1_sampler)
+        print(f"\n==================================================")
+        print(f"PIPELINE STAGE 1: {stage1_sampler.upper()} (runs={n_runs})")
+        print(f"==================================================")
+        
+        stage1_comparison = {}
+        for n in range(n_runs):
+            run_save_path = os.path.join(stage1_save_path, f'run_{n}')
+            run_seed = args.random_seed + n
+            
+            if is_run_finished(run_save_path):
+                print(f"[Pipeline] SVI Run {n} already finished. Skipping SVI execution.")
+                metrics_json_path = os.path.join(run_save_path, 'metrics.json')
+                if os.path.exists(metrics_json_path):
+                    try:
+                        with open(metrics_json_path, 'r') as f:
+                            metrics_data = json.load(f)
+                        stage1_comparison[f"run_{n}"] = {
+                            "seed": run_seed,
+                            "metrics": metrics_data
+                        }
+                    except Exception:
+                        pass
+                continue
+
+            metrics_data = run_one_iteration(
+                n, run_save_path, run_seed, 
+                sampler_override=stage1_sampler,
+                init_params_path_override=args.init_params_path
+            )
+            if metrics_data is not None:
+                stage1_comparison[f"run_{n}"] = {
+                    "seed": run_seed,
+                    "metrics": metrics_data
+                }
+
+        stage1_comp_path = os.path.join(stage1_save_path, 'comparison.json')
+        with open(stage1_comp_path, 'w') as f:
+            json.dump(stage1_comparison, f, indent=4)
+
+        # Stage 2: HMC (or the second sampler)
+        if len(samplers_list) > 1:
+            stage2_sampler = samplers_list[1]
+            stage2_save_path = os.path.join(save_path, stage2_sampler)
+            print(f"\n==================================================")
+            print(f"PIPELINE STAGE 2: {stage2_sampler.upper()} (runs={n_runs})")
+            print(f"==================================================")
+
+            stage2_comparison = {}
+            for n in range(n_runs):
+                run_save_path = os.path.join(stage2_save_path, f'run_{n}')
+                run_seed = args.random_seed + n
+                
+                if is_run_finished(run_save_path):
+                    print(f"[Pipeline] HMC Run {n} already finished. Skipping HMC execution.")
+                    metrics_json_path = os.path.join(run_save_path, 'metrics.json')
+                    if os.path.exists(metrics_json_path):
+                        try:
+                            with open(metrics_json_path, 'r') as f:
+                                metrics_data = json.load(f)
+                            stage2_comparison[f"run_{n}"] = {
+                                "seed": run_seed,
+                                "metrics": metrics_data
+                            }
+                        except Exception:
+                            pass
+                    continue
+
+                # Warm start HMC run n from SVI run n output
+                svi_parent_run = os.path.join(stage1_save_path, f'run_{n}')
+                if not os.path.exists(svi_parent_run) or not is_run_finished(svi_parent_run):
+                    print(f"[Pipeline] Warning: SVI run folder {svi_parent_run} is not successfully finished. Skipping HMC Run {n}.")
+                    continue
+
+                print(f"\nRunning matched Stage 2 run {n} warm-starting from: {svi_parent_run}")
+                
+                if os.path.exists(run_save_path):
+                    print(f"  Warning: Target folder {run_save_path} already exists. Cleaning it first...")
+                    import shutil
+                    shutil.rmtree(run_save_path)
+
+                metrics_data = run_one_iteration(
+                    n, run_save_path, run_seed, 
+                    sampler_override=stage2_sampler,
+                    init_params_path_override=svi_parent_run
+                )
+                if metrics_data is not None:
+                    stage2_comparison[f"run_{n}"] = {
+                        "seed": run_seed,
+                        "metrics": metrics_data
+                    }
+
+            stage2_comp_path = os.path.join(stage2_save_path, 'comparison.json')
+            with open(stage2_comp_path, 'w') as f:
+                json.dump(stage2_comparison, f, indent=4)
+
+        print("\n=========================================")
+        print("Pipeline execution completed successfully.")
+        print("=========================================\n")
+        return save_path
 
     if n_runs > 1:
 

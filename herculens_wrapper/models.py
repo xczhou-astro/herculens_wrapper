@@ -7,6 +7,7 @@ def safe_float(val, default):
 
 
 import jax
+jax.config.update('jax_enable_x64', True)
 import optax
 import numpy as np
 import scipy.ndimage
@@ -1285,51 +1286,34 @@ def get_init_params(
             )
             src_types = type_list.get('source_light_type_list', [])
             if src_types == ['PIXELATED'] and not fix_source_light:
-                ks = init_info.get('kwargs_source')
-                has_pixel_array = (
-                    isinstance(ks, list)
-                    and len(ks) > 0
-                    and isinstance(ks[0], dict)
-                    and 'pixels' in ks[0]
-                    and not isinstance(ks[0]['pixels'], dict)
-                )
-                if has_pixel_array:
-                    pixels_proj = jnp.asarray(ks[0]['pixels'], dtype=jnp.float64)
+                ks = init_info.get('kwargs_source', [])
+                if ks and isinstance(ks[0], dict) and 'pixels' in ks[0]:
+                    has_pixel_array = not isinstance(ks[0]['pixels'], dict)
+                    if has_pixel_array:
+                        pixels_proj = jnp.asarray(ks[0]['pixels'], dtype=jnp.float64)
+                    else:
+                        pixels_proj = np.load(os.path.join(init_dir, ks[0]['pixels'].get('file')))
+                    
+                    prior_type = getattr(prob_model, 'prior_type', 'matern')
+                    if prior_type == 'wavelet_sparsity':
+                        starlet = prob_model.starlet
+                        print("[Init] Decomposing target source image into Starlet space...")
+                        coeffs = starlet.decompose(pixels_proj)
+                        loaded_params['source_scales'] = coeffs[:-1]
+                        loaded_params['source_coarse'] = coeffs[-1]
+                    elif prior_type == 'wavelet_penalty':
+                        print("[Init] Loading target source image directly for wavelet_penalty...")
+                        loaded_params['source_pixels'] = pixels_proj
+                    else:
+                        ks0 = ks[0]
+                        if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
+                            print("[Init] Loading Matérn power spectrum parameters and pixels_wn directly from prior run...")
+                            loaded_params['pixels_wn_source_grid'] = jnp.asarray(ks0['pixels_wn'], dtype=jnp.float64)
+                            loaded_params['n_source_grid'] = jnp.asarray(ks0['n_source_grid'], dtype=jnp.float64)
+                            loaded_params['rho_source_grid'] = jnp.asarray(ks0['rho_source_grid'], dtype=jnp.float64)
+                            loaded_params['sigma_source_grid'] = jnp.asarray(ks0['sigma_source_grid'], dtype=jnp.float64)
                 else:
-                    if lens_image is None:
-                        raise ValueError(
-                            'PIXELATED source with init_params_path pointing to analytic '
-                            'kwargs (no pixel array) requires lens_image=... to project '
-                            'kwargs_source onto the source pixel grid.'
-                        )
-                    override_types = init_info.get('source_light_type_list')
-                    pixels_proj = _project_analytic_kwargs_to_pixel_source(
-                        lens_image,
-                        ks,
-                        source_light_type_list=override_types,
-                    )
-                
-                prior_type = getattr(prob_model, 'prior_type', 'matern')
-                if prior_type == 'wavelet_sparsity':
-                    starlet = prob_model.starlet
-                    print("[Init] Decomposing target source image into Starlet space...")
-                    coeffs = starlet.decompose(pixels_proj)
-                    loaded_params['source_scales'] = coeffs[:-1]
-                    loaded_params['source_coarse'] = coeffs[-1]
-                elif prior_type == 'wavelet_penalty':
-                    print("[Init] Loading target source image directly for wavelet_penalty...")
-                    loaded_params['source_pixels'] = pixels_proj
-                else:
-                    ks0 = ks[0]
-                    if 'pixels_wn' not in ks0:
-                        raise KeyError(
-                            "Matérn power spectrum parameters and pixels_wn must be present in the prior run (kwargs_result.json / kwargs_source_pixels_wn.npy)."
-                        )
-                    print("[Init] Loading Matérn power spectrum parameters and pixels_wn directly from prior run...")
-                    loaded_params['pixels_wn_source_grid'] = jnp.asarray(ks0['pixels_wn'], dtype=jnp.float64)
-                    loaded_params['n_source_grid'] = jnp.asarray(ks0['n_source_grid'], dtype=jnp.float64)
-                    loaded_params['rho_source_grid'] = jnp.asarray(ks0['rho_source_grid'], dtype=jnp.float64)
-                    loaded_params['sigma_source_grid'] = jnp.asarray(ks0['sigma_source_grid'], dtype=jnp.float64)
+                    print("[Init] Prior run was parametric. Source light parameters (pixels_wn, n, rho, sigma) will be randomly sampled from their prior distributions.")
 
             n_matched = 0
             n_skipped = 0
@@ -1340,8 +1324,11 @@ def get_init_params(
                 v_arr = jnp.asarray(v)
                 ref_arr = jnp.asarray(init_params[k])
                 if v_arr.shape != ref_arr.shape:
-                    n_skipped += 1
-                    continue
+                    if v_arr.size == ref_arr.size:
+                        v_arr = jnp.reshape(v_arr, ref_arr.shape)
+                    else:
+                        n_skipped += 1
+                        continue
                 init_params[k] = v_arr
                 n_matched += 1
             print(f"[Init] Inherited kwargs from prior run: matched={n_matched}, skipped={n_skipped}")
@@ -1375,6 +1362,10 @@ def get_init_params(
         init_params = {
             k: v for k, v in init_params.items() if not k.startswith('source_')
         }
+
+    init_params = {
+        k: v for k, v in init_params.items() if k != 'pixels_source_grid'
+    }
 
     return init_params
 
