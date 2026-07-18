@@ -1389,16 +1389,24 @@ def resolve_fixed_kwargs(init_params_path, component):
         
     if component == 'source_light' and isinstance(fixed, list) and len(fixed) > 0:
         kw = fixed[0]
-        if isinstance(kw, dict) and isinstance(kw.get('pixels'), dict) and kw['pixels'].get('_format') == 'pixelated_pixels_npy':
+        if isinstance(kw, dict):
             import numpy as np
             init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
                 os.path.abspath(str(init_params_path))
             )
-            npy_name = kw['pixels'].get('file')
-            npy_path = os.path.join(init_dir, npy_name)
             fixed_copy = list(fixed)
             fixed_copy[0] = dict(kw)
-            fixed_copy[0]['pixels'] = np.load(npy_path)
+            
+            if isinstance(kw.get('pixels'), dict) and kw['pixels'].get('_format') == 'pixelated_pixels_npy':
+                npy_name = kw['pixels'].get('file')
+                npy_path = os.path.join(init_dir, npy_name)
+                fixed_copy[0]['pixels'] = np.load(npy_path)
+                
+            if isinstance(kw.get('pixels_wn'), dict) and kw['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+                npy_wn_name = kw['pixels_wn'].get('file')
+                npy_wn_path = os.path.join(init_dir, npy_wn_name)
+                fixed_copy[0]['pixels_wn'] = np.load(npy_wn_path)
+                
             fixed = fixed_copy
             
     return fixed
