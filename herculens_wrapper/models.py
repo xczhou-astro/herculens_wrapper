@@ -1656,6 +1656,47 @@ class LensImageExtension(LensImage):
 
 
 
+def get_best_pixel_size(lens_image, herc_dict, source_grid_scale, return_full=False):
+    from sklearn.neighbors import NearestNeighbors
+
+    x_ss_grid, y_ss_grid = lens_image.ImageNumerics.coordinates_evaluate
+    mask = lens_image._source_arc_mask_flat.astype(bool)
+    x_ss_trace, y_ss_trace = lens_image.MassModel.ray_shooting(
+        x_ss_grid[mask].flatten(),
+        y_ss_grid[mask].flatten(),
+        herc_dict['kwargs_lens'],
+    )
+
+    _, _, extent = lens_image.mask_extent(
+        x_ss_trace,
+        y_ss_trace,
+        100,
+        grid_scale=source_grid_scale,
+    )
+
+    full_size = jax.device_get(extent[1] - extent[0])
+    tdx = (
+        (x_ss_trace >= extent[0])
+        & (x_ss_trace <= extent[1])
+        & (y_ss_trace >= extent[2])
+        & (y_ss_trace <= extent[3])
+    )
+
+    jax.block_until_ready(x_ss_trace)
+    jax.block_until_ready(y_ss_trace)
+    x_trim = jax.device_get(x_ss_trace[tdx])
+    y_trim = jax.device_get(y_ss_trace[tdx])
+    samples = np.vstack([x_trim, y_trim]).T
+    nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(samples)
+    distances, _ = nbrs.kneighbors(samples)
+
+    mean_distance = np.mean(distances[:, 1])
+    pixel_grid_shape = int(full_size / (5 * mean_distance) + 1)
+    if return_full:
+        return pixel_grid_shape, x_trim, y_trim, mean_distance, full_size
+    return pixel_grid_shape
+
+
 def create_lens_image(
     param_list,
     type_list,
@@ -1680,7 +1721,17 @@ def create_lens_image(
     if src_types == ['PIXELATED']:
         kwargs_pixelated = param_list['source_light_params_list'][0]
         source_kwargs_pixelated = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
-        source_light_model = LightModel(src_types, kwargs_pixelated=source_kwargs_pixelated)
+        pixel_adaptive_grid = source_kwargs_pixelated.get('pixel_adaptive_grid', False)
+        if pixel_adaptive_grid:
+            pixel_grid_shape = int(source_kwargs_pixelated.get('pixel_grid_shape', 100))
+            source_light_model = LightModel(
+                src_types,
+                pixel_adaptive_grid=True,
+                pixel_interpol=source_kwargs_pixelated.get('pixel_interpol', 'fast_bilinear'),
+                kwargs_pixelated={'num_pixels': pixel_grid_shape}
+            )
+        else:
+            source_light_model = LightModel(src_types, kwargs_pixelated=source_kwargs_pixelated)
     else:
         source_light_model = LightModel(src_types)
 

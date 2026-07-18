@@ -216,6 +216,7 @@ def build_and_run(config_path=None):
         get_init_params,
         resolve_fixed_kwargs,
         validate_param_list,
+        get_best_pixel_size,
     )
     from herculens_wrapper.samplers import (
         run_svi,
@@ -365,6 +366,58 @@ def build_and_run(config_path=None):
         'scale_factor': args.ps_scale_factor,
         'nsubdivisions': args.ps_nsubdivisions,
     }
+
+    # Dynamic grid resolution logic for adaptive pixelated source
+    if source_light_type_list == ['PIXELATED']:
+        kwargs_pixelated = param_list['source_light_params_list'][0]
+        pixel_grid_config = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
+        pixel_adaptive_grid = pixel_grid_config.get('pixel_adaptive_grid', False)
+        
+        if pixel_adaptive_grid:
+            use_best_pixel_size = getattr(args, 'use_best_pixel_size', False)
+            manual = getattr(args, 'manual', True)
+            
+            source_has_mask = source_arc_mask is not None and np.any(source_arc_mask)
+            if use_best_pixel_size and not manual and source_has_mask and getattr(args, 'init_params_path', None):
+                try:
+                    init_run = resolve_init_run_dir(args.init_params_path)
+                    with open(os.path.join(init_run, 'config.json'), 'r') as f:
+                        init_config = json.load(f)
+                    with open(os.path.join(init_run, 'kwargs_result.json'), 'r') as f:
+                        init_kwargs = json.load(f)
+                    
+                    # Create temporary parametric lens image to compute dynamic pixel size
+                    temp_lens_image = create_lens_image(
+                        param_list=init_config['param_list'],
+                        type_list=init_config['type_list'],
+                        image_data=image_data,
+                        noise_map=noise_map,
+                        psf_data=psf_data,
+                        pixel_scale=args.pixel_scale,
+                        kwargs_numerics=kwargs_numerics_fit,
+                        kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
+                        source_arc_mask=source_arc_mask,
+                        source_grid_scale=source_grid_scale,
+                        conjugate_points=conjugate_points,
+                    )
+                    
+                    computed_grid_shape = get_best_pixel_size(
+                        temp_lens_image, init_kwargs, source_grid_scale
+                    )
+                    print(f"[adaptive] Dynamically computed optimal pixel grid shape: {computed_grid_shape}")
+                    pixel_grid_config['pixel_grid_shape'] = computed_grid_shape
+                except Exception as e:
+                    print(f"[adaptive] Warning: Failed to compute dynamic pixel size ({e}). Falling back to manual config.")
+                    grid_shape = pixel_grid_config.get('pixel_grid_shape')
+                    if grid_shape is None:
+                        grid_shape = 100
+                    pixel_grid_config['pixel_grid_shape'] = grid_shape
+            else:
+                grid_shape = pixel_grid_config.get('pixel_grid_shape')
+                if grid_shape is None:
+                    grid_shape = 100
+                pixel_grid_config['pixel_grid_shape'] = grid_shape
+                print(f"[adaptive] Using manually configured pixel grid shape: {grid_shape}")
 
     lens_image = create_lens_image(
         param_list=param_list,
@@ -527,11 +580,57 @@ def build_and_run(config_path=None):
             flat_samples = None
 
             if run_args.sampler == 'svi':
+                max_warmup_it = int(getattr(run_args, 'max_iterations_svi_warmup', 0))
+                if max_warmup_it > 0 and source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
+                    try:
+                        print(f"\n[svi-warmup] Starting {max_warmup_it} iteration warmup for pixelated source parameters...")
+                        kwargs_lens_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
+                        kwargs_lens_light_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
+                        
+                        warmup_prob_model = create_prob_model(
+                            param_list, type_list, lens_image, image_data, noise_map,
+                            regul_model=None,
+                            fix_lens_light=True,
+                            kwargs_lens_light_fixed=kwargs_lens_light_fixed_warmup,
+                            fix_lens_mass=True,
+                            kwargs_lens_fixed=kwargs_lens_fixed_warmup,
+                            fix_source_light=False,
+                            init_params_path=run_args.init_params_path,
+                            args=run_args,
+                        )
+                        warmup_args = SimpleNamespace(**vars(run_args))
+                        warmup_args.max_iterations_svi = max_warmup_it
+                        warmup_best_params, warmup_extra = run_svi(
+                            warmup_prob_model, image_data, warmup_args, init_params,
+                            max_iterations=max_warmup_it
+                        )
+                        if 'loss_history' in warmup_extra:
+                            warmup_history = {'loss_history': np.asarray(warmup_extra['loss_history']).tolist()}
+                            with open(os.path.join(run_save_path, 'svi_warmup_loss_history.json'), 'w') as f:
+                                json.dump(warmup_history, f, indent=4)
+                            warmup_losses = warmup_history['loss_history']
+                            if len(warmup_losses) > 0:
+                                print(f"[svi-warmup] Initial warmup loss (when begin): {warmup_losses[0]:.4f}")
+                                print(f"[svi-warmup] Final warmup loss (after warm up): {warmup_losses[-1]:.4f}")
+                        print("[svi-warmup] Warmup complete. Updating init_params with optimized source parameters.")
+                        for param_name, param_value in warmup_best_params.items():
+                            if 'source' in param_name or 'pixels_wn' in param_name:
+                                init_params[param_name] = param_value
+                    except Exception as e:
+                        print(f"[svi-warmup] Warning: SVI source warmup failed, proceeding with standard initialization. Error: {e}")
+
                 best_params, extra = run_svi(run_prob_model, image_data, run_args, init_params)
                 if 'loss_history' in extra:
                     history = {'loss_history': np.asarray(extra['loss_history']).tolist()}
                     with open(os.path.join(run_save_path, 'svi_loss_history.json'), 'w') as f:
                         json.dump(history, f, indent=4)
+                    main_losses = history['loss_history']
+                    if len(main_losses) > 0:
+                        if max_warmup_it > 0 and source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
+                            print(f"[svi] Initial main joint loss (after warm up): {main_losses[0]:.4f}")
+                        else:
+                            print(f"[svi] Initial SVI loss (when begin): {main_losses[0]:.4f}")
+                        print(f"[svi] Final SVI loss (when finish): {main_losses[-1]:.4f}")
                 if 'guide' in extra and 'result' in extra:
                     try:
                         import jax
@@ -620,12 +719,29 @@ def build_and_run(config_path=None):
                 best_fit_model = np.median(img_arr, axis=tuple(range(img_arr.ndim - 2)))
             else:
                 best_fit_model = lens_image.model(**kwargs_best)
+            source_pixel_scale = None
+            if type_list.get('source_light_type_list') == ['PIXELATED']:
+                try:
+                    if getattr(lens_image, '_src_adaptive_grid', False):
+                        _, _, extent = lens_image.get_source_coordinates(
+                            kwargs_best.get('kwargs_lens', None),
+                            npix_src=lens_image.SourceModel.pixel_grid.num_pixel_axes[0],
+                            source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0)
+                        )
+                        source_pixel_scale = float(abs(extent[1] - extent[0]) / lens_image.SourceModel.pixel_grid.num_pixel_axes[0])
+                    else:
+                        x_grid, _ = lens_image.SourceModel.pixel_grid.pixel_coordinates
+                        source_pixel_scale = float(abs(x_grid[0, 1] - x_grid[0, 0]))
+                except Exception as e:
+                    print(f"[warning] Failed to compute source pixel scale for metrics: {e}")
+
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
             log_likelihood = float(run_prob_model.log_likelihood(best_params))
             metrics = save_metrics(
                 run_save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
                 num_params_free=num_params_free,
                 mask_bool=mask_bool,
+                source_pixel_scale=source_pixel_scale,
             )
             reduced_chi2 = metrics['REDUCED_CHI2']
 

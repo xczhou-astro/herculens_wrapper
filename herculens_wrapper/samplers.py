@@ -118,7 +118,7 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         print(f"[warning] Failed to generate arviz diagnostics: {e}")
 
 
-def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None):
+def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None, source_pixel_scale=None):
     if num_params_free is None:
         num_params_free = num_params
     reduced_chi2, n_pix, n_fit_free, dof = fit_dof_and_reduced_chi2(chi2, image_data, num_params_free, mask_bool=mask_bool)
@@ -134,6 +134,9 @@ def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_do
         'N_PARAMS_FREE': int(num_params_free),
         'LOG_LIKELIHOOD': float(log_likelihood),
     }
+    if source_pixel_scale is not None:
+        metrics['SOURCE_PIXEL_SCALE'] = float(source_pixel_scale)
+        
     with open(os.path.join(save_path, 'metrics.json'), 'w') as f:
         json.dump(metrics, f, indent=4)
     print(

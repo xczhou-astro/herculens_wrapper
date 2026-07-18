@@ -321,10 +321,30 @@ def plot_source_plane(
         and 'pixels' in kwargs_result['kwargs_source'][0]
     )
 
+    is_adaptive = False
     if is_pixelated:
         source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
-        extent = list(lens_image.SourceModel.pixel_grid.extent)
-        xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
+        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+            is_adaptive = True
+            kwargs_lens = kwargs_result.get('kwargs_lens', None)
+            npix_src = source_for_plot.shape[0]
+            xx, yy, extent = lens_image.get_source_coordinates(
+                kwargs_lens,
+                npix_src=npix_src,
+                source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0)
+            )
+            xx = np.asarray(xx)
+            yy = np.asarray(yy)
+            extent = list(np.asarray(extent))
+        else:
+            extent = list(lens_image.SourceModel.pixel_grid.extent)
+            xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
+        
+        # Compute and print pixel scale
+        grid_width = extent[1] - extent[0]
+        npix = source_for_plot.shape[0]
+        adapted_pixel_scale = grid_width / npix
+        print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
     else:
         mask = getattr(lens_image, 'source_arc_mask', None)
         if mask is None:
@@ -415,8 +435,10 @@ def plot_source_plane(
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
+    scale_suffix = f" ({adapted_pixel_scale:.5f}\"/pix)" if is_pixelated else ""
+
     im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
-    axes[0].set_title('Extended Source')
+    axes[0].set_title(f'Extended Source{scale_suffix}')
     plt.colorbar(im0, ax=axes[0], label=cbar_label)
 
     im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
@@ -424,7 +446,7 @@ def plot_source_plane(
         axes[1].scatter(ras, decs, s=30, marker='*', color=colors[i], label=f'PS {i + 1}')
     for caust_x, caust_y in caustics:
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
-    axes[1].set_title('Source Plane Reconstruction')
+    axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
     plt.colorbar(im1, ax=axes[1], label=cbar_label)
 
     for a in axes:
