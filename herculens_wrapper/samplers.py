@@ -601,7 +601,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     temp_kwargs, 
                     diag_dir, 
                     type_list, 
-                    pixels_filename=f'kwargs_source_pixels_batch_{i}.npy'
+                    pixels_filename=f'kwargs_source_pixels_batch_{i}.npy',
+                    pixels_wn_filename=f'kwargs_source_pixels_wn_batch_{i}.npy'
                 )
                 
                 kwargs_json_path = os.path.join(diag_dir, f'kwargs_result_batch_{i}.json')
