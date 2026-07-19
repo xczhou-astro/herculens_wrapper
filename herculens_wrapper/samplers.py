@@ -550,8 +550,12 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 chain_method=chain_method,
             )
             mcmc.post_warmup_state = last_state
+            if disable_gibbs:
+                rng_key_to_pass = last_state.rng_key
+            else:
+                rng_key_to_pass = last_state.rng_key[..., 0, :]
             mcmc.run(
-                last_state.rng_key,
+                rng_key_to_pass,
             )
             
         last_state = mcmc.last_state
