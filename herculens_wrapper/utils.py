@@ -206,10 +206,10 @@ def log_jax_device_layout(args):
         f'(local_count={n_devices}, config_gpus={n_config_gpus}, '
         f"CUDA_VISIBLE_DEVICES={os.environ.get('CUDA_VISIBLE_DEVICES')!r})"
     )
-    if getattr(args, 'sampler', None) == 'hmc_numpyro' and n_chains > 1:
+    if getattr(args, 'sampler', None) == 'hmc' and n_chains > 1:
         chain_method = resolve_chain_method_hmc_numpyro(args)
         print(
-            f'[hmc_numpyro] chain layout: num_chains={n_chains}, '
+            f'[hmc] chain layout: num_chains={n_chains}, '
             f'chain_method={chain_method!r}'
         )
         if chain_method == 'parallel':

@@ -118,6 +118,169 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         print(f"[warning] Failed to generate arviz diagnostics: {e}")
 
 
+def _sample_at_index(samples, idx, include_keys=None, exclude=('model_image',)):
+    if include_keys is not None:
+        include_keys = set(include_keys)
+    return {
+        k: np.asarray(v)[idx]
+        for k, v in samples.items()
+        if include_keys is None or k in include_keys
+        if k not in exclude
+    }
+
+
+def _save_hmc_max_loglike_outputs(
+    samples,
+    prob_model,
+    save_path,
+    args,
+    active_sites=None,
+    kwargs_filename='kwargs_loglike.json',
+    pixels_filename='kwargs_loglike_source_pixels.npy',
+    pixels_wn_filename='kwargs_loglike_source_pixels_wn.npy',
+    linear_plot_filename='best_fit_model_loglike_linear.png',
+    log_plot_filename='best_fit_model_loglike_log.png',
+    log_likelihoods_filename='hmc_log_likelihoods.npy',
+):
+    try:
+        from herculens_wrapper.utils import kwargs_best_to_json_pixelated_npy, json_serializer
+        from herculens_wrapper.visualizations import display
+
+        n_total_samples = len(samples[list(samples.keys())[0]])
+        log_likelihoods = []
+        for idx in range(n_total_samples):
+            sample_params = _sample_at_index(samples, idx, include_keys=active_sites)
+            log_likelihoods.append(float(prob_model.log_likelihood(sample_params)))
+
+        log_likelihoods = np.asarray(log_likelihoods)
+        if not np.any(np.isfinite(log_likelihoods)):
+            print("[warning] Could not identify max-log-likelihood HMC sample: all values are non-finite.")
+            return {}
+        if log_likelihoods_filename is not None:
+            np.save(os.path.join(save_path, log_likelihoods_filename), log_likelihoods)
+
+        best_idx = int(np.nanargmax(log_likelihoods))
+        best_loglike = float(log_likelihoods[best_idx])
+        best_params_loglike = _sample_at_index(samples, best_idx, include_keys=active_sites)
+        kwargs_loglike = prob_model.params2kwargs(best_params_loglike)
+        type_list = getattr(prob_model, 'type_list', {})
+        kwargs_loglike_json = kwargs_best_to_json_pixelated_npy(
+            kwargs_loglike,
+            save_path,
+            type_list,
+            pixels_filename=pixels_filename,
+            pixels_wn_filename=pixels_wn_filename,
+        )
+        kwargs_loglike_json['_hmc_log_likelihood'] = best_loglike
+        kwargs_loglike_json['_hmc_sample_index'] = best_idx
+        with open(os.path.join(save_path, kwargs_filename), 'w') as f:
+            json.dump(kwargs_loglike_json, f, indent=4, default=json_serializer)
+        print(f"[hmc] Saved max-log-likelihood kwargs to {os.path.join(save_path, kwargs_filename)}")
+
+        img_data = getattr(prob_model, 'image_data', None)
+        ns_map = getattr(prob_model, 'noise_map', None)
+        l_image = getattr(prob_model, 'lens_image', None)
+        if img_data is not None and ns_map is not None and l_image is not None:
+            if 'model_image' in samples:
+                best_fit_model = np.asarray(samples['model_image'])[best_idx]
+            else:
+                best_fit_model = l_image.model(**kwargs_loglike)
+            p_scale = getattr(prob_model, 'pixel_scale', 0.08)
+            chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
+            mask = getattr(l_image, 'source_arc_mask', None)
+            if mask is not None:
+                mask = np.asarray(mask)
+            residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
+
+            display(
+                [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                titles=[
+                    'Max loglike model',
+                    'Image data',
+                    f'Residuals (chi^2 = {chi2:.2f})',
+                ],
+                pixel_scale=p_scale,
+                savefilename=os.path.join(save_path, linear_plot_filename),
+                plot_scale='linear',
+                contour_mask=mask,
+                residual_vis_max=residual_vis_max,
+            )
+            display(
+                [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                titles=[
+                    'Max loglike model',
+                    'Image data',
+                    f'Residuals (chi^2 = {chi2:.2f})',
+                ],
+                pixel_scale=p_scale,
+                savefilename=os.path.join(save_path, log_plot_filename),
+                plot_scale='log',
+                contour_mask=mask,
+                residual_vis_max=residual_vis_max,
+            )
+            print("[hmc] Saved max-log-likelihood model plots.")
+
+        return {
+            'log_likelihoods': log_likelihoods,
+            'max_log_likelihood': best_loglike,
+            'max_log_likelihood_index': best_idx,
+        }
+    except Exception as e:
+        print(f"[warning] Failed to save max-log-likelihood HMC outputs: {e}")
+        return {}
+
+
+def _save_hmc_pixels_wn_summary(
+    samples,
+    save_path,
+    plot_filename='source_pixels_wn_median_uncertainties.png',
+    median_filename='source_pixels_wn_median.npy',
+    lower_filename='source_pixels_wn_sigma_lower.npy',
+    upper_filename='source_pixels_wn_sigma_upper.npy',
+):
+    key = 'pixels_wn_source_grid'
+    if key not in samples:
+        return
+    try:
+        import matplotlib.pyplot as plt
+
+        arr = np.asarray(samples[key])
+        if arr.ndim < 2:
+            return
+        median = np.median(arr, axis=0)
+        p16 = np.percentile(arr, 16, axis=0)
+        p84 = np.percentile(arr, 84, axis=0)
+        lower = median - p16
+        upper = p84 - median
+
+        if median_filename is not None:
+            np.save(os.path.join(save_path, median_filename), median)
+        if lower_filename is not None:
+            np.save(os.path.join(save_path, lower_filename), lower)
+        if upper_filename is not None:
+            np.save(os.path.join(save_path, upper_filename), upper)
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        panels = [
+            (median, 'Median pixels_wn'),
+            (lower, 'Lower 1 sigma'),
+            (upper, 'Upper 1 sigma'),
+        ]
+        for ax, (panel, title) in zip(axes, panels):
+            im = ax.imshow(panel, origin='lower', cmap='twilight')
+            ax.set_title(title)
+            ax.set_xlabel('Fourier x')
+            ax.set_ylabel('Fourier y')
+            plt.colorbar(im, ax=ax)
+        plt.tight_layout()
+        out_path = os.path.join(save_path, plot_filename)
+        plt.savefig(out_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        print(f"[hmc] Saved median pixels_wn uncertainty plot to {out_path}")
+    except Exception as e:
+        print(f"[warning] Failed to save median pixels_wn uncertainty plot: {e}")
+
+
 def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None, source_pixel_scale=None):
     if num_params_free is None:
         num_params_free = num_params
@@ -613,6 +776,28 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 with open(kwargs_json_path, 'w') as f:
                     json.dump(temp_kwargs_json, f, indent=4, default=json_serializer)
                 print(f"[hmc] Saved intermediate kwargs_result JSON to {kwargs_json_path}")
+
+                _save_hmc_max_loglike_outputs(
+                    temp_samples,
+                    prob_model,
+                    diag_dir,
+                    args,
+                    active_sites=active_sites,
+                    kwargs_filename=f'kwargs_loglike_batch_{i}.json',
+                    pixels_filename=f'kwargs_loglike_source_pixels_batch_{i}.npy',
+                    pixels_wn_filename=f'kwargs_loglike_source_pixels_wn_batch_{i}.npy',
+                    linear_plot_filename=f'best_fit_model_loglike_linear_batch_{i}.png',
+                    log_plot_filename=f'best_fit_model_loglike_log_batch_{i}.png',
+                    log_likelihoods_filename=f'hmc_log_likelihoods_batch_{i}.npy',
+                )
+                _save_hmc_pixels_wn_summary(
+                    temp_samples,
+                    diag_dir,
+                    plot_filename=f'source_pixels_wn_median_uncertainties_batch_{i}.png',
+                    median_filename=f'source_pixels_wn_median_batch_{i}.npy',
+                    lower_filename=f'source_pixels_wn_sigma_lower_batch_{i}.npy',
+                    upper_filename=f'source_pixels_wn_sigma_upper_batch_{i}.npy',
+                )
             except Exception as ex_json:
                 print(f"[warning] Failed to save intermediate kwargs_result JSON: {ex_json}")
             
@@ -725,6 +910,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     samples = _concatenate_batches(all_samples, num_chains)
         
     map_params = tree_median(samples)
+
+    loglike_extra = _save_hmc_max_loglike_outputs(samples, prob_model, save_path, args, active_sites=active_sites)
+    _save_hmc_pixels_wn_summary(samples, save_path)
     
     # Flatten unconstrained samples for trace analysis
     try:
@@ -747,5 +935,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     extra_fields = {
         'flat_samples': flat_samples,
     }
+    if loglike_extra:
+        extra_fields.update({
+            k: v
+            for k, v in loglike_extra.items()
+            if k != 'log_likelihoods'
+        })
     
     return samples, map_params, extra_fields

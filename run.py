@@ -470,7 +470,14 @@ def build_and_run(config_path=None):
     if sampler != 'svi' and not getattr(args, 'pipeline', False):
         n_runs = 1
 
-    def run_one_iteration(n, run_save_path, run_seed, sampler_override=None, init_params_path_override=None):
+    def run_one_iteration(
+        n,
+        run_save_path,
+        run_seed,
+        sampler_override=None,
+        init_params_path_override=None,
+        append_log=False,
+    ):
         from types import SimpleNamespace
         import shutil
 
@@ -485,13 +492,17 @@ def build_and_run(config_path=None):
 
         # Redirect logging for this individual run
         run_log_path = os.path.join(run_save_path, 'log.txt')
-        run_log_file = open(run_log_path, 'w')
+        log_mode = 'a' if append_log and os.path.exists(run_log_path) else 'w'
+        run_log_file = open(run_log_path, log_mode)
         original_stdout = sys.stdout
         original_stderr = sys.stderr
 
         start_dt = datetime.now()
         formatted_start = start_dt.strftime("%Y-%m-%d %H:%M:%S")
-        run_log_file.write(f"Start at {formatted_start}\n")
+        if log_mode == 'a':
+            run_log_file.write(f"\nResume at {formatted_start}\n")
+        else:
+            run_log_file.write(f"Start at {formatted_start}\n")
         run_log_file.flush()
 
         sys.stdout = Tee(sys.stdout, run_log_file)
@@ -895,16 +906,16 @@ def build_and_run(config_path=None):
                     continue
 
                 print(f"\nRunning matched Stage 2 run {n} warm-starting from: {svi_parent_run}")
-                
+
+                resume_hmc = os.path.exists(run_save_path)
                 if os.path.exists(run_save_path):
-                    print(f"  Warning: Target folder {run_save_path} already exists. Cleaning it first...")
-                    import shutil
-                    shutil.rmtree(run_save_path)
+                    print(f"[Pipeline] HMC Run {n} is unfinished. Resuming in existing folder: {run_save_path}")
 
                 metrics_data = run_one_iteration(
                     n, run_save_path, run_seed, 
                     sampler_override=stage2_sampler,
-                    init_params_path_override=svi_parent_run
+                    init_params_path_override=svi_parent_run,
+                    append_log=resume_hmc,
                 )
                 if metrics_data is not None:
                     stage2_comparison[f"run_{n}"] = {
