@@ -15,7 +15,6 @@ __pycache__/
 **/.DS_Store
 
 # Ignore config files and other workspace scripts
-config*
 sim_sl_with_lens_light.py
 
 setup.py
