@@ -452,13 +452,6 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
     if not np.any(np.asarray(lens_image.source_arc_mask)):
         return None
 
-    percentile = 0.0
-    padding = 0
-    if args is not None:
-        percentile = float(getattr(args, 'source_support_mask_percentile', percentile))
-        padding = int(getattr(args, 'source_support_mask_padding', padding))
-    percentile = min(max(percentile, 0.0), 49.0)
-
     npix_src, npix_src_y = lens_image.SourceModel.pixel_grid.num_pixel_axes
     if npix_src_y != npix_src:
         raise ValueError('Source support mask currently requires a square source grid.')
@@ -490,10 +483,10 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
     if x_masked.size == 0 or y_masked.size == 0:
         return None
 
-    xmin = float(np.nanpercentile(x_masked, percentile))
-    xmax = float(np.nanpercentile(x_masked, 100.0 - percentile))
-    ymin = float(np.nanpercentile(y_masked, percentile))
-    ymax = float(np.nanpercentile(y_masked, 100.0 - percentile))
+    xmin = float(np.nanmin(x_masked))
+    xmax = float(np.nanmax(x_masked))
+    ymin = float(np.nanmin(y_masked))
+    ymax = float(np.nanmax(y_masked))
     print(
         "[source_support_mask] Ray-traced source-mask extent: "
         f"x=[{xmin:.6f}, {xmax:.6f}] (width={xmax - xmin:.6f}), "
@@ -504,8 +497,6 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
         (xx_src >= xmin) & (xx_src <= xmax)
         & (yy_src >= ymin) & (yy_src <= ymax)
     )
-    if padding > 0:
-        support_mask = scipy.ndimage.binary_dilation(support_mask, iterations=padding)
     return support_mask.astype(bool)
 
 
@@ -622,15 +613,12 @@ def create_prob_model(
         pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
     prior_type = pixelated_prior.get('prior_type', 'matern')
 
-    sampler_name = getattr(args, 'sampler', None) if args is not None else None
     use_source_support_mask = bool(getattr(args, 'use_source_support_mask', True)) if args is not None else True
-    use_source_support_mask_hmc = bool(getattr(args, 'use_source_support_mask_hmc', use_source_support_mask)) if args is not None else use_source_support_mask
-    apply_source_support_mask = use_source_support_mask_hmc if sampler_name == 'hmc' else use_source_support_mask
     source_support_mask = None
     lens_image.source_support_bounds = None
     if (
         type_list.get('source_light_type_list') == ['PIXELATED']
-        and apply_source_support_mask
+        and use_source_support_mask
     ):
         try:
             support_kwargs = None
