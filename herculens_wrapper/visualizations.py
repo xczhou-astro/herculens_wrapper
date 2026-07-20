@@ -314,6 +314,37 @@ def plot_source_plane(
     plot_scale='linear',
     output_filename='source_plane.png',
 ):
+    def _source_support_for_plot(lens_image, kwargs_lens, xx, yy):
+        if kwargs_lens is None or getattr(lens_image, 'source_arc_mask', None) is None:
+            return None, None
+        try:
+            x_grid_img, y_grid_img = lens_image.ImageNumerics.coordinates_evaluate
+            x_grid_src, y_grid_src = lens_image.MassModel.ray_shooting(
+                x_grid_img,
+                y_grid_img,
+                kwargs_lens,
+            )
+            mask_flat = np.asarray(lens_image._source_arc_mask_flat).astype(bool)
+            x_src_masked = np.asarray(x_grid_src)[mask_flat]
+            y_src_masked = np.asarray(y_grid_src)[mask_flat]
+            finite = np.isfinite(x_src_masked) & np.isfinite(y_src_masked)
+            x_src_masked = x_src_masked[finite]
+            y_src_masked = y_src_masked[finite]
+            if x_src_masked.size == 0 or y_src_masked.size == 0:
+                return None, None
+            xmin = float(np.nanmin(x_src_masked))
+            xmax = float(np.nanmax(x_src_masked))
+            ymin = float(np.nanmin(y_src_masked))
+            ymax = float(np.nanmax(y_src_masked))
+            support_mask = (
+                (xx >= xmin) & (xx <= xmax)
+                & (yy >= ymin) & (yy <= ymax)
+            )
+            return support_mask, (xmin, xmax, ymin, ymax)
+        except Exception as e:
+            print(f'[plot_source_plane] Source support mask failed: {e}')
+            return None, None
+
     is_pixelated = (
         'kwargs_source' in kwargs_result
         and len(kwargs_result['kwargs_source']) > 0
@@ -336,6 +367,8 @@ def plot_source_plane(
             xx = np.asarray(xx)
             yy = np.asarray(yy)
             extent = list(np.asarray(extent))
+            if xx.ndim == 1 and yy.ndim == 1:
+                xx, yy = np.meshgrid(xx, yy)
         else:
             extent = list(lens_image.SourceModel.pixel_grid.extent)
             xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
@@ -346,11 +379,25 @@ def plot_source_plane(
         adapted_pixel_scale = grid_width / npix
         print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
 
-        source_support_mask = getattr(lens_image, 'source_support_mask', None)
+        source_support_mask, source_support_bounds = _source_support_for_plot(
+            lens_image,
+            kwargs_result.get('kwargs_lens', None),
+            xx,
+            yy,
+        )
         if source_support_mask is not None:
             source_support_mask = np.asarray(source_support_mask, dtype=bool)
             if source_support_mask.shape == source_for_plot.shape:
                 source_for_plot = np.where(source_support_mask, source_for_plot, 0.0)
+                active = int(np.sum(source_support_mask))
+                total = int(source_support_mask.size)
+                xmin, xmax, ymin, ymax = source_support_bounds
+                print(
+                    "[plot_source_plane] Ray-traced source-mask extent for plotted lens: "
+                    f"x=[{xmin:.6f}, {xmax:.6f}] (width={xmax - xmin:.6f}), "
+                    f"y=[{ymin:.6f}, {ymax:.6f}] (height={ymax - ymin:.6f}); "
+                    f"active pixels={active}/{total} ({active / total:.1%})"
+                )
             else:
                 print(
                     f"[plot_source_plane] Source support mask shape {source_support_mask.shape} "
@@ -383,43 +430,6 @@ def plot_source_plane(
     # Initialize adaptive limits defaulting to the full grid extent
     xmin_sq, xmax_sq = extent[0], extent[1]
     ymin_sq, ymax_sq = extent[2], extent[3]
-
-    # Limit the viewport using the image-plane mask footprint.
-    mask = getattr(lens_image, 'source_arc_mask', None)
-    if mask is not None and 'kwargs_lens' in kwargs_result:
-        try:
-            x_grid_img, y_grid_img = lens_image.Grid.pixel_coordinates
-            x_grid_img = np.asarray(x_grid_img).flatten()
-            y_grid_img = np.asarray(y_grid_img).flatten()
-            x_grid_src, y_grid_src = lens_image.MassModel.ray_shooting(x_grid_img, y_grid_img, kwargs_result['kwargs_lens'])
-            mask_flat = np.asarray(mask).flatten()
-            if np.any(mask_flat):
-                x_src_masked = np.asarray(x_grid_src)[mask_flat]
-                y_src_masked = np.asarray(y_grid_src)[mask_flat]
-                xmin = float(np.nanpercentile(x_src_masked, 0.5))
-                xmax = float(np.nanpercentile(x_src_masked, 99.5))
-                ymin = float(np.nanpercentile(y_src_masked, 0.5))
-                ymax = float(np.nanpercentile(y_src_masked, 99.5))
-                
-                # Make the footprint mask a square based on the larger direction
-                cx = 0.5 * (xmin + xmax)
-                cy = 0.5 * (ymin + ymax)
-                max_dim = max(xmax - xmin, ymax - ymin)
-                
-                # Add 10% padding buffer
-                padding = 0.1
-                half_size = 0.5 * max_dim * (1.0 + 2.0 * padding)
-                
-                # Clip the viewport to the actual evaluated grid extent
-                xmin_sq = max(cx - half_size, extent[0])
-                xmax_sq = min(cx + half_size, extent[1])
-                ymin_sq = max(cy - half_size, extent[2])
-                ymax_sq = min(cy + half_size, extent[3])
-                
-                grid_mask = (xx >= xmin_sq) & (xx <= xmax_sq) & (yy >= ymin_sq) & (yy <= ymax_sq)
-                source_for_plot = np.where(grid_mask, source_for_plot, 0.0)
-        except Exception as e:
-            print(f'[plot_source_plane] Footprint masking failed: {e}')
 
     norm, cbar_label = _norm_from_plot_scale(plot_scale, source_for_plot)
 
@@ -460,7 +470,9 @@ def plot_source_plane(
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
     plt.colorbar(im1, ax=axes[1], label=cbar_label)
 
-    support_bounds = getattr(lens_image, 'source_support_bounds', None)
+    support_bounds = locals().get('source_support_bounds', None)
+    if support_bounds is None:
+        support_bounds = getattr(lens_image, 'source_support_bounds', None)
     if support_bounds is not None:
         xmin_b, xmax_b, ymin_b, ymax_b = [float(v) for v in support_bounds]
         boundary_lines = [
