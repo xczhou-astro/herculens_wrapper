@@ -281,6 +281,80 @@ def _save_hmc_pixels_wn_summary(
         print(f"[warning] Failed to save median pixels_wn uncertainty plot: {e}")
 
 
+def _select_hmc_jitter_keys(init_params_unconst, args, vars_mass):
+    mode = str(getattr(args, 'hmc_init_jitter_sites', 'lens_mass')).strip().lower()
+    keys = list(init_params_unconst.keys())
+    if mode in ('none', 'false', 'off'):
+        return []
+    if mode == 'lens_mass':
+        return [k for k in vars_mass if k in init_params_unconst]
+    if mode == 'all_non_pixel':
+        return [k for k in keys if 'pixels_wn_' not in k]
+    if mode == 'all':
+        return keys
+    requested = [k.strip() for k in mode.split(',') if k.strip()]
+    return [k for k in requested if k in init_params_unconst]
+
+
+def _build_hmc_chain_init_params(prob_model, init_params_unconst, args, num_chains, vars_mass):
+    if num_chains <= 1 or init_params_unconst is None:
+        return init_params_unconst
+
+    jitter_scale = float(getattr(args, 'hmc_init_jitter_scale', 0.0))
+    jitter_keys = _select_hmc_jitter_keys(init_params_unconst, args, vars_mass)
+    if jitter_scale <= 0.0 or not jitter_keys:
+        return jax.tree_util.tree_map(
+            lambda x: jnp.broadcast_to(x, (num_chains,) + jnp.shape(x)),
+            init_params_unconst,
+        )
+
+    max_tries = int(getattr(args, 'hmc_init_jitter_max_tries', 200))
+    rng_key = jax.random.PRNGKey(int(getattr(args, 'random_seed', 0)) + 7919)
+    chain_params = []
+    print(
+        f"[hmc] Jittering initial parameters for {num_chains} chains "
+        f"(scale={jitter_scale:g}, sites={jitter_keys})"
+    )
+
+    for chain_idx in range(num_chains):
+        accepted = None
+        accepted_log_prob = None
+        for attempt in range(max_tries):
+            proposal = dict(init_params_unconst)
+            for key in jitter_keys:
+                rng_key, noise_key = jax.random.split(rng_key)
+                base = jnp.asarray(init_params_unconst[key])
+                proposal[key] = base + jitter_scale * jax.random.normal(
+                    noise_key,
+                    shape=base.shape,
+                    dtype=base.dtype,
+                )
+            try:
+                constrained = to_constrained(prob_model, proposal)
+                log_prob = float(prob_model.log_prob(constrained, constrained=True))
+                if np.isfinite(log_prob):
+                    accepted = proposal
+                    accepted_log_prob = log_prob
+                    break
+            except Exception:
+                pass
+        if accepted is None:
+            raise ValueError(
+                f"Failed to generate a finite-log-prob HMC initial jitter "
+                f"for chain {chain_idx} after {max_tries} attempts."
+            )
+        print(
+            f"[hmc] Accepted jittered init for chain {chain_idx} "
+            f"(log_prob={accepted_log_prob:.2f})"
+        )
+        chain_params.append(accepted)
+
+    return {
+        key: jnp.stack([jnp.asarray(chain[key]) for chain in chain_params], axis=0)
+        for key in init_params_unconst.keys()
+    }
+
+
 def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None, source_pixel_scale=None):
     if num_params_free is None:
         num_params_free = num_params
@@ -692,12 +766,13 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 progress_bar=progress_bar,
                 chain_method=chain_method,
             )
-            init_params_unconst_chain = init_params_unconst
-            if num_chains > 1 and init_params_unconst is not None:
-                init_params_unconst_chain = jax.tree_util.tree_map(
-                    lambda x: jnp.broadcast_to(x, (num_chains,) + jnp.shape(x)),
-                    init_params_unconst
-                )
+            init_params_unconst_chain = _build_hmc_chain_init_params(
+                prob_model,
+                init_params_unconst,
+                args,
+                num_chains,
+                vars_mass,
+            )
             mcmc.run(
                 rng_key_,
                 init_params=init_params_unconst_chain,

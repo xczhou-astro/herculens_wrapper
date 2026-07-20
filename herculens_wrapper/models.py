@@ -446,6 +446,63 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
     return kwargs
 
 
+def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
+    if kwargs_lens is None or getattr(lens_image, 'source_arc_mask', None) is None:
+        return None
+    if not np.any(np.asarray(lens_image.source_arc_mask)):
+        return None
+
+    percentile = 0.5
+    padding = 0
+    if args is not None:
+        percentile = float(getattr(args, 'source_support_mask_percentile', percentile))
+        padding = int(getattr(args, 'source_support_mask_padding', padding))
+    percentile = min(max(percentile, 0.0), 49.0)
+
+    npix_src, npix_src_y = lens_image.SourceModel.pixel_grid.num_pixel_axes
+    if npix_src_y != npix_src:
+        raise ValueError('Source support mask currently requires a square source grid.')
+
+    x_src_axis, y_src_axis, _ = lens_image.get_source_coordinates(
+        kwargs_lens,
+        npix_src=npix_src,
+        source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
+    )
+    x_src_axis = np.asarray(x_src_axis)
+    y_src_axis = np.asarray(y_src_axis)
+    if x_src_axis.ndim == 1 and y_src_axis.ndim == 1:
+        xx_src, yy_src = np.meshgrid(x_src_axis, y_src_axis)
+    else:
+        xx_src, yy_src = x_src_axis, y_src_axis
+
+    x_img, y_img = lens_image.ImageNumerics.coordinates_evaluate
+    x_ray, y_ray = lens_image.MassModel.ray_shooting(
+        x_img,
+        y_img,
+        kwargs_lens,
+    )
+    mask_flat = np.asarray(lens_image._source_arc_mask_flat).astype(bool)
+    x_masked = np.asarray(x_ray)[mask_flat]
+    y_masked = np.asarray(y_ray)[mask_flat]
+    finite = np.isfinite(x_masked) & np.isfinite(y_masked)
+    x_masked = x_masked[finite]
+    y_masked = y_masked[finite]
+    if x_masked.size == 0 or y_masked.size == 0:
+        return None
+
+    xmin = float(np.nanpercentile(x_masked, percentile))
+    xmax = float(np.nanpercentile(x_masked, 100.0 - percentile))
+    ymin = float(np.nanpercentile(y_masked, percentile))
+    ymax = float(np.nanpercentile(y_masked, 100.0 - percentile))
+    support_mask = (
+        (xx_src >= xmin) & (xx_src <= xmax)
+        & (yy_src >= ymin) & (yy_src <= ymax)
+    )
+    if padding > 0:
+        support_mask = scipy.ndimage.binary_dilation(support_mask, iterations=padding)
+    return support_mask.astype(bool)
+
+
 def create_prob_model(
     param_list,
     type_list,
@@ -559,6 +616,42 @@ def create_prob_model(
     if type_list.get('source_light_type_list') == ['PIXELATED']:
         pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
     prior_type = pixelated_prior.get('prior_type', 'matern')
+
+    sampler_name = getattr(args, 'sampler', None) if args is not None else None
+    use_source_support_mask = bool(getattr(args, 'use_source_support_mask', False)) if args is not None else False
+    use_source_support_mask_hmc = bool(getattr(args, 'use_source_support_mask_hmc', True)) if args is not None else True
+    source_support_mask = None
+    if (
+        type_list.get('source_light_type_list') == ['PIXELATED']
+        and (use_source_support_mask or (sampler_name == 'hmc' and use_source_support_mask_hmc))
+    ):
+        try:
+            support_kwargs = None
+            if init_params_path is not None:
+                support_kwargs = load_kwargs_init_json(init_params_path)
+            else:
+                support_kwargs = param_list_to_init_kwargs(param_list, type_list, lens_image)
+            source_support_mask = _source_support_mask_from_lens(
+                lens_image,
+                support_kwargs.get('kwargs_lens', None),
+                args=args,
+            )
+            if source_support_mask is not None:
+                active = int(np.sum(source_support_mask))
+                total = int(source_support_mask.size)
+                print(f"[source_support_mask] Active source pixels: {active}/{total} ({active / total:.1%})")
+                save_path = getattr(args, 'save_path', None) if args is not None else None
+                if save_path is not None:
+                    os.makedirs(save_path, exist_ok=True)
+                    np.save(os.path.join(save_path, 'source_support_mask.npy'), source_support_mask)
+        except Exception as e:
+            print(f"[source_support_mask] Warning: failed to build source support mask: {e}")
+            source_support_mask = None
+    source_support_mask_jax = (
+        jnp.asarray(source_support_mask, dtype=jnp.float64)
+        if source_support_mask is not None
+        else None
+    )
     
     regul_weights = None
     starlet = None
@@ -734,6 +827,8 @@ def create_prob_model(
                         # Enforce positivity if configured
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
+                        if source_support_mask_jax is not None:
+                            source_pixels = source_pixels * source_support_mask_jax
                             
                         prior_source_light = [{'pixels': source_pixels}]
                     else:
@@ -745,6 +840,8 @@ def create_prob_model(
                                 constraint=constraints.greater_than(0.),
                                 event_dim=2
                             )
+                            if source_support_mask_jax is not None:
+                                source_pixels = source_pixels * source_support_mask_jax
                             prior_source_light = [{'pixels': source_pixels}]
                         else:
                             k_grid = PowerSpectrum.K_grid((ny, nx))
@@ -761,6 +858,9 @@ def create_prob_model(
                                 sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
+                            if source_support_mask_jax is not None:
+                                res = dict(res)
+                                res['pixels'] = res['pixels'] * source_support_mask_jax
                             prior_source_light = [{'pixels': res['pixels']}]
             else:
                 prior_source_light = []
@@ -982,10 +1082,14 @@ def create_prob_model(
                         source_pixels = starlet.reconstruct(all_coeffs)
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
+                        if source_support_mask_jax is not None:
+                            source_pixels = source_pixels * source_support_mask_jax
                         kwargs_source = [{'pixels': source_pixels}]
                     else:
                         if prior_type == 'wavelet_penalty':
                             source_pixels = params['source_pixels']
+                            if source_support_mask_jax is not None:
+                                source_pixels = source_pixels * source_support_mask_jax
                             kwargs_source = [{'pixels': source_pixels}]
                         else:
                             ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
@@ -999,6 +1103,8 @@ def create_prob_model(
                                 n_value=pixelated_prior.get('n_value', None),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
+                            if source_support_mask_jax is not None:
+                                source_pixels = source_pixels * source_support_mask_jax
                             n_val = params.get('n_source_grid', pixelated_prior.get('n_value', None))
                             rho_val = params.get('rho_source_grid', None)
                             sigma_val = params.get('sigma_source_grid', None)
@@ -1082,6 +1188,8 @@ def create_prob_model(
     model_instance.noise_map = noise_map
     model_instance.param_list = param_list
     model_instance.type_list = type_list
+    model_instance.source_support_mask = source_support_mask
+    model_instance.source_support_mask_jax = source_support_mask_jax
     p_scale = 0.08
     try:
         p_scale = float(lens_image.Grid.pixel_width)
@@ -1786,4 +1894,3 @@ def validate_param_list(type_list, param_list):
             )
         if has_t and len(type_list[type_key]) != len(param_list[param_key]):
             raise ValueError(f"Length mismatch for {type_key} / {param_key}.")
-

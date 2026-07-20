@@ -396,6 +396,9 @@ def arguments():
         'num_samples_hmc_numpyro': 6000,
         'checkpoint_interval_hmc_numpyro': 500,
         'num_chains_hmc_numpyro': 4,
+        'hmc_init_jitter_scale': 1e-3,
+        'hmc_init_jitter_sites': 'lens_mass',  # lens_mass | all_non_pixel | all | comma-separated site names | none
+        'hmc_init_jitter_max_tries': 200,
 
         # --- svi (Stochastic Variational Inference) ---
         'max_iterations_svi': 5_000,
