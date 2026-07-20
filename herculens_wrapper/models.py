@@ -659,7 +659,6 @@ def create_prob_model(
     
     if type_list.get('source_light_type_list') == ['PIXELATED'] and prior_type in ('wavelet_sparsity', 'wavelet_penalty'):
         from herculens.RegulModel.regul_model import RegularizationModel
-        import numpy as np
         
         # 1. Load or estimate kwargs_best
         if init_params_path is not None:
