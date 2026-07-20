@@ -46,6 +46,103 @@ def tree_median(tree):
     return jax.tree_util.tree_map(lambda x: np.median(x, axis=0), tree)
 
 
+def get_active_sample_sites(prob_model, rng_seed=0):
+    """Return latent sample-site names in the NumPyro model."""
+    from numpyro.handlers import trace, seed
+
+    with seed(rng_seed=rng_seed):
+        model_trace = trace(prob_model.model).get_trace()
+    return [
+        name for name, site in model_trace.items()
+        if site["type"] == "sample" and not site["is_observed"]
+    ]
+
+
+def evaluate_model_deterministics(prob_model, params, rng_seed=0, active_sites=None):
+    """Evaluate NumPyro deterministic sites after conditioning on constrained params."""
+    from numpyro.handlers import substitute, trace, seed
+
+    if active_sites is None:
+        active_sites = get_active_sample_sites(prob_model, rng_seed=rng_seed)
+    active_sites = set(active_sites)
+    conditioned_params = {k: v for k, v in params.items() if k in active_sites}
+    missing = sorted(k for k in active_sites if k not in conditioned_params)
+    if missing:
+        raise KeyError(
+            "Cannot evaluate deterministic model outputs; missing conditioned "
+            f"sample sites: {missing}"
+        )
+
+    with seed(rng_seed=rng_seed):
+        model_trace = trace(
+            substitute(prob_model.model, data=params)
+        ).get_trace()
+    return {
+        name: site["value"]
+        for name, site in model_trace.items()
+        if site["type"] == "deterministic"
+    }
+
+
+def median_deterministics_from_samples(samples, active_sites=None):
+    """Median deterministic arrays stored in HMC samples."""
+    active_sites = set(active_sites or [])
+    deterministics = {}
+    for key, value in samples.items():
+        if key in active_sites:
+            continue
+        deterministics[key] = np.median(np.asarray(value), axis=0)
+    return deterministics
+
+
+def kwargs_with_deterministics(prob_model, params, deterministics=None, rng_seed=0, active_sites=None):
+    """
+    Convert constrained parameters to kwargs, replacing model-derived outputs
+    with NumPyro deterministic values where available.
+    """
+    kwargs = prob_model.params2kwargs(params)
+    if deterministics is None:
+        deterministics = {}
+
+    kwargs_source = kwargs.get('kwargs_source', None)
+    needs_pixels = (
+        kwargs_source is not None
+        and len(kwargs_source) > 0
+        and isinstance(kwargs_source[0], dict)
+        and 'pixels' in kwargs_source[0]
+        and 'pixels_source_grid' not in deterministics
+    )
+    if 'model_image' not in deterministics or needs_pixels:
+        computed_deterministics = evaluate_model_deterministics(
+            prob_model,
+            params,
+            rng_seed=rng_seed,
+            active_sites=active_sites,
+        )
+        computed_deterministics.update(deterministics)
+        deterministics = computed_deterministics
+
+    if (
+        kwargs_source is not None
+        and len(kwargs_source) > 0
+        and isinstance(kwargs_source[0], dict)
+        and 'pixels_source_grid' in deterministics
+    ):
+        kwargs_source[0]['pixels'] = deterministics['pixels_source_grid']
+
+    return kwargs, deterministics
+
+
+def model_image_from_deterministics(prob_model, kwargs, deterministics=None):
+    """Return deterministic model_image, falling back to lens_image.model()."""
+    if deterministics is not None and 'model_image' in deterministics:
+        return np.asarray(deterministics['model_image'])
+    lens_image = getattr(prob_model, 'lens_image', None)
+    if lens_image is None:
+        raise ValueError("prob_model does not expose lens_image for model image fallback.")
+    return lens_image.model(**kwargs)
+
+
 def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=None):
     try:
         import arviz as az
@@ -162,7 +259,18 @@ def _save_hmc_max_loglike_outputs(
         best_idx = int(np.nanargmax(log_likelihoods))
         best_loglike = float(log_likelihoods[best_idx])
         best_params_loglike = _sample_at_index(samples, best_idx, include_keys=active_sites)
-        kwargs_loglike = prob_model.params2kwargs(best_params_loglike)
+        sample_deterministics = {
+            k: np.asarray(v)[best_idx]
+            for k, v in samples.items()
+            if active_sites is None or k not in set(active_sites)
+        }
+        kwargs_loglike, sample_deterministics = kwargs_with_deterministics(
+            prob_model,
+            best_params_loglike,
+            deterministics=sample_deterministics,
+            rng_seed=getattr(args, 'random_seed', 0),
+            active_sites=active_sites,
+        )
         type_list = getattr(prob_model, 'type_list', {})
         kwargs_loglike_json = kwargs_best_to_json_pixelated_npy(
             kwargs_loglike,
@@ -181,10 +289,11 @@ def _save_hmc_max_loglike_outputs(
         ns_map = getattr(prob_model, 'noise_map', None)
         l_image = getattr(prob_model, 'lens_image', None)
         if img_data is not None and ns_map is not None and l_image is not None:
-            if 'model_image' in samples:
-                best_fit_model = np.asarray(samples['model_image'])[best_idx]
-            else:
-                best_fit_model = l_image.model(**kwargs_loglike)
+            best_fit_model = model_image_from_deterministics(
+                prob_model,
+                kwargs_loglike,
+                sample_deterministics,
+            )
             p_scale = getattr(prob_model, 'pixel_scale', 0.08)
             chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
             mask = getattr(l_image, 'source_arc_mask', None)
@@ -827,8 +936,19 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             temp_samples = _concatenate_batches(all_samples, num_chains)
             
             # 2. Compute current medians
-            temp_medians = {k: np.median(np.asarray(v), axis=0) for k, v in temp_samples.items()}
-            temp_kwargs = prob_model.params2kwargs(temp_medians)
+            temp_medians = {
+                k: np.median(np.asarray(v), axis=0)
+                for k, v in temp_samples.items()
+                if k in active_sites
+            }
+            temp_deterministics = median_deterministics_from_samples(temp_samples, active_sites=active_sites)
+            temp_kwargs, temp_deterministics = kwargs_with_deterministics(
+                prob_model,
+                temp_medians,
+                deterministics=temp_deterministics,
+                rng_seed=getattr(args, 'random_seed', 0),
+                active_sites=active_sites,
+            )
             
             # 3. Create diagnostics subfolder
             diag_dir = os.path.join(save_path, 'diagnostics')
@@ -902,10 +1022,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 
                 # Best fit model plots (linear and log)
                 try:
-                    if 'model_image' in temp_samples:
-                        best_fit_model = np.median(temp_samples['model_image'], axis=0)
-                    else:
-                        best_fit_model = l_image.model(**temp_kwargs)
+                    best_fit_model = model_image_from_deterministics(
+                        prob_model,
+                        temp_kwargs,
+                        temp_deterministics,
+                    )
                     chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
                     mask = getattr(l_image, 'source_arc_mask', None)
                     if mask is not None:
@@ -984,7 +1105,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     # Concatenate all batches along the sample axis
     samples = _concatenate_batches(all_samples, num_chains)
         
-    map_params = tree_median(samples)
+    param_samples = {k: v for k, v in samples.items() if k in active_sites}
+    map_params = tree_median(param_samples)
 
     loglike_extra = _save_hmc_max_loglike_outputs(samples, prob_model, save_path, args, active_sites=active_sites)
     _save_hmc_pixels_wn_summary(samples, save_path)
@@ -994,7 +1116,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         flat_samples_list = []
         n_total_samples = len(samples[list(samples.keys())[0]])
         for i in range(n_total_samples):
-            sample_c = {k: v[i] for k, v in samples.items()}
+            sample_c = {k: v[i] for k, v in samples.items() if k in active_sites}
             sample_u = to_unconstrained(prob_model, sample_c)
             from jax.flatten_util import ravel_pytree
             flat_val, _ = ravel_pytree(sample_u)

@@ -223,6 +223,9 @@ def build_and_run(config_path=None):
         run_optax,
         run_hmc,
         save_metrics,
+        kwargs_with_deterministics,
+        median_deterministics_from_samples,
+        model_image_from_deterministics,
     )
     from herculens_wrapper.visualizations import (
         display_init,
@@ -709,7 +712,25 @@ def build_and_run(config_path=None):
             else:
                 raise ValueError(f"Unknown sampler: {run_args.sampler}")
 
-            kwargs_best = run_prob_model.params2kwargs(best_params)
+            if run_args.sampler in MCMC_SAMPLERS and mcmc_samples is not None:
+                active_sites_for_output = list(best_params.keys())
+                output_deterministics = median_deterministics_from_samples(
+                    mcmc_samples,
+                    active_sites=active_sites_for_output,
+                )
+                kwargs_best, output_deterministics = kwargs_with_deterministics(
+                    run_prob_model,
+                    best_params,
+                    deterministics=output_deterministics,
+                    rng_seed=run_args.random_seed,
+                    active_sites=active_sites_for_output,
+                )
+            else:
+                kwargs_best, output_deterministics = kwargs_with_deterministics(
+                    run_prob_model,
+                    best_params,
+                    rng_seed=run_args.random_seed,
+                )
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, run_save_path, type_list)
             with open(os.path.join(run_save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
@@ -725,11 +746,11 @@ def build_and_run(config_path=None):
                 else:
                     num_params_free = num_params - (ny * nx)
 
-            if run_args.sampler in MCMC_SAMPLERS and mcmc_samples is not None and 'model_image' in mcmc_samples:
-                img_arr = np.asarray(mcmc_samples['model_image'])
-                best_fit_model = np.median(img_arr, axis=tuple(range(img_arr.ndim - 2)))
-            else:
-                best_fit_model = lens_image.model(**kwargs_best)
+            best_fit_model = model_image_from_deterministics(
+                run_prob_model,
+                kwargs_best,
+                output_deterministics,
+            )
             source_pixel_scale = None
             if type_list.get('source_light_type_list') == ['PIXELATED']:
                 try:
@@ -1069,7 +1090,11 @@ def build_and_run(config_path=None):
             elif sampler == 'optax':
                 best_params, extra = run_optax(prob_model, args, init_params)
 
-            kwargs_best = prob_model.params2kwargs(best_params)
+            kwargs_best, output_deterministics = kwargs_with_deterministics(
+                prob_model,
+                best_params,
+                rng_seed=args.random_seed,
+            )
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list)
             with open(os.path.join(save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
@@ -1091,7 +1116,11 @@ def build_and_run(config_path=None):
                 else:
                     num_params_free = num_params - (ny * nx)
 
-            best_fit_model = lens_image.model(**kwargs_best)
+            best_fit_model = model_image_from_deterministics(
+                prob_model,
+                kwargs_best,
+                output_deterministics,
+            )
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
             log_likelihood = float(prob_model.log_likelihood(best_params))
             metrics = save_metrics(
@@ -1107,7 +1136,18 @@ def build_and_run(config_path=None):
             mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params, init_params_path=args.init_params_path)
             flat_samples = extra.get('flat_samples', None)
 
-            kwargs_best = prob_model.params2kwargs(best_params)
+            active_sites_for_output = list(best_params.keys())
+            output_deterministics = median_deterministics_from_samples(
+                mcmc_samples,
+                active_sites=active_sites_for_output,
+            )
+            kwargs_best, output_deterministics = kwargs_with_deterministics(
+                prob_model,
+                best_params,
+                deterministics=output_deterministics,
+                rng_seed=args.random_seed,
+                active_sites=active_sites_for_output,
+            )
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, save_path, type_list)
             with open(os.path.join(save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
@@ -1142,11 +1182,11 @@ def build_and_run(config_path=None):
             with open(extra_json_path, 'w') as f:
                 json.dump(extra_dict, f, indent=4, default=json_serializer)
 
-            if sampler in MCMC_SAMPLERS and mcmc_samples is not None and 'model_image' in mcmc_samples:
-                img_arr = np.asarray(mcmc_samples['model_image'])
-                best_fit_model = np.median(img_arr, axis=tuple(range(img_arr.ndim - 2)))
-            else:
-                best_fit_model = lens_image.model(**kwargs_best)
+            best_fit_model = model_image_from_deterministics(
+                prob_model,
+                kwargs_best,
+                output_deterministics,
+            )
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
             log_likelihood = float(prob_model.log_likelihood(best_params))
             metrics = save_metrics(

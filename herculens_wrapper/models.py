@@ -821,6 +821,7 @@ def create_prob_model(
                         # Enforce positivity if configured
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
+                        source_pixels = numpyro.deterministic('pixels_source_grid', source_pixels)
                             
                         prior_source_light = [{'pixels': source_pixels}]
                     else:
@@ -832,6 +833,7 @@ def create_prob_model(
                                 constraint=constraints.greater_than(0.),
                                 event_dim=2
                             )
+                            source_pixels = numpyro.deterministic('pixels_source_grid', source_pixels)
                             prior_source_light = [{'pixels': source_pixels}]
                         else:
                             k_grid = PowerSpectrum.K_grid((ny, nx))
