@@ -384,7 +384,7 @@ def plot_source_plane(
     xmin_sq, xmax_sq = extent[0], extent[1]
     ymin_sq, ymax_sq = extent[2], extent[3]
 
-    # Apply footprint masking to the source plane using the image-plane mask
+    # Limit the viewport using the image-plane mask footprint.
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None and 'kwargs_lens' in kwargs_result:
         try:
@@ -459,6 +459,19 @@ def plot_source_plane(
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
     plt.colorbar(im1, ax=axes[1], label=cbar_label)
+
+    support_bounds = getattr(lens_image, 'source_support_bounds', None)
+    if support_bounds is not None:
+        xmin_b, xmax_b, ymin_b, ymax_b = [float(v) for v in support_bounds]
+        boundary_lines = [
+            ([xmin_b, xmin_b], [ymin_b, ymax_b]),
+            ([xmax_b, xmax_b], [ymin_b, ymax_b]),
+            ([xmin_b, xmax_b], [ymin_b, ymin_b]),
+            ([xmin_b, xmax_b], [ymax_b, ymax_b]),
+        ]
+        for ax in axes:
+            for xs, ys in boundary_lines:
+                ax.plot(xs, ys, color='cyan', lw=1.2, ls='--', alpha=0.9)
 
     for a in axes:
         a.set_xlabel('arcsec')
@@ -740,36 +753,6 @@ def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=No
     print(f'[plots] Saved {out}')
 
 
-def _apply_source_support_mask_to_kwargs(lens_image, kwargs_result):
-    source_support_mask = getattr(lens_image, 'source_support_mask', None)
-    if source_support_mask is None:
-        return kwargs_result
-    if (
-        'kwargs_source' not in kwargs_result
-        or len(kwargs_result['kwargs_source']) == 0
-        or not isinstance(kwargs_result['kwargs_source'][0], dict)
-        or 'pixels' not in kwargs_result['kwargs_source'][0]
-    ):
-        return kwargs_result
-
-    support = np.asarray(source_support_mask, dtype=bool)
-    pixels = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
-    if support.shape != pixels.shape:
-        print(
-            f"[source_support_mask] Source support mask shape {support.shape} "
-            f"does not match source pixels shape {pixels.shape}; skipping kwargs mask."
-        )
-        return kwargs_result
-
-    masked_kwargs = dict(kwargs_result)
-    kwargs_source = list(masked_kwargs['kwargs_source'])
-    source0 = dict(kwargs_source[0])
-    source0['pixels'] = np.where(support, pixels, 0.0)
-    kwargs_source[0] = source0
-    masked_kwargs['kwargs_source'] = kwargs_source
-    return masked_kwargs
-
-
 def display_init(
     prob_model,
     init_params,
@@ -783,7 +766,6 @@ def display_init(
 ):
     """Plot the initial guess model before inference."""
     kwargs_init = prob_model.params2kwargs(init_params)
-    kwargs_init = _apply_source_support_mask_to_kwargs(lens_image, kwargs_init)
     if save_path is not None and type_list is not None:
         kwargs_init_json = kwargs_best_to_json_pixelated_npy(
             kwargs_init, save_path, type_list,

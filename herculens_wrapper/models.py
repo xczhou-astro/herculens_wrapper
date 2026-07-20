@@ -499,6 +499,7 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
         f"x=[{xmin:.6f}, {xmax:.6f}] (width={xmax - xmin:.6f}), "
         f"y=[{ymin:.6f}, {ymax:.6f}] (height={ymax - ymin:.6f})"
     )
+    lens_image.source_support_bounds = (xmin, xmax, ymin, ymax)
     support_mask = (
         (xx_src >= xmin) & (xx_src <= xmax)
         & (yy_src >= ymin) & (yy_src <= ymax)
@@ -626,6 +627,7 @@ def create_prob_model(
     use_source_support_mask_hmc = bool(getattr(args, 'use_source_support_mask_hmc', use_source_support_mask)) if args is not None else use_source_support_mask
     apply_source_support_mask = use_source_support_mask_hmc if sampler_name == 'hmc' else use_source_support_mask
     source_support_mask = None
+    lens_image.source_support_bounds = None
     if (
         type_list.get('source_light_type_list') == ['PIXELATED']
         and apply_source_support_mask
@@ -658,12 +660,6 @@ def create_prob_model(
             lens_image.source_support_mask = None
     else:
         lens_image.source_support_mask = None
-    source_support_mask_jax = (
-        jnp.asarray(source_support_mask, dtype=jnp.float64)
-        if source_support_mask is not None
-        else None
-    )
-    
     regul_weights = None
     starlet = None
     nscales = None
@@ -837,8 +833,6 @@ def create_prob_model(
                         # Enforce positivity if configured
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
-                        if source_support_mask_jax is not None:
-                            source_pixels = source_pixels * source_support_mask_jax
                             
                         prior_source_light = [{'pixels': source_pixels}]
                     else:
@@ -850,8 +844,6 @@ def create_prob_model(
                                 constraint=constraints.greater_than(0.),
                                 event_dim=2
                             )
-                            if source_support_mask_jax is not None:
-                                source_pixels = source_pixels * source_support_mask_jax
                             prior_source_light = [{'pixels': source_pixels}]
                         else:
                             k_grid = PowerSpectrum.K_grid((ny, nx))
@@ -868,9 +860,6 @@ def create_prob_model(
                                 sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
-                            if source_support_mask_jax is not None:
-                                res = dict(res)
-                                res['pixels'] = res['pixels'] * source_support_mask_jax
                             prior_source_light = [{'pixels': res['pixels']}]
             else:
                 prior_source_light = []
@@ -1092,14 +1081,10 @@ def create_prob_model(
                         source_pixels = starlet.reconstruct(all_coeffs)
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
-                        if source_support_mask_jax is not None:
-                            source_pixels = source_pixels * source_support_mask_jax
                         kwargs_source = [{'pixels': source_pixels}]
                     else:
                         if prior_type == 'wavelet_penalty':
                             source_pixels = params['source_pixels']
-                            if source_support_mask_jax is not None:
-                                source_pixels = source_pixels * source_support_mask_jax
                             kwargs_source = [{'pixels': source_pixels}]
                         else:
                             ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
@@ -1113,8 +1098,6 @@ def create_prob_model(
                                 n_value=pixelated_prior.get('n_value', None),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
-                            if source_support_mask_jax is not None:
-                                source_pixels = source_pixels * source_support_mask_jax
                             n_val = params.get('n_source_grid', pixelated_prior.get('n_value', None))
                             rho_val = params.get('rho_source_grid', None)
                             sigma_val = params.get('sigma_source_grid', None)
@@ -1199,7 +1182,6 @@ def create_prob_model(
     model_instance.param_list = param_list
     model_instance.type_list = type_list
     model_instance.source_support_mask = source_support_mask
-    model_instance.source_support_mask_jax = source_support_mask_jax
     p_scale = 0.08
     try:
         p_scale = float(lens_image.Grid.pixel_width)
