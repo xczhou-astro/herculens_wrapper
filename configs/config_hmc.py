@@ -366,6 +366,10 @@ def arguments():
 
         'pipeline': False,
         'source_grid_scale': 0.8, 
+        'use_source_support_mask': True,
+        'use_source_support_mask_hmc': True,
+        'source_support_mask_percentile': 0.0,
+        'source_support_mask_padding': 0,
         'conjugate_points': None,
 
         # general settings

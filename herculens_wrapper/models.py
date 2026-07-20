@@ -622,12 +622,13 @@ def create_prob_model(
     prior_type = pixelated_prior.get('prior_type', 'matern')
 
     sampler_name = getattr(args, 'sampler', None) if args is not None else None
-    use_source_support_mask = bool(getattr(args, 'use_source_support_mask', False)) if args is not None else False
-    use_source_support_mask_hmc = bool(getattr(args, 'use_source_support_mask_hmc', True)) if args is not None else True
+    use_source_support_mask = bool(getattr(args, 'use_source_support_mask', True)) if args is not None else True
+    use_source_support_mask_hmc = bool(getattr(args, 'use_source_support_mask_hmc', use_source_support_mask)) if args is not None else use_source_support_mask
+    apply_source_support_mask = use_source_support_mask_hmc if sampler_name == 'hmc' else use_source_support_mask
     source_support_mask = None
     if (
         type_list.get('source_light_type_list') == ['PIXELATED']
-        and (use_source_support_mask or (sampler_name == 'hmc' and use_source_support_mask_hmc))
+        and apply_source_support_mask
     ):
         try:
             support_kwargs = None
@@ -655,6 +656,8 @@ def create_prob_model(
             print(f"[source_support_mask] Warning: failed to build source support mask: {e}")
             source_support_mask = None
             lens_image.source_support_mask = None
+    else:
+        lens_image.source_support_mask = None
     source_support_mask_jax = (
         jnp.asarray(source_support_mask, dtype=jnp.float64)
         if source_support_mask is not None
