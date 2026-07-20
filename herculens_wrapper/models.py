@@ -452,7 +452,7 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
     if not np.any(np.asarray(lens_image.source_arc_mask)):
         return None
 
-    percentile = 0.5
+    percentile = 0.0
     padding = 0
     if args is not None:
         percentile = float(getattr(args, 'source_support_mask_percentile', percentile))
@@ -494,6 +494,11 @@ def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
     xmax = float(np.nanpercentile(x_masked, 100.0 - percentile))
     ymin = float(np.nanpercentile(y_masked, percentile))
     ymax = float(np.nanpercentile(y_masked, 100.0 - percentile))
+    print(
+        "[source_support_mask] Ray-traced source-mask extent: "
+        f"x=[{xmin:.6f}, {xmax:.6f}] (width={xmax - xmin:.6f}), "
+        f"y=[{ymin:.6f}, {ymax:.6f}] (height={ymax - ymin:.6f})"
+    )
     support_mask = (
         (xx_src >= xmin) & (xx_src <= xmax)
         & (yy_src >= ymin) & (yy_src <= ymax)
@@ -639,13 +644,17 @@ def create_prob_model(
                 active = int(np.sum(source_support_mask))
                 total = int(source_support_mask.size)
                 print(f"[source_support_mask] Active source pixels: {active}/{total} ({active / total:.1%})")
+                lens_image.source_support_mask = source_support_mask
                 save_path = getattr(args, 'save_path', None) if args is not None else None
                 if save_path is not None:
                     os.makedirs(save_path, exist_ok=True)
                     np.save(os.path.join(save_path, 'source_support_mask.npy'), source_support_mask)
+            else:
+                lens_image.source_support_mask = None
         except Exception as e:
             print(f"[source_support_mask] Warning: failed to build source support mask: {e}")
             source_support_mask = None
+            lens_image.source_support_mask = None
     source_support_mask_jax = (
         jnp.asarray(source_support_mask, dtype=jnp.float64)
         if source_support_mask is not None

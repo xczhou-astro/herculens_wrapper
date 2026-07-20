@@ -345,6 +345,17 @@ def plot_source_plane(
         npix = source_for_plot.shape[0]
         adapted_pixel_scale = grid_width / npix
         print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
+
+        source_support_mask = getattr(lens_image, 'source_support_mask', None)
+        if source_support_mask is not None:
+            source_support_mask = np.asarray(source_support_mask, dtype=bool)
+            if source_support_mask.shape == source_for_plot.shape:
+                source_for_plot = np.where(source_support_mask, source_for_plot, 0.0)
+            else:
+                print(
+                    f"[plot_source_plane] Source support mask shape {source_support_mask.shape} "
+                    f"does not match source image shape {source_for_plot.shape}; skipping mask."
+                )
     else:
         mask = getattr(lens_image, 'source_arc_mask', None)
         if mask is None:
@@ -1174,4 +1185,3 @@ def recreate_best_fit_plots_for_run(run_dir):
         print(f"Failed to create best_fit_model_log.png: {e}")
         
     return True
-
