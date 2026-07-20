@@ -530,7 +530,6 @@ def create_prob_model(
         print("[create_prob_model] Warning: refine_prior_range is set, but init_params_path is None. Prior range refinement is skipped.")
     
     if init_params_path is not None and refine_prior_range is not None:
-        import os
         import json
         import copy
         
