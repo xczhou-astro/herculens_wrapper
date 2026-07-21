@@ -599,7 +599,6 @@ def plot_ring_model_comparison(
     image_data,
     noise_map,
     save_path,
-    best_fit_model=None,
     plot_scale='linear',
     residual_vis_max=0.0,
     output_filename=None,
@@ -620,16 +619,18 @@ def plot_ring_model_comparison(
             point_source_add=False,
         )
 
-    if best_fit_model is None:
-        best_fit_model = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
-
-    model_minus_lens = np.asarray(best_fit_model) - model_lens_light
+    model_no_lens_light = lens_image.model(
+        **kwargs_result,
+        lens_light_add=False,
+        source_add=True,
+        point_source_add=True,
+    )
     image_minus_lens = np.asarray(image_data) - model_lens_light
-    residual = (model_minus_lens - image_minus_lens) / noise_map
+    residual = (model_no_lens_light - image_minus_lens) / noise_map
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     panels = [
-        (model_minus_lens, 'Model - lens light', 'twilight'),
+        (model_no_lens_light, 'Model without lens light', 'twilight'),
         (image_minus_lens, 'Image - lens light', 'twilight'),
         (residual, 'Residuals', 'bwr'),
     ]
@@ -1149,14 +1150,12 @@ def generate_run_plots(
 
     _try('ring_model_comparison_linear.png', lambda: plot_ring_model_comparison(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
-        best_fit_model=best_fit_model,
         plot_scale='linear',
         residual_vis_max=residual_vis_max,
         output_filename='ring_model_comparison_linear.png',
     ))
     _try('ring_model_comparison_log.png', lambda: plot_ring_model_comparison(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
-        best_fit_model=best_fit_model,
         plot_scale='log',
         residual_vis_max=residual_vis_max,
         output_filename='ring_model_comparison_log.png',
