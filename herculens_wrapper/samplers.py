@@ -235,6 +235,7 @@ def _save_hmc_max_loglike_outputs(
     kwargs_filename='kwargs_loglike.json',
     pixels_filename='kwargs_loglike_source_pixels.npy',
     pixels_wn_filename='kwargs_loglike_source_pixels_wn.npy',
+    save_pixel_arrays=True,
     linear_plot_filename='best_fit_model_loglike_linear.png',
     log_plot_filename='best_fit_model_loglike_log.png',
     log_likelihoods_filename='hmc_log_likelihoods.npy',
@@ -278,6 +279,7 @@ def _save_hmc_max_loglike_outputs(
             type_list,
             pixels_filename=pixels_filename,
             pixels_wn_filename=pixels_wn_filename,
+            save_pixel_arrays=save_pixel_arrays,
         )
         kwargs_loglike_json['_hmc_log_likelihood'] = best_loglike
         kwargs_loglike_json['_hmc_sample_index'] = best_idx
@@ -963,8 +965,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     temp_kwargs, 
                     diag_dir, 
                     type_list, 
-                    pixels_filename=f'kwargs_source_pixels_batch_{i}.npy',
-                    pixels_wn_filename=f'kwargs_source_pixels_wn_batch_{i}.npy'
+                    save_pixel_arrays=False,
+                    # Uncomment to save diagnostic source-pixel arrays.
+                    # pixels_filename=f'kwargs_source_pixels_batch_{i}.npy',
+                    # pixels_wn_filename=f'kwargs_source_pixels_wn_batch_{i}.npy',
                 )
                 
                 kwargs_json_path = os.path.join(diag_dir, f'kwargs_result_batch_{i}.json')
@@ -979,25 +983,38 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     args,
                     active_sites=active_sites,
                     kwargs_filename=f'kwargs_loglike_batch_{i}.json',
-                    pixels_filename=f'kwargs_loglike_source_pixels_batch_{i}.npy',
-                    pixels_wn_filename=f'kwargs_loglike_source_pixels_wn_batch_{i}.npy',
+                    save_pixel_arrays=False,
+                    # Uncomment to save diagnostic max-loglike source-pixel arrays.
+                    # pixels_filename=f'kwargs_loglike_source_pixels_batch_{i}.npy',
+                    # pixels_wn_filename=f'kwargs_loglike_source_pixels_wn_batch_{i}.npy',
                     linear_plot_filename=f'best_fit_model_loglike_linear_batch_{i}.png',
                     log_plot_filename=f'best_fit_model_loglike_log_batch_{i}.png',
-                    log_likelihoods_filename=f'hmc_log_likelihoods_batch_{i}.npy',
+                    # Uncomment to save diagnostic per-sample log-likelihood arrays.
+                    # log_likelihoods_filename=f'hmc_log_likelihoods_batch_{i}.npy',
+                    log_likelihoods_filename=None,
                 )
                 _save_hmc_pixels_wn_summary(
                     temp_samples,
                     diag_dir,
                     plot_filename=f'source_pixels_wn_median_uncertainties_batch_{i}.png',
-                    median_filename=f'source_pixels_wn_median_batch_{i}.npy',
-                    lower_filename=f'source_pixels_wn_sigma_lower_batch_{i}.npy',
-                    upper_filename=f'source_pixels_wn_sigma_upper_batch_{i}.npy',
+                    # Uncomment to save diagnostic pixels_wn summary arrays.
+                    # median_filename=f'source_pixels_wn_median_batch_{i}.npy',
+                    # lower_filename=f'source_pixels_wn_sigma_lower_batch_{i}.npy',
+                    # upper_filename=f'source_pixels_wn_sigma_upper_batch_{i}.npy',
+                    median_filename=None,
+                    lower_filename=None,
+                    upper_filename=None,
                 )
             except Exception as ex_json:
                 print(f"[warning] Failed to save intermediate kwargs_result JSON: {ex_json}")
             
             # 4. Generate plots using current medians
-            from herculens_wrapper.visualizations import plot_image_plane, plot_source_plane, display
+            from herculens_wrapper.visualizations import (
+                plot_image_plane,
+                plot_ring_model_comparison,
+                plot_source_plane,
+                display,
+            )
             
             img_data = getattr(prob_model, 'image_data', None)
             ns_map = getattr(prob_model, 'noise_map', None)
@@ -1064,6 +1081,38 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     print(f"[hmc] Saved intermediate best fit model (log) visualization to {diag_dir}/best_fit_model_log_batch_{i}.png")
                 except Exception as ex:
                     print(f"[warning] Failed to plot intermediate best fit model: {ex}")
+
+                # Ring-focused model/data comparison after lens-light subtraction
+                try:
+                    plot_ring_model_comparison(
+                        l_image,
+                        temp_kwargs,
+                        p_scale,
+                        img_data,
+                        ns_map,
+                        diag_dir,
+                        best_fit_model=best_fit_model,
+                        plot_scale='linear',
+                        residual_vis_max=residual_vis_max,
+                        output_filename=f"ring_model_comparison_linear_batch_{i}.png",
+                    )
+                    print(f"[hmc] Saved intermediate ring comparison (linear) visualization to {diag_dir}/ring_model_comparison_linear_batch_{i}.png")
+
+                    plot_ring_model_comparison(
+                        l_image,
+                        temp_kwargs,
+                        p_scale,
+                        img_data,
+                        ns_map,
+                        diag_dir,
+                        best_fit_model=best_fit_model,
+                        plot_scale='log',
+                        residual_vis_max=residual_vis_max,
+                        output_filename=f"ring_model_comparison_log_batch_{i}.png",
+                    )
+                    print(f"[hmc] Saved intermediate ring comparison (log) visualization to {diag_dir}/ring_model_comparison_log_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate ring comparison: {ex}")
                 
                 # Source plane plot (linear)
                 try:

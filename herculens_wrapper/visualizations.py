@@ -592,6 +592,85 @@ def plot_lens_light_subtracted_image(
     plt.close()
 
 
+def plot_ring_model_comparison(
+    lens_image,
+    kwargs_result,
+    pixel_scale,
+    image_data,
+    noise_map,
+    save_path,
+    best_fit_model=None,
+    plot_scale='linear',
+    residual_vis_max=0.0,
+    output_filename=None,
+):
+    ny, nx = image_data.shape
+    extent = _image_extent(ny, nx, pixel_scale)
+
+    mask = getattr(lens_image, 'source_arc_mask', None)
+    if mask is not None:
+        mask = np.asarray(mask)
+
+    model_lens_light = np.zeros((ny, nx))
+    if 'kwargs_lens_light' in kwargs_result:
+        model_lens_light = lens_image.model(
+            **kwargs_result,
+            lens_light_add=True,
+            source_add=False,
+            point_source_add=False,
+        )
+
+    if best_fit_model is None:
+        best_fit_model = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
+
+    model_minus_lens = np.asarray(best_fit_model) - model_lens_light
+    image_minus_lens = np.asarray(image_data) - model_lens_light
+    residual = (model_minus_lens - image_minus_lens) / noise_map
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    panels = [
+        (model_minus_lens, 'Model - lens light', 'twilight'),
+        (image_minus_lens, 'Image - lens light', 'twilight'),
+        (residual, 'Residuals', 'bwr'),
+    ]
+
+    for idx, (panel, title, cmap) in enumerate(panels):
+        if idx < 2:
+            norm, cbar_label = _norm_from_plot_scale(plot_scale, panel)
+            vmin, vmax = None, None
+        else:
+            norm, cbar_label = None, 'linear'
+            if residual_vis_max > 0.0:
+                vmax = float(residual_vis_max)
+            else:
+                finite = np.asarray(panel)[np.isfinite(panel)]
+                vmax = float(np.max(np.abs(finite))) if finite.size else 1.0
+            vmin = -vmax
+
+        im = axes[idx].imshow(
+            panel,
+            origin='lower',
+            cmap=cmap,
+            extent=extent,
+            norm=norm,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        if mask is not None:
+            axes[idx].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
+        axes[idx].set_xlabel('arcsec')
+        axes[idx].set_ylabel('arcsec')
+        axes[idx].set_title(title)
+        plt.colorbar(im, ax=axes[idx], label=cbar_label)
+
+    plt.tight_layout()
+    if output_filename is None:
+        suffix = '_log' if plot_scale == 'log' else '_linear'
+        output_filename = f'ring_model_comparison{suffix}.png'
+    plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
+    plt.close()
+
+
 def plot_weights(weights_list, save_path):
     plt.figure(figsize=(6, 5))
     plt.imshow(weights_list[0][0], origin='lower', cmap='twilight')
@@ -1066,6 +1145,21 @@ def generate_run_plots(
     _try('lens_light_subtracted_image_log.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
         plot_scale='log', residual_vis_max=residual_vis_max,
+    ))
+
+    _try('ring_model_comparison_linear.png', lambda: plot_ring_model_comparison(
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
+        best_fit_model=best_fit_model,
+        plot_scale='linear',
+        residual_vis_max=residual_vis_max,
+        output_filename='ring_model_comparison_linear.png',
+    ))
+    _try('ring_model_comparison_log.png', lambda: plot_ring_model_comparison(
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
+        best_fit_model=best_fit_model,
+        plot_scale='log',
+        residual_vis_max=residual_vis_max,
+        output_filename='ring_model_comparison_log.png',
     ))
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(

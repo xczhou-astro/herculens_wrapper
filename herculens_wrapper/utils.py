@@ -296,7 +296,8 @@ def pytree_flat_param_labels(params_pytree):
 def kwargs_best_to_json_pixelated_npy(
     kwargs_best, save_path, type_list, 
     pixels_filename='kwargs_source_pixels.npy',
-    pixels_wn_filename='kwargs_source_pixels_wn.npy'
+    pixels_wn_filename='kwargs_source_pixels_wn.npy',
+    save_pixel_arrays=True,
 ):
     import copy
     out = copy.deepcopy(kwargs_best)
@@ -305,13 +306,19 @@ def kwargs_best_to_json_pixelated_npy(
         if ks and isinstance(ks[0], dict):
             ks0 = dict(ks[0])
             if 'pixels' in ks0 and ks0['pixels'] is not None:
-                pixels = np.asarray(ks0['pixels'])
-                np.save(os.path.join(save_path, pixels_filename), pixels)
-                ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
+                if save_pixel_arrays:
+                    pixels = np.asarray(ks0['pixels'])
+                    np.save(os.path.join(save_path, pixels_filename), pixels)
+                    ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
+                else:
+                    ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename, '_save_disabled': True}
             if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
-                pixels_wn = np.asarray(ks0['pixels_wn'])
-                np.save(os.path.join(save_path, pixels_wn_filename), pixels_wn)
-                ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename}
+                if save_pixel_arrays:
+                    pixels_wn = np.asarray(ks0['pixels_wn'])
+                    np.save(os.path.join(save_path, pixels_wn_filename), pixels_wn)
+                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename}
+                else:
+                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename, '_save_disabled': True}
             ks = list(ks)
             ks[0] = ks0
             out['kwargs_source'] = ks
