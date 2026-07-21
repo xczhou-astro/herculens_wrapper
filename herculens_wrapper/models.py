@@ -1538,6 +1538,14 @@ class LensImageExtension(LensImage):
         kwargs_numerics=None,
         kwargs_lens_equation_solver=None,
     ):
+        if source_arc_mask is None:
+            nx, ny = grid_class.num_pixel_axes
+            source_arc_mask = np.ones([nx, ny], dtype=bool)
+            print(
+                "[adaptive] source_arc_mask not provided; using the full image "
+                "as the adaptive source-grid support mask."
+            )
+
         super().__init__(
             grid_class,
             psf_class,
@@ -1555,11 +1563,7 @@ class LensImageExtension(LensImage):
 
         ssf = self.ImageNumerics.grid_supersampling_factor
         s_ones = np.ones([ssf, ssf])
-        if source_arc_mask is None:
-            nx, ny = grid_class.num_pixel_axes
-            self.source_arc_mask = np.ones([nx, ny], dtype=bool)
-        else:
-            self.source_arc_mask = source_arc_mask
+        self.source_arc_mask = source_arc_mask
         self.source_arc_mask_ss = np.kron(self.source_arc_mask, s_ones)
         self._source_arc_mask_flat = self.source_arc_mask_ss.flatten()
         self._source_arc_mask_outline_flat = (
