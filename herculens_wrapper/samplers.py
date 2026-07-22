@@ -536,18 +536,14 @@ def run_svi(
         init_scale=init_scale
     )
 
-    boundary = int(max_iterations * 0.5)
-    scheduler1 = optax.exponential_decay(
-        init_value=learning_rate,
-        decay_rate=0.99,
-        transition_steps=200,
+    warmup_steps = min(500, int(max_iterations * 0.05))
+    scheduler = optax.warmup_cosine_decay_schedule(
+        init_value=1e-4,
+        peak_value=learning_rate,
+        warmup_steps=warmup_steps,
+        decay_steps=max_iterations,
+        end_value=1e-5,
     )
-    scheduler2 = optax.exponential_decay(
-        init_value=scheduler1(boundary),
-        decay_rate=0.99,
-        transition_steps=10,
-    )
-    scheduler = optax.join_schedules([scheduler1, scheduler2], boundaries=[boundary])
     optim = optax.adabelief(learning_rate=scheduler)
 
     if loss_kind == 'trace_meanfield_elbo':
