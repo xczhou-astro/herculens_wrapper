@@ -990,7 +990,90 @@ def plot_corner_emcee(
     print(f'[plots] Saved {out}')
 
 
-def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path):
+def lens_mass_ellipticity_summary(lens_image, kwargs_result):
+    """Return human-readable ellipticity and PA values for mass components."""
+    profile_types = list(getattr(lens_image.MassModel, 'profile_type_list', []))
+    components = []
+    for index, kwargs_mass in enumerate(kwargs_result.get('kwargs_lens', [])):
+        if not isinstance(kwargs_mass, dict) or not {'e1', 'e2'}.issubset(kwargs_mass):
+            continue
+
+        e1 = float(np.asarray(kwargs_mass['e1']))
+        e2 = float(np.asarray(kwargs_mass['e2']))
+        ellipticity = float(np.hypot(e1, e2))
+        pa_deg = float(np.degrees(0.5 * np.arctan2(e2, e1)))
+        # The ellipse has a 180-degree symmetry, so this is the natural PA range.
+        if pa_deg >= 90.0:
+            pa_deg -= 180.0
+        axis_ratio = None
+        if ellipticity < 1.0:
+            axis_ratio = float((1.0 - ellipticity) / (1.0 + ellipticity))
+
+        component = {
+            'index': index,
+            'e1': e1,
+            'e2': e2,
+            'ellipticity': ellipticity,
+            'axis_ratio': axis_ratio,
+            'PA_deg': pa_deg,
+            'PA_defined': bool(ellipticity > 0.0),
+        }
+        if index < len(profile_types):
+            component['profile_type'] = str(profile_types[index])
+        components.append(component)
+
+    return {
+        'ellipticity_definition': 'ellipticity = sqrt(e1^2 + e2^2)',
+        'axis_ratio_definition': 'q = (1 - ellipticity) / (1 + ellipticity)',
+        'position_angle_definition': (
+            'PA_deg = 0.5 * atan2(e2, e1), in degrees, measured counter-clockwise '
+            'from the positive x axis and normalized to [-90, 90).'
+        ),
+        'components': components,
+    }
+
+
+def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
+    """Save and print final mass-profile ellipticity and position angles."""
+    summary = lens_mass_ellipticity_summary(lens_image, kwargs_result)
+    output_path = os.path.join(save_path, 'lens_mass_parameters.json')
+    with open(output_path, 'w') as f:
+        json.dump(summary, f, indent=4)
+
+    components = summary['components']
+    if not components:
+        print('[lens_mass_parameters] No lens-mass components with e1/e2; no ellipticity or PA to report.')
+        return summary
+
+    for component in components:
+        name = component.get('profile_type', 'lens_mass')
+        label = f"{name}[{component['index']}]"
+        q_text = 'undefined' if component['axis_ratio'] is None else f"{component['axis_ratio']:.5f}"
+        pa_text = 'undefined (circular)' if not component['PA_defined'] else f"{component['PA_deg']:.3f} deg"
+        print(
+            f"[lens_mass_parameters] {label}: e={component['ellipticity']:.5f} "
+            f"(e1={component['e1']:.5f}, e2={component['e2']:.5f}), q={q_text}, PA={pa_text}"
+        )
+    print(f'[lens_mass_parameters] Saved {output_path}')
+    return summary
+
+
+def _mass_ellipticity_annotation(summary):
+    components = summary.get('components', [])
+    if not components:
+        return None
+
+    lines = ['Lens-mass shape:']
+    for component in components:
+        name = component.get('profile_type', 'mass')
+        label = f"{name}[{component['index']}]"
+        pa_text = 'PA undefined (circular)' if not component['PA_defined'] else f"PA={component['PA_deg']:.2f} deg"
+        q_text = 'q undefined' if component['axis_ratio'] is None else f"q={component['axis_ratio']:.3f}"
+        lines.append(f"{label}: e={component['ellipticity']:.3f}, {q_text}, {pa_text}")
+    return '\n'.join(lines)
+
+
+def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path, lens_mass_summary=None):
     """Plot 2D convergence and magnification maps with critical lines."""
     # 1. Evaluate 2D convergence and magnification on image grid
     nx, ny = lens_image.Grid.num_pixel_axes
@@ -1054,7 +1137,15 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path)
         axes[1].legend(loc='upper right', fontsize=8)
     plt.colorbar(im_mag, ax=axes[1], label=r'log10($|\mu|$)')
     
-    plt.tight_layout()
+    annotation = _mass_ellipticity_annotation(lens_mass_summary or {})
+    if annotation is not None:
+        fig.text(
+            0.01, 0.01, annotation, ha='left', va='bottom', fontsize=8,
+            bbox={'facecolor': 'white', 'edgecolor': '0.6', 'alpha': 0.85, 'pad': 3},
+        )
+        plt.tight_layout(rect=(0, 0.13, 1, 1))
+    else:
+        plt.tight_layout()
     plt.savefig(os.path.join(save_path, 'mass_profile_convergence.png'), dpi=300, bbox_inches='tight')
     plt.close()
 
@@ -1083,6 +1174,9 @@ def generate_run_plots(
     param_list=None,
     residual_vis_max=0.0,
 ):
+    lens_mass_summary = save_lens_mass_ellipticity_summary(
+        lens_image, kwargs_best, save_path,
+    )
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
         mask = np.asarray(mask)
@@ -1162,7 +1256,7 @@ def generate_run_plots(
     ))
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
-        lens_image, kwargs_best, pixel_scale, save_path,
+        lens_image, kwargs_best, pixel_scale, save_path, lens_mass_summary,
     ))
 
     if extra and 'loss_history' in extra:
