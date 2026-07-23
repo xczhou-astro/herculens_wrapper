@@ -483,6 +483,8 @@ def build_and_run(config_path=None):
     ):
         from types import SimpleNamespace
         import shutil
+        import jax.numpy as jnp
+        from herculens_wrapper.models import PowerSpectrum
 
         os.makedirs(run_save_path, exist_ok=True)
         run_args = SimpleNamespace(**vars(args))
@@ -568,6 +570,82 @@ def build_and_run(config_path=None):
                 regul_model=None,
             )
             print(f'Number of sampled parameters: {num_params}')
+            mcmc_samples = None
+            flat_samples = None
+
+            # --- Pixelated Source Initialization Method ('power_init' | 'svi_warmup' | 'none') ---
+            init_method = getattr(run_args, 'pixelated_init_method', None)
+            if init_method is None:
+                if bool(getattr(run_args, 'run_power_init', False)):
+                    init_method = 'power_init'
+                elif int(getattr(run_args, 'max_iterations_svi_warmup', 0)) > 0 and run_args.sampler == 'svi':
+                    init_method = 'svi_warmup'
+                else:
+                    init_method = 'none'
+
+            if source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
+                if init_method == 'power_init':
+                    try:
+                        max_power_it = int(getattr(run_args, 'max_iterations_power_init', 2000))
+                        print(f"\n[pixelated-init: power_init] Fitting Matérn power spectrum parameters ({max_power_it} iters) from parametric source...")
+                        ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
+                        k_grid = PowerSpectrum.K_grid((ny, nx))
+                        pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
+                        power_init_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_source(
+                            lens_image,
+                            run_args.init_params_path,
+                            k_grid.k,
+                            pixelated_prior,
+                            seed=run_seed + 7919,
+                            max_iterations=max_power_it,
+                        )
+                        for param_name, param_value in power_init_values.items():
+                            if param_name in init_params:
+                                init_params[param_name] = jnp.asarray(param_value)
+                        print("[pixelated-init: power_init] Power spectrum init complete. Updated init_params with fitted power_init parameters.")
+                    except Exception as e:
+                        print(f"[pixelated-init: power_init] Warning: power_init failed: {e}")
+
+                elif init_method == 'svi_warmup' and run_args.sampler == 'svi':
+                    max_warmup_it = int(getattr(run_args, 'max_iterations_svi_warmup', 0))
+                    if max_warmup_it > 0:
+                        try:
+                            print(f"\n[svi-warmup] Starting {max_warmup_it} iteration warmup for pixelated source parameters...")
+                            kwargs_lens_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
+                            kwargs_lens_light_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
+                            
+                            warmup_prob_model = create_prob_model(
+                                param_list, type_list, lens_image, image_data, noise_map,
+                                regul_model=None,
+                                fix_lens_light=True,
+                                kwargs_lens_light_fixed=kwargs_lens_light_fixed_warmup,
+                                fix_lens_mass=True,
+                                kwargs_lens_fixed=kwargs_lens_fixed_warmup,
+                                fix_source_light=False,
+                                init_params_path=run_args.init_params_path,
+                                args=run_args,
+                            )
+                            warmup_args = SimpleNamespace(**vars(run_args))
+                            warmup_args.max_iterations_svi = max_warmup_it
+                            warmup_best_params, warmup_extra = run_svi(
+                                warmup_prob_model, image_data, warmup_args, init_params,
+                                max_iterations=max_warmup_it
+                            )
+                            if 'loss_history' in warmup_extra:
+                                warmup_history = {'loss_history': np.asarray(warmup_extra['loss_history']).tolist()}
+                                with open(os.path.join(run_save_path, 'svi_warmup_loss_history.json'), 'w') as f:
+                                    json.dump(warmup_history, f, indent=4)
+                                warmup_losses = warmup_history['loss_history']
+                                if len(warmup_losses) > 0:
+                                    print(f"[svi-warmup] Initial warmup loss (when begin): {warmup_losses[0]:.4f}")
+                                    print(f"[svi-warmup] Final warmup loss (after warm up): {warmup_losses[-1]:.4f}")
+                            print("[svi-warmup] Warmup complete. Updating init_params with optimized source parameters.")
+                            for param_name, param_value in warmup_best_params.items():
+                                if 'source' in param_name or 'pixels_wn' in param_name:
+                                    init_params[param_name] = param_value
+                        except Exception as e:
+                            print(f"[svi-warmup] Warning: SVI source warmup failed, proceeding with standard initialization. Error: {e}")
+
             init_log_prob = float(run_prob_model.log_prob(init_params, constrained=True))
             init_log_likelihood = float(run_prob_model.log_likelihood(init_params))
             print(
@@ -590,49 +668,7 @@ def build_and_run(config_path=None):
             except Exception as e:
                 print(f'[plots] initial_guess_model.png skipped: {e}')
 
-            mcmc_samples = None
-            flat_samples = None
-
             if run_args.sampler == 'svi':
-                max_warmup_it = int(getattr(run_args, 'max_iterations_svi_warmup', 0))
-                if max_warmup_it > 0 and source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
-                    try:
-                        print(f"\n[svi-warmup] Starting {max_warmup_it} iteration warmup for pixelated source parameters...")
-                        kwargs_lens_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
-                        kwargs_lens_light_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
-                        
-                        warmup_prob_model = create_prob_model(
-                            param_list, type_list, lens_image, image_data, noise_map,
-                            regul_model=None,
-                            fix_lens_light=True,
-                            kwargs_lens_light_fixed=kwargs_lens_light_fixed_warmup,
-                            fix_lens_mass=True,
-                            kwargs_lens_fixed=kwargs_lens_fixed_warmup,
-                            fix_source_light=False,
-                            init_params_path=run_args.init_params_path,
-                            args=run_args,
-                        )
-                        warmup_args = SimpleNamespace(**vars(run_args))
-                        warmup_args.max_iterations_svi = max_warmup_it
-                        warmup_best_params, warmup_extra = run_svi(
-                            warmup_prob_model, image_data, warmup_args, init_params,
-                            max_iterations=max_warmup_it
-                        )
-                        if 'loss_history' in warmup_extra:
-                            warmup_history = {'loss_history': np.asarray(warmup_extra['loss_history']).tolist()}
-                            with open(os.path.join(run_save_path, 'svi_warmup_loss_history.json'), 'w') as f:
-                                json.dump(warmup_history, f, indent=4)
-                            warmup_losses = warmup_history['loss_history']
-                            if len(warmup_losses) > 0:
-                                print(f"[svi-warmup] Initial warmup loss (when begin): {warmup_losses[0]:.4f}")
-                                print(f"[svi-warmup] Final warmup loss (after warm up): {warmup_losses[-1]:.4f}")
-                        print("[svi-warmup] Warmup complete. Updating init_params with optimized source parameters.")
-                        for param_name, param_value in warmup_best_params.items():
-                            if 'source' in param_name or 'pixels_wn' in param_name:
-                                init_params[param_name] = param_value
-                    except Exception as e:
-                        print(f"[svi-warmup] Warning: SVI source warmup failed, proceeding with standard initialization. Error: {e}")
-
                 best_params, extra = run_svi(run_prob_model, image_data, run_args, init_params)
                 if 'loss_history' in extra:
                     history = {'loss_history': np.asarray(extra['loss_history']).tolist()}
@@ -640,8 +676,8 @@ def build_and_run(config_path=None):
                         json.dump(history, f, indent=4)
                     main_losses = history['loss_history']
                     if len(main_losses) > 0:
-                        if max_warmup_it > 0 and source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
-                            print(f"[svi] Initial main joint loss (after warm up): {main_losses[0]:.4f}")
+                        if init_method != 'none':
+                            print(f"[svi] Initial main joint loss (after pixelated init '{init_method}'): {main_losses[0]:.4f}")
                         else:
                             print(f"[svi] Initial SVI loss (when begin): {main_losses[0]:.4f}")
                         print(f"[svi] Final SVI loss (when finish): {main_losses[-1]:.4f}")

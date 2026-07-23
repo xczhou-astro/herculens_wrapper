@@ -335,6 +335,40 @@ class PowerSpectrum:
         )
         return guide.median(result.params)
 
+    @staticmethod
+    def fit_power_spectrum_init_from_parametric_source(
+        lens_image,
+        init_params_path,
+        k_values,
+        pixelated_prior,
+        seed=42,
+        max_iterations=2000,
+        learning_rate=0.01,
+        progress_bar=True,
+        param_name='source_grid',
+    ):
+        if not init_params_path:
+            return {}
+
+        init_info = load_kwargs_init_json(init_params_path)
+        kwargs_source_analytic = init_info.get('kwargs_source', [])
+        if not kwargs_source_analytic:
+            print("[power_init] Warning: No kwargs_source found in prior run; skipping power_init.")
+            return {}
+
+        source_image = _project_analytic_kwargs_to_pixel_source(lens_image, kwargs_source_analytic)
+
+        return PowerSpectrum.fit_power_spectrum_init(
+            source_image,
+            k_values,
+            pixelated_prior,
+            seed=seed,
+            max_iterations=max_iterations,
+            learning_rate=learning_rate,
+            progress_bar=progress_bar,
+            param_name=param_name,
+        )
+
 def _is_correlated_param(param):
     """
     Flexible correlation syntax:

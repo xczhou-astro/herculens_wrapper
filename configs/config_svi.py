@@ -390,6 +390,13 @@ def arguments():
         'gpus': '7',
         'n_runs': 2,
 
+        # --- Pixelated Source Initialization Method ---
+        # Options: 'power_init' (fit Matérn power spectrum to parametric source image via mini-SVI)
+        #        | 'svi_warmup' (run SVI warmup with fixed lens mass/light on image data)
+        #        | 'none'
+        'pixelated_init_method': 'power_init',
+        'max_iterations_power_init': 2_000,
+
         # --- svi (Stochastic Variational Inference) ---
         'max_iterations_svi_warmup': 2_000,
         'max_iterations_svi': 30_000,
