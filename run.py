@@ -18,6 +18,9 @@ import shlex
 import sys
 import time
 from datetime import datetime
+import warnings
+
+warnings.filterwarnings("ignore", category=UserWarning, module="jax_cosmo")
 
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 if _PROJECT_ROOT not in sys.path:
