@@ -782,11 +782,22 @@ def build_and_run(config_path=None):
                 else:
                     num_params_free = num_params - (ny * nx)
 
-            best_fit_model = model_image_from_deterministics(
-                run_prob_model,
-                kwargs_best,
-                output_deterministics,
-            )
+            mcmc_comp_medians = None
+            if run_args.sampler in MCMC_SAMPLERS and mcmc_samples is not None:
+                print("[hmc] Evaluating pixel-by-pixel median model component images across all MCMC samples via vectorized JAX vmap...")
+                from herculens_wrapper.samplers import evaluate_mcmc_component_medians
+                mcmc_comp_medians = evaluate_mcmc_component_medians(
+                    run_prob_model,
+                    mcmc_samples,
+                )
+                best_fit_model = mcmc_comp_medians['total']
+            else:
+                best_fit_model = model_image_from_deterministics(
+                    run_prob_model,
+                    kwargs_best,
+                    output_deterministics,
+                )
+
             source_pixel_scale = None
             if type_list.get('source_light_type_list') == ['PIXELATED']:
                 try:
@@ -812,6 +823,11 @@ def build_and_run(config_path=None):
                 source_pixel_scale=source_pixel_scale,
             )
             reduced_chi2 = metrics['REDUCED_CHI2']
+            
+            output_extra = extra
+            if mcmc_comp_medians is not None:
+                output_extra = {k: v for k, v in extra.items()}
+                output_extra['mcmc_component_medians'] = mcmc_comp_medians
 
             generate_run_plots(
                 lens_image=lens_image,
@@ -825,16 +841,17 @@ def build_and_run(config_path=None):
                 best_fit_model=best_fit_model,
                 chi2=chi2,
                 reduced_chi2=reduced_chi2,
-                extra=extra,
+                extra=output_extra,
                 mcmc_samples=mcmc_samples,
                 flat_samples=flat_samples,
                 prob_model=run_prob_model,
                 init_params=init_params,
-                point_source_type_list=point_source_type_list,
-                point_source_params_list=point_source_params_list,
+                point_source_type_list=type_list.get('point_source_type_list', []),
+                point_source_params_list=run_args.point_source_params_list if hasattr(run_args, 'point_source_params_list') else [],
                 regul_model=getattr(run_prob_model, 'regul_model', None),
                 param_list=param_list,
                 residual_vis_max=getattr(run_args, 'residual_vis_max', 0.0),
+                mcmc_component_medians=mcmc_comp_medians,
             )
 
             np.savez_compressed(

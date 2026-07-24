@@ -209,7 +209,13 @@ def plot_input_data(
     plt.close()
 
 
-def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path, residual_vis_max=0.0, output_filename='image_plane.png'):
+def plot_image_plane(
+    lens_image, kwargs_result, pixel_scale, image_data, noise_map, save_path,
+    residual_vis_max=0.0, output_filename='image_plane.png',
+    model_extended_override=None,
+    model_lens_light_override=None,
+    model_composite_override=None,
+):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
 
@@ -217,15 +223,21 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
     if mask is not None:
         mask = np.asarray(mask)
 
-    model_extended = lens_image.model(
-        **kwargs_result, source_add=True, lens_light_add=False, point_source_add=False,
-    )
+    if model_extended_override is not None:
+        model_extended = model_extended_override
+    else:
+        model_extended = lens_image.model(
+            **kwargs_result, source_add=True, lens_light_add=False, point_source_add=False,
+        )
 
-    model_lens_light = np.zeros((ny, nx))
-    if 'kwargs_lens_light' in kwargs_result:
+    if model_lens_light_override is not None:
+        model_lens_light = model_lens_light_override
+    elif 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
+    else:
+        model_lens_light = np.zeros((ny, nx))
 
     model_point_sources = np.zeros((ny, nx))
     ra_image_list = []
@@ -247,8 +259,12 @@ def plot_image_plane(lens_image, kwargs_result, pixel_scale, image_data, noise_m
             print(f'Dec for lensed point source {i}: {dec_image_list[-1]}')
             print(f'Amplitudes for lensed point source {i}: {amps[i]}')
 
-    model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
+    if model_composite_override is not None:
+        model_composite = model_composite_override
+    else:
+        model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
     residuals = (model_composite - image_data) / noise_map
+
 
     n_ps = len(ra_image_list)
     ps_colors = _point_source_colors(n_ps) if n_ps else []
@@ -443,6 +459,7 @@ def plot_source_plane(
 def plot_lens_light_subtracted_image(
     lens_image, kwargs_result, pixel_scale, image_data, noise_map=None, save_path=None,
     plot_scale='linear', residual_vis_max=0.0,
+    model_lens_light_override=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -451,11 +468,14 @@ def plot_lens_light_subtracted_image(
     if mask is not None:
         mask = np.asarray(mask)
 
-    model_lens_light = np.zeros((ny, nx))
-    if 'kwargs_lens_light' in kwargs_result:
+    if model_lens_light_override is not None:
+        model_lens_light = model_lens_light_override
+    elif 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
         )
+    else:
+        model_lens_light = np.zeros((ny, nx))
 
     subtracted = image_data - model_lens_light
 
@@ -546,6 +566,8 @@ def plot_ring_model_comparison(
     plot_scale='linear',
     residual_vis_max=0.0,
     output_filename=None,
+    model_no_lens_light_override=None,
+    model_lens_light_override=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -554,21 +576,28 @@ def plot_ring_model_comparison(
     if mask is not None:
         mask = np.asarray(mask)
 
-    model_lens_light = np.zeros((ny, nx))
-    if 'kwargs_lens_light' in kwargs_result:
+    if model_lens_light_override is not None:
+        model_lens_light = model_lens_light_override
+    elif 'kwargs_lens_light' in kwargs_result:
         model_lens_light = lens_image.model(
             **kwargs_result,
             lens_light_add=True,
             source_add=False,
             point_source_add=False,
         )
+    else:
+        model_lens_light = np.zeros((ny, nx))
 
-    model_no_lens_light = lens_image.model(
-        **kwargs_result,
-        lens_light_add=False,
-        source_add=True,
-        point_source_add=True,
-    )
+    if model_no_lens_light_override is not None:
+        model_no_lens_light = model_no_lens_light_override
+    else:
+        model_no_lens_light = lens_image.model(
+            **kwargs_result,
+            lens_light_add=False,
+            source_add=True,
+            point_source_add=True,
+        )
+
     image_minus_lens = np.asarray(image_data) - model_lens_light
     residual = (model_no_lens_light - image_minus_lens) / noise_map
 
@@ -1117,6 +1146,7 @@ def generate_run_plots(
     regul_model=None,
     param_list=None,
     residual_vis_max=0.0,
+    mcmc_component_medians=None,
 ):
     lens_mass_summary = save_lens_mass_ellipticity_summary(
         lens_image, kwargs_best, save_path,
@@ -1127,6 +1157,11 @@ def generate_run_plots(
 
     if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+
+    comp_src = mcmc_component_medians.get('source') if mcmc_component_medians else None
+    comp_lens_light = mcmc_component_medians.get('lens_light') if mcmc_component_medians else None
+    comp_total = mcmc_component_medians.get('total') if mcmc_component_medians else None
+    comp_no_lens = mcmc_component_medians.get('no_lens_light') if mcmc_component_medians else None
 
     def _try(name, fn):
         try:
@@ -1164,7 +1199,11 @@ def generate_run_plots(
     ))
 
     _try('image_plane.png', lambda: plot_image_plane(
-        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path, residual_vis_max=residual_vis_max,
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
+        residual_vis_max=residual_vis_max,
+        model_extended_override=comp_src,
+        model_lens_light_override=comp_lens_light,
+        model_composite_override=comp_total,
     ))
 
     _try('source_plane_linear.png', lambda: plot_source_plane(
@@ -1179,11 +1218,13 @@ def generate_run_plots(
     _try('lens_light_subtracted_image.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
         plot_scale='linear', residual_vis_max=residual_vis_max,
+        model_lens_light_override=comp_lens_light,
     ))
     
     _try('lens_light_subtracted_image_log.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
         plot_scale='log', residual_vis_max=residual_vis_max,
+        model_lens_light_override=comp_lens_light,
     ))
 
     _try('ring_model_comparison_linear.png', lambda: plot_ring_model_comparison(
@@ -1191,13 +1232,18 @@ def generate_run_plots(
         plot_scale='linear',
         residual_vis_max=residual_vis_max,
         output_filename='ring_model_comparison_linear.png',
+        model_no_lens_light_override=comp_no_lens,
+        model_lens_light_override=comp_lens_light,
     ))
     _try('ring_model_comparison_log.png', lambda: plot_ring_model_comparison(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
         plot_scale='log',
         residual_vis_max=residual_vis_max,
         output_filename='ring_model_comparison_log.png',
+        model_no_lens_light_override=comp_no_lens,
+        model_lens_light_override=comp_lens_light,
     ))
+
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
         lens_image, kwargs_best, pixel_scale, save_path, lens_mass_summary,

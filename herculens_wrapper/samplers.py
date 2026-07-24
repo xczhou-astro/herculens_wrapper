@@ -143,6 +143,85 @@ def model_image_from_deterministics(prob_model, kwargs, deterministics=None):
     return lens_image.model(**kwargs)
 
 
+def evaluate_mcmc_component_medians(prob_model, samples, batch_size=500):
+    """
+    Evaluates total, source-only, lens-light-only, and no-lens-light model images 
+    for all MCMC samples using fast vectorized JAX vmap and computes their pixel-by-pixel medians.
+    """
+    import jax
+    import jax.numpy as jnp
+    import numpy as np
+
+    lens_image = getattr(prob_model, 'lens_image', None)
+    if lens_image is None:
+        raise ValueError("prob_model does not expose lens_image for MCMC median evaluation.")
+
+    active_sites = set(get_active_sample_sites(prob_model))
+    sample_keys = [k for k in samples.keys() if k in active_sites]
+    if not sample_keys:
+        sample_keys = list(samples.keys())
+
+    n_total_samples = len(samples[sample_keys[0]])
+    type_list = getattr(prob_model, 'type_list', {})
+    has_lens_light = bool(type_list.get('lens_light_type_list'))
+    has_point_source = bool(type_list.get('point_source_type_list'))
+
+    def eval_single(sample_dict):
+        kw = prob_model.params2kwargs(sample_dict)
+        img_total = jnp.squeeze(lens_image.model(**kw))
+        img_source = jnp.squeeze(lens_image.model(
+            **kw, source_add=True, lens_light_add=False, point_source_add=False
+        ))
+        if has_lens_light:
+            img_lens_light = jnp.squeeze(lens_image.model(
+                **kw, source_add=False, lens_light_add=True, point_source_add=False
+            ))
+        else:
+            img_lens_light = jnp.zeros_like(img_total)
+
+        if has_point_source:
+            img_no_lens_light = jnp.squeeze(lens_image.model(
+                **kw, source_add=True, lens_light_add=False, point_source_add=True
+            ))
+        else:
+            img_no_lens_light = img_source
+
+        return img_total, img_source, img_lens_light, img_no_lens_light
+
+    vmap_eval = jax.jit(jax.vmap(eval_single))
+
+    totals_list, sources_list, lens_lights_list, no_lens_lights_list = [], [], [], []
+    for b_start in range(0, n_total_samples, batch_size):
+        b_end = min(b_start + batch_size, n_total_samples)
+        b_samples = {
+            k: jnp.asarray(samples[k][b_start:b_end])
+            for k in sample_keys
+        }
+        b_total, b_source, b_lens_light, b_no_lens_light = vmap_eval(b_samples)
+        totals_list.append(np.asarray(b_total))
+        sources_list.append(np.asarray(b_source))
+        lens_lights_list.append(np.asarray(b_lens_light))
+        no_lens_lights_list.append(np.asarray(b_no_lens_light))
+
+    return {
+        'total': np.median(np.concatenate(totals_list, axis=0), axis=0),
+        'source': np.median(np.concatenate(sources_list, axis=0), axis=0),
+        'lens_light': np.median(np.concatenate(lens_lights_list, axis=0), axis=0),
+        'no_lens_light': np.median(np.concatenate(no_lens_lights_list, axis=0), axis=0),
+    }
+
+
+def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=500):
+    """
+    Evaluates model images for all MCMC samples using fast vectorized JAX vmap
+    and computes the pixel-by-pixel median across all samples.
+    """
+    res = evaluate_mcmc_component_medians(prob_model, samples, batch_size=batch_size)
+    return res['total']
+
+
+
+
 def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=None):
     try:
         import arviz as az
@@ -226,119 +305,7 @@ def _sample_at_index(samples, idx, include_keys=None, exclude=('model_image',)):
     }
 
 
-def _save_hmc_max_loglike_outputs(
-    samples,
-    prob_model,
-    save_path,
-    args,
-    active_sites=None,
-    kwargs_filename='kwargs_loglike.json',
-    pixels_filename='kwargs_loglike_source_pixels.npy',
-    pixels_wn_filename='kwargs_loglike_source_pixels_wn.npy',
-    save_pixel_arrays=True,
-    linear_plot_filename='best_fit_model_loglike_linear.png',
-    log_plot_filename='best_fit_model_loglike_log.png',
-    log_likelihoods_filename='hmc_log_likelihoods.npy',
-):
-    try:
-        from herculens_wrapper.utils import kwargs_best_to_json_pixelated_npy, json_serializer
-        from herculens_wrapper.visualizations import display
 
-        n_total_samples = len(samples[list(samples.keys())[0]])
-        log_likelihoods = []
-        for idx in range(n_total_samples):
-            sample_params = _sample_at_index(samples, idx, include_keys=active_sites)
-            log_likelihoods.append(float(prob_model.log_likelihood(sample_params)))
-
-        log_likelihoods = np.asarray(log_likelihoods)
-        if not np.any(np.isfinite(log_likelihoods)):
-            print("[warning] Could not identify max-log-likelihood HMC sample: all values are non-finite.")
-            return {}
-        if log_likelihoods_filename is not None:
-            np.save(os.path.join(save_path, log_likelihoods_filename), log_likelihoods)
-
-        best_idx = int(np.nanargmax(log_likelihoods))
-        best_loglike = float(log_likelihoods[best_idx])
-        best_params_loglike = _sample_at_index(samples, best_idx, include_keys=active_sites)
-        sample_deterministics = {
-            k: np.asarray(v)[best_idx]
-            for k, v in samples.items()
-            if active_sites is None or k not in set(active_sites)
-        }
-        kwargs_loglike, sample_deterministics = kwargs_with_deterministics(
-            prob_model,
-            best_params_loglike,
-            deterministics=sample_deterministics,
-            rng_seed=getattr(args, 'random_seed', 0),
-            active_sites=active_sites,
-        )
-        type_list = getattr(prob_model, 'type_list', {})
-        kwargs_loglike_json = kwargs_best_to_json_pixelated_npy(
-            kwargs_loglike,
-            save_path,
-            type_list,
-            pixels_filename=pixels_filename,
-            pixels_wn_filename=pixels_wn_filename,
-            save_pixel_arrays=save_pixel_arrays,
-        )
-        kwargs_loglike_json['_hmc_log_likelihood'] = best_loglike
-        kwargs_loglike_json['_hmc_sample_index'] = best_idx
-        with open(os.path.join(save_path, kwargs_filename), 'w') as f:
-            json.dump(kwargs_loglike_json, f, indent=4, default=json_serializer)
-        print(f"[hmc] Saved max-log-likelihood kwargs to {os.path.join(save_path, kwargs_filename)}")
-
-        img_data = getattr(prob_model, 'image_data', None)
-        ns_map = getattr(prob_model, 'noise_map', None)
-        l_image = getattr(prob_model, 'lens_image', None)
-        if img_data is not None and ns_map is not None and l_image is not None:
-            best_fit_model = model_image_from_deterministics(
-                prob_model,
-                kwargs_loglike,
-                sample_deterministics,
-            )
-            p_scale = getattr(prob_model, 'pixel_scale', 0.08)
-            chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
-            mask = getattr(l_image, 'source_arc_mask', None)
-            if mask is not None:
-                mask = np.asarray(mask)
-            residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
-
-            display(
-                [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
-                titles=[
-                    'Max loglike model',
-                    'Image data',
-                    f'Residuals (chi^2 = {chi2:.2f})',
-                ],
-                pixel_scale=p_scale,
-                savefilename=os.path.join(save_path, linear_plot_filename),
-                plot_scale='linear',
-                contour_mask=mask,
-                residual_vis_max=residual_vis_max,
-            )
-            display(
-                [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
-                titles=[
-                    'Max loglike model',
-                    'Image data',
-                    f'Residuals (chi^2 = {chi2:.2f})',
-                ],
-                pixel_scale=p_scale,
-                savefilename=os.path.join(save_path, log_plot_filename),
-                plot_scale='log',
-                contour_mask=mask,
-                residual_vis_max=residual_vis_max,
-            )
-            print("[hmc] Saved max-log-likelihood model plots.")
-
-        return {
-            'log_likelihoods': log_likelihoods,
-            'max_log_likelihood': best_loglike,
-            'max_log_likelihood_index': best_idx,
-        }
-    except Exception as e:
-        print(f"[warning] Failed to save max-log-likelihood HMC outputs: {e}")
-        return {}
 
 
 def _save_hmc_pixels_wn_summary(
@@ -981,23 +948,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     json.dump(temp_kwargs_json, f, indent=4, default=json_serializer)
                 print(f"[hmc] Saved intermediate kwargs_result JSON to {kwargs_json_path}")
 
-                _save_hmc_max_loglike_outputs(
-                    temp_samples,
-                    prob_model,
-                    diag_dir,
-                    args,
-                    active_sites=active_sites,
-                    kwargs_filename=f'kwargs_loglike_batch_{i}.json',
-                    save_pixel_arrays=False,
-                    # Uncomment to save diagnostic max-loglike source-pixel arrays.
-                    # pixels_filename=f'kwargs_loglike_source_pixels_batch_{i}.npy',
-                    # pixels_wn_filename=f'kwargs_loglike_source_pixels_wn_batch_{i}.npy',
-                    linear_plot_filename=f'best_fit_model_loglike_linear_batch_{i}.png',
-                    log_plot_filename=f'best_fit_model_loglike_log_batch_{i}.png',
-                    # Uncomment to save diagnostic per-sample log-likelihood arrays.
-                    # log_likelihoods_filename=f'hmc_log_likelihoods_batch_{i}.npy',
-                    log_likelihoods_filename=None,
-                )
+
                 _save_hmc_pixels_wn_summary(
                     temp_samples,
                     diag_dir,
@@ -1044,11 +995,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 
                 # Best fit model plots (linear and log)
                 try:
-                    best_fit_model = model_image_from_deterministics(
+                    best_fit_model = evaluate_mcmc_median_model_image(
                         prob_model,
-                        temp_kwargs,
-                        temp_deterministics,
+                        temp_samples,
                     )
+
                     chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
                     mask = getattr(l_image, 'source_arc_mask', None)
                     if mask is not None:
@@ -1160,8 +1111,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     param_samples = {k: v for k, v in samples.items() if k in active_sites}
     map_params = tree_median(param_samples)
 
-    loglike_extra = _save_hmc_max_loglike_outputs(samples, prob_model, save_path, args, active_sites=active_sites)
+    loglike_extra = {}
     _save_hmc_pixels_wn_summary(samples, save_path)
+
     
     # Flatten unconstrained samples for trace analysis
     try:
