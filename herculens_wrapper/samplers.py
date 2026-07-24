@@ -183,31 +183,37 @@ def evaluate_mcmc_component_medians(prob_model, samples, batch_size=500):
             img_no_lens_light = jnp.squeeze(lens_image.model(
                 **kw, source_add=True, lens_light_add=False, point_source_add=True
             ))
+            img_point_source = jnp.squeeze(lens_image.model(
+                **kw, source_add=False, lens_light_add=False, point_source_add=True
+            ))
         else:
             img_no_lens_light = img_source
+            img_point_source = jnp.zeros_like(img_total)
 
-        return img_total, img_source, img_lens_light, img_no_lens_light
+        return img_total, img_source, img_lens_light, img_no_lens_light, img_point_source
 
     vmap_eval = jax.jit(jax.vmap(eval_single))
 
-    totals_list, sources_list, lens_lights_list, no_lens_lights_list = [], [], [], []
+    totals_list, sources_list, lens_lights_list, no_lens_lights_list, point_sources_list = [], [], [], [], []
     for b_start in range(0, n_total_samples, batch_size):
         b_end = min(b_start + batch_size, n_total_samples)
         b_samples = {
             k: jnp.asarray(samples[k][b_start:b_end])
             for k in sample_keys
         }
-        b_total, b_source, b_lens_light, b_no_lens_light = vmap_eval(b_samples)
+        b_total, b_source, b_lens_light, b_no_lens_light, b_point_source = vmap_eval(b_samples)
         totals_list.append(np.asarray(b_total))
         sources_list.append(np.asarray(b_source))
         lens_lights_list.append(np.asarray(b_lens_light))
         no_lens_lights_list.append(np.asarray(b_no_lens_light))
+        point_sources_list.append(np.asarray(b_point_source))
 
     return {
         'total': np.median(np.concatenate(totals_list, axis=0), axis=0),
         'source': np.median(np.concatenate(sources_list, axis=0), axis=0),
         'lens_light': np.median(np.concatenate(lens_lights_list, axis=0), axis=0),
         'no_lens_light': np.median(np.concatenate(no_lens_lights_list, axis=0), axis=0),
+        'point_source': np.median(np.concatenate(point_sources_list, axis=0), axis=0),
     }
 
 
@@ -978,6 +984,21 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
             p_scale = getattr(prob_model, 'pixel_scale', 0.08)
             
             if img_data is not None and l_image is not None:
+                # Evaluate component medians across all samples accumulated up to current batch
+                try:
+                    temp_comp_medians = evaluate_mcmc_component_medians(prob_model, temp_samples)
+                except Exception as ex_comp:
+                    print(f"[warning] Failed to compute component medians for batch {i}: {ex_comp}")
+                    temp_comp_medians = None
+
+                temp_best_fit = temp_comp_medians['total'] if temp_comp_medians else model_image_from_deterministics(
+                    prob_model, temp_kwargs, temp_deterministics
+                )
+                temp_src = temp_comp_medians['source'] if temp_comp_medians else None
+                temp_lens_light = temp_comp_medians['lens_light'] if temp_comp_medians else None
+                temp_no_lens = temp_comp_medians['no_lens_light'] if temp_comp_medians else None
+                temp_ps = temp_comp_medians.get('point_source') if temp_comp_medians else None
+
                 # Image plane plot
                 try:
                     plot_image_plane(
@@ -988,6 +1009,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                         ns_map,
                         diag_dir,
                         output_filename=f"image_plane_batch_{i}.png",
+                        model_extended_override=temp_src,
+                        model_lens_light_override=temp_lens_light,
+                        model_composite_override=temp_best_fit,
+                        model_point_sources_override=temp_ps,
                     )
                     print(f"[hmc] Saved intermediate image plane visualization to {diag_dir}/image_plane_batch_{i}.png")
                 except Exception as ex:
@@ -995,19 +1020,14 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 
                 # Best fit model plots (linear and log)
                 try:
-                    best_fit_model = evaluate_mcmc_median_model_image(
-                        prob_model,
-                        temp_samples,
-                    )
-
-                    chi2 = float(np.sum(((best_fit_model - img_data) / ns_map) ** 2))
+                    chi2 = float(np.sum(((temp_best_fit - img_data) / ns_map) ** 2))
                     mask = getattr(l_image, 'source_arc_mask', None)
                     if mask is not None:
                         mask = np.asarray(mask)
                     residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
                     
                     display(
-                        [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                        [temp_best_fit, img_data, (temp_best_fit - img_data) / ns_map],
                         titles=[
                             'Best fit model',
                             'Image data',
@@ -1022,7 +1042,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     print(f"[hmc] Saved intermediate best fit model (linear) visualization to {diag_dir}/best_fit_model_linear_batch_{i}.png")
                     
                     display(
-                        [best_fit_model, img_data, (best_fit_model - img_data) / ns_map],
+                        [temp_best_fit, img_data, (temp_best_fit - img_data) / ns_map],
                         titles=[
                             'Best fit model',
                             'Image data',
@@ -1050,6 +1070,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                         plot_scale='linear',
                         residual_vis_max=residual_vis_max,
                         output_filename=f"ring_model_comparison_linear_batch_{i}.png",
+                        model_no_lens_light_override=temp_no_lens,
+                        model_lens_light_override=temp_lens_light,
                     )
                     print(f"[hmc] Saved intermediate ring comparison (linear) visualization to {diag_dir}/ring_model_comparison_linear_batch_{i}.png")
 
@@ -1063,10 +1085,13 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                         plot_scale='log',
                         residual_vis_max=residual_vis_max,
                         output_filename=f"ring_model_comparison_log_batch_{i}.png",
+                        model_no_lens_light_override=temp_no_lens,
+                        model_lens_light_override=temp_lens_light,
                     )
                     print(f"[hmc] Saved intermediate ring comparison (log) visualization to {diag_dir}/ring_model_comparison_log_batch_{i}.png")
                 except Exception as ex:
                     print(f"[warning] Failed to plot intermediate ring comparison: {ex}")
+
                 
                 # Source plane plot (linear)
                 try:

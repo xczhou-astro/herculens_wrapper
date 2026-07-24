@@ -215,6 +215,7 @@ def plot_image_plane(
     model_extended_override=None,
     model_lens_light_override=None,
     model_composite_override=None,
+    model_point_sources_override=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -242,10 +243,13 @@ def plot_image_plane(
     model_point_sources = np.zeros((ny, nx))
     ra_image_list = []
     dec_image_list = []
-    if 'kwargs_point_source' in kwargs_result:
+    if model_point_sources_override is not None:
+        model_point_sources = model_point_sources_override
+    elif 'kwargs_point_source' in kwargs_result:
         model_point_sources = lens_image.model(
             **kwargs_result, source_add=False, lens_light_add=False, point_source_add=True,
         )
+    if 'kwargs_point_source' in kwargs_result:
         theta_x, theta_y, amps = lens_image.PointSourceModel.get_multiple_images(
             kwargs_result['kwargs_point_source'],
             kwargs_lens=kwargs_result['kwargs_lens'],
@@ -1155,13 +1159,25 @@ def generate_run_plots(
     if mask is not None:
         mask = np.asarray(mask)
 
-    if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
-        chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+    if mcmc_component_medians is None and mcmc_samples is not None and prob_model is not None:
+        try:
+            from herculens_wrapper.samplers import evaluate_mcmc_component_medians
+            print("[plots] Evaluating pixel-by-pixel median model component images across MCMC samples...")
+            mcmc_component_medians = evaluate_mcmc_component_medians(prob_model, mcmc_samples)
+        except Exception as e:
+            print(f"[plots] Could not compute MCMC component medians: {e}")
 
     comp_src = mcmc_component_medians.get('source') if mcmc_component_medians else None
     comp_lens_light = mcmc_component_medians.get('lens_light') if mcmc_component_medians else None
     comp_total = mcmc_component_medians.get('total') if mcmc_component_medians else None
     comp_no_lens = mcmc_component_medians.get('no_lens_light') if mcmc_component_medians else None
+    comp_ps = mcmc_component_medians.get('point_source') if mcmc_component_medians else None
+
+    if comp_total is not None:
+        best_fit_model = comp_total
+
+    if best_fit_model is not None and image_data is not None and noise_map is not None:
+        chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
 
     def _try(name, fn):
         try:
@@ -1204,6 +1220,7 @@ def generate_run_plots(
         model_extended_override=comp_src,
         model_lens_light_override=comp_lens_light,
         model_composite_override=comp_total,
+        model_point_sources_override=comp_ps,
     ))
 
     _try('source_plane_linear.png', lambda: plot_source_plane(
