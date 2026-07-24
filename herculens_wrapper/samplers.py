@@ -580,6 +580,15 @@ def run_optax(prob_model, args, init_params):
     from herculens.Inference.Optimization.optax import OptaxOptimizer
 
     init_params_unconst = to_unconstrained(prob_model, init_params)
+    clean_unconst = {}
+    for k, v in init_params_unconst.items():
+        arr = jnp.asarray(v)
+        if jnp.issubdtype(arr.dtype, jnp.integer):
+            arr = arr.astype(jnp.float64)
+        if jnp.issubdtype(arr.dtype, jnp.inexact):
+            clean_unconst[k] = arr
+    init_params_unconst = clean_unconst
+
     loss = Loss(prob_model, constrained_space=False)
     optimizer = OptaxOptimizer(loss)
 

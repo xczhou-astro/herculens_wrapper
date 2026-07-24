@@ -217,6 +217,8 @@ class PowerSpectrum:
         sigma_high=10,
         positive=True,
         n_low=0.0001,
+        rho_low=None,
+        rho_high=None,
     ):
         with numpyro.plate(f'{plate_name} power spectrum params - [1]', 1):
             if n_value is None:
@@ -227,7 +229,10 @@ class PowerSpectrum:
             else:
                 n = numpyro.deterministic(f'n_{param_name}', jnp.atleast_1d(n_value))
             sigma = numpyro.sample(f'sigma_{param_name}', dist.LogUniform(sigma_low, sigma_high))
-            rho = numpyro.sample(f'rho_{param_name}', dist.LogNormal(2.1, 1.1))
+            if rho_low is not None and rho_high is not None:
+                rho = numpyro.sample(f'rho_{param_name}', dist.LogUniform(rho_low, rho_high))
+            else:
+                rho = numpyro.sample(f'rho_{param_name}', dist.LogNormal(2.1, 1.1))
 
         P = PowerSpectrum.P_Matern(k, n[0], sigma[0], rho[0], k_zero=k_zero)
         scale = jnp.sqrt(P)
@@ -311,6 +316,8 @@ class PowerSpectrum:
                 n_high=safe_float(pixelated_prior.get('n_value_high'), 100.0),
                 sigma_low=safe_float(pixelated_prior.get('sigma_low'), 1e-5),
                 sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
+                rho_low=safe_float(pixelated_prior.get('rho_low'), None),
+                rho_high=safe_float(pixelated_prior.get('rho_high'), None),
                 positive=bool(pixelated_prior.get('positive', True)),
             )
             numpyro.sample('obs', dist.Normal(source['pixels'], noise_level).to_event(2), obs=image_obs)
@@ -877,11 +884,13 @@ def create_prob_model(
                                 'source_grid',
                                 k_values,
                                 k_zero=pixelated_prior.get('k_zero', None),
-                                n_value=pixelated_prior.get('n_value', None),
+                                n_value=pixelated_prior.get('n_value'),
                                 n_low=safe_float(pixelated_prior.get('n_value_low'), 0.0001),
                                 n_high=safe_float(pixelated_prior.get('n_value_high'), 100.0),
                                 sigma_low=safe_float(pixelated_prior.get('sigma_low'), 1e-5),
                                 sigma_high=safe_float(pixelated_prior.get('sigma_high'), 10.0),
+                                rho_low=safe_float(pixelated_prior.get('rho_low'), None),
+                                rho_high=safe_float(pixelated_prior.get('rho_high'), None),
                                 positive=bool(pixelated_prior.get('positive', True)),
                             )
                             prior_source_light = [{'pixels': res['pixels']}]
