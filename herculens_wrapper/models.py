@@ -487,60 +487,6 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
     return kwargs
 
 
-def _source_support_mask_from_lens(lens_image, kwargs_lens, args=None):
-    if kwargs_lens is None or getattr(lens_image, 'source_arc_mask', None) is None:
-        return None
-    if not np.any(np.asarray(lens_image.source_arc_mask)):
-        return None
-
-    npix_src, npix_src_y = lens_image.SourceModel.pixel_grid.num_pixel_axes
-    if npix_src_y != npix_src:
-        raise ValueError('Source support mask currently requires a square source grid.')
-
-    x_src_axis, y_src_axis, _ = lens_image.get_source_coordinates(
-        kwargs_lens,
-        npix_src=npix_src,
-        source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
-    )
-    x_src_axis = np.asarray(x_src_axis)
-    y_src_axis = np.asarray(y_src_axis)
-    if x_src_axis.ndim == 1 and y_src_axis.ndim == 1:
-        xx_src, yy_src = np.meshgrid(x_src_axis, y_src_axis)
-    else:
-        xx_src, yy_src = x_src_axis, y_src_axis
-
-    x_img, y_img = lens_image.ImageNumerics.coordinates_evaluate
-    x_ray, y_ray = lens_image.MassModel.ray_shooting(
-        x_img,
-        y_img,
-        kwargs_lens,
-    )
-    mask_flat = np.asarray(lens_image._source_arc_mask_flat).astype(bool)
-    x_masked = np.asarray(x_ray)[mask_flat]
-    y_masked = np.asarray(y_ray)[mask_flat]
-    finite = np.isfinite(x_masked) & np.isfinite(y_masked)
-    x_masked = x_masked[finite]
-    y_masked = y_masked[finite]
-    if x_masked.size == 0 or y_masked.size == 0:
-        return None
-
-    xmin = float(np.nanmin(x_masked))
-    xmax = float(np.nanmax(x_masked))
-    ymin = float(np.nanmin(y_masked))
-    ymax = float(np.nanmax(y_masked))
-    print(
-        "[source_support_mask] Ray-traced source-mask extent: "
-        f"x=[{xmin:.6f}, {xmax:.6f}] (width={xmax - xmin:.6f}), "
-        f"y=[{ymin:.6f}, {ymax:.6f}] (height={ymax - ymin:.6f})"
-    )
-    lens_image.source_support_bounds = (xmin, xmax, ymin, ymax)
-    support_mask = (
-        (xx_src >= xmin) & (xx_src <= xmax)
-        & (yy_src >= ymin) & (yy_src <= ymax)
-    )
-    return support_mask.astype(bool)
-
-
 def create_prob_model(
     param_list,
     type_list,
@@ -654,41 +600,9 @@ def create_prob_model(
         pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
     prior_type = pixelated_prior.get('prior_type', 'matern')
 
-    use_source_support_mask = bool(getattr(args, 'use_source_support_mask', True)) if args is not None else True
     source_support_mask = None
     lens_image.source_support_bounds = None
-    if (
-        type_list.get('source_light_type_list') == ['PIXELATED']
-        and use_source_support_mask
-    ):
-        try:
-            support_kwargs = None
-            if init_params_path is not None:
-                support_kwargs = load_kwargs_init_json(init_params_path)
-            else:
-                support_kwargs = param_list_to_init_kwargs(param_list, type_list, lens_image)
-            source_support_mask = _source_support_mask_from_lens(
-                lens_image,
-                support_kwargs.get('kwargs_lens', None),
-                args=args,
-            )
-            if source_support_mask is not None:
-                active = int(np.sum(source_support_mask))
-                total = int(source_support_mask.size)
-                print(f"[source_support_mask] Active source pixels: {active}/{total} ({active / total:.1%})")
-                lens_image.source_support_mask = source_support_mask
-                save_path = getattr(args, 'save_path', None) if args is not None else None
-                if save_path is not None:
-                    os.makedirs(save_path, exist_ok=True)
-                    np.save(os.path.join(save_path, 'source_support_mask.npy'), source_support_mask)
-            else:
-                lens_image.source_support_mask = None
-        except Exception as e:
-            print(f"[source_support_mask] Warning: failed to build source support mask: {e}")
-            source_support_mask = None
-            lens_image.source_support_mask = None
-    else:
-        lens_image.source_support_mask = None
+    lens_image.source_support_mask = None
     regul_weights = None
     starlet = None
     nscales = None

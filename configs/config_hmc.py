@@ -365,8 +365,7 @@ def arguments():
         'save_path': '../modeling_F277W/hmc',
 
         'pipeline': False,
-        'source_grid_scale': 0.8, 
-        'use_source_support_mask': True,
+        'source_grid_scale': 0.8,
         'conjugate_points': None,
 
         # general settings

@@ -362,8 +362,7 @@ def arguments():
 
         'pipeline': True,
 
-        'source_grid_scale': 0.8, 
-        'use_source_support_mask': True,
+        'source_grid_scale': 0.8,
         'use_best_pixel_size': False,
         'manual': True,
         'conjugate_points': None,
