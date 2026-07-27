@@ -318,9 +318,9 @@ def _save_hmc_pixels_wn_summary(
     samples,
     save_path,
     plot_filename='source_pixels_wn_median_uncertainties.png',
-    median_filename='source_pixels_wn_median.npy',
-    lower_filename='source_pixels_wn_sigma_lower.npy',
-    upper_filename='source_pixels_wn_sigma_upper.npy',
+    median_filename=None,
+    lower_filename=None,
+    upper_filename=None,
 ):
     key = 'pixels_wn_source_grid'
     if key not in samples:
@@ -363,6 +363,69 @@ def _save_hmc_pixels_wn_summary(
         print(f"[hmc] Saved median pixels_wn uncertainty plot to {out_path}")
     except Exception as e:
         print(f"[warning] Failed to save median pixels_wn uncertainty plot: {e}")
+
+
+def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path):
+    """
+    Evaluate physical 2D source surface brightness images across ALL MCMC samples
+    using JAX vmap and compute the sample-wise median, 16th, and 84th percentiles.
+    
+    Saves:
+      - kwargs_source_pixels.npy       : Median physical source image across HMC samples
+      - kwargs_source_pixels_lower.npy : 1-sigma lower uncertainty (median - 16th percentile)
+      - kwargs_source_pixels_upper.npy : 1-sigma upper uncertainty (84th percentile - median)
+    """
+    key = 'pixels_wn_source_grid'
+    if key not in samples:
+        return None
+    try:
+        import jax
+        import jax.numpy as jnp
+        from herculens_wrapper.models import PowerSpectrum
+
+        p_wn_arr = jnp.asarray(samples['pixels_wn_source_grid'], dtype=jnp.float64)
+        n_arr = jnp.asarray(np.ravel(samples['n_source_grid']), dtype=jnp.float64)
+        sigma_arr = jnp.asarray(np.ravel(samples['sigma_source_grid']), dtype=jnp.float64)
+        rho_arr = jnp.asarray(np.ravel(samples['rho_source_grid']), dtype=jnp.float64)
+
+        ny, nx = p_wn_arr.shape[1], p_wn_arr.shape[2]
+        k_grid = PowerSpectrum.K_grid((ny, nx))
+        k_values = jnp.asarray(k_grid.k)
+
+        def single_source_pixels(n, sigma, rho, p_wn):
+            scale = jnp.sqrt(PowerSpectrum.P_Matern(k_values, n, sigma, rho, k_zero=0.0))
+            pixels = jnp.fft.irfft2(PowerSpectrum.pack_fft_values(p_wn * scale), s=scale.shape, norm='ortho')
+            return jax.nn.softplus(100.0 * pixels) / 100.0
+
+        vmap_fn = jax.jit(jax.vmap(single_source_pixels))
+
+        n_samples_total = len(p_wn_arr)
+        batch_size = 200
+        all_rec_sources = []
+        for b in range(0, n_samples_total, batch_size):
+            b_end = min(b + batch_size, n_samples_total)
+            batch_srcs = vmap_fn(n_arr[b:b_end], sigma_arr[b:b_end], rho_arr[b:b_end], p_wn_arr[b:b_end])
+            all_rec_sources.append(np.asarray(batch_srcs))
+
+        rec_sources = np.concatenate(all_rec_sources, axis=0)
+
+        median_src = np.median(rec_sources, axis=0)
+        p16_src = np.percentile(rec_sources, 16, axis=0)
+        p84_src = np.percentile(rec_sources, 84, axis=0)
+
+        lower_src = median_src - p16_src
+        upper_src = p84_src - median_src
+
+        np.save(os.path.join(save_path, 'kwargs_source_pixels.npy'), median_src)
+        np.save(os.path.join(save_path, 'kwargs_source_pixels_lower.npy'), lower_src)
+        np.save(os.path.join(save_path, 'kwargs_source_pixels_upper.npy'), upper_src)
+
+        print(f"[hmc] Calculated physical source images for {n_samples_total} MCMC samples.")
+        print(f"[hmc] Saved kwargs_source_pixels.npy (sample median), kwargs_source_pixels_lower.npy, kwargs_source_pixels_upper.npy")
+        return median_src, lower_src, upper_src
+    except Exception as e:
+        print(f"[warning] Failed to evaluate MCMC physical source pixels summary: {e}")
+        return None
 
 
 def _select_hmc_jitter_keys(init_params_unconst, args, vars_mass):
@@ -1138,6 +1201,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
 
     loglike_extra = {}
     _save_hmc_pixels_wn_summary(samples, save_path)
+    evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path)
 
     
     # Flatten unconstrained samples for trace analysis

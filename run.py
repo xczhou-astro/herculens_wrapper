@@ -736,7 +736,7 @@ def build_and_run(config_path=None):
                     kwargs_sigma_lower = run_prob_model.params2kwargs(sigma_params_lower)
                     kwargs_sigma_upper = run_prob_model.params2kwargs(sigma_params_upper)
                     kwargs_sigma = zip_asymmetric_uncertainties(kwargs_sigma_lower, kwargs_sigma_upper)
-                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list, pixels_filename='kwargs_sigma_pixels.npy')
+                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(kwargs_sigma, run_save_path, type_list, save_pixel_arrays=False)
                     with open(os.path.join(run_save_path, 'kwargs_sigma.json'), 'w') as f:
                         json.dump(kwargs_sigma_json, f, indent=4, default=json_serializer)
                     print(f"[hmc] Saved parameter uncertainties to kwargs_sigma.json")
@@ -770,7 +770,8 @@ def build_and_run(config_path=None):
                     best_params,
                     rng_seed=run_args.random_seed,
                 )
-            kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, run_save_path, type_list)
+            is_mcmc = (run_args.sampler in MCMC_SAMPLERS)
+            kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, run_save_path, type_list, save_pixel_arrays=not is_mcmc)
             with open(os.path.join(run_save_path, 'kwargs_result.json'), 'w') as f:
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
             write_parameter_comparison(run_save_path, run_args.init_params_path, kwargs_json, type_list)
