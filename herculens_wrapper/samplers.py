@@ -387,10 +387,16 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
         k_grid = PowerSpectrum.K_grid((ny, nx))
         k_values = jnp.asarray(k_grid.k)
 
+        is_positive = True
+        if hasattr(prob_model, 'pixelated_prior') and isinstance(prob_model.pixelated_prior, dict):
+            is_positive = bool(prob_model.pixelated_prior.get('positive', True))
+
         def single_source_pixels(n, sigma, rho, p_wn):
             scale = jnp.sqrt(PowerSpectrum.P_Matern(k_values, n, sigma, rho, k_zero=0.0))
             pixels = jnp.fft.irfft2(PowerSpectrum.pack_fft_values(p_wn * scale), s=scale.shape, norm='ortho')
-            return jax.nn.softplus(100.0 * pixels) / 100.0
+            if is_positive:
+                return jax.nn.softplus(100.0 * pixels) / 100.0
+            return pixels
 
         vmap_fn = jax.jit(jax.vmap(single_source_pixels))
 
