@@ -365,15 +365,10 @@ def _save_hmc_pixels_wn_summary(
         print(f"[warning] Failed to save median pixels_wn uncertainty plot: {e}")
 
 
-def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path):
+def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy=True):
     """
     Evaluate physical 2D source surface brightness images across ALL MCMC samples
     using JAX vmap and compute the sample-wise median, 16th, and 84th percentiles.
-    
-    Saves:
-      - kwargs_source_pixels.npy       : Median physical source image across HMC samples
-      - kwargs_source_pixels_lower.npy : 1-sigma lower uncertainty (median - 16th percentile)
-      - kwargs_source_pixels_upper.npy : 1-sigma upper uncertainty (84th percentile - median)
     """
     key = 'pixels_wn_source_grid'
     if key not in samples:
@@ -416,12 +411,12 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path):
         lower_src = median_src - p16_src
         upper_src = p84_src - median_src
 
-        np.save(os.path.join(save_path, 'kwargs_source_pixels.npy'), median_src)
-        np.save(os.path.join(save_path, 'kwargs_source_pixels_lower.npy'), lower_src)
-        np.save(os.path.join(save_path, 'kwargs_source_pixels_upper.npy'), upper_src)
+        if save_npy and save_path is not None:
+            np.save(os.path.join(save_path, 'kwargs_source_pixels.npy'), median_src)
+            np.save(os.path.join(save_path, 'kwargs_source_pixels_lower.npy'), lower_src)
+            np.save(os.path.join(save_path, 'kwargs_source_pixels_upper.npy'), upper_src)
+            print(f"[hmc] Saved kwargs_source_pixels.npy (sample median), kwargs_source_pixels_lower.npy, kwargs_source_pixels_upper.npy to {save_path}")
 
-        print(f"[hmc] Calculated physical source images for {n_samples_total} MCMC samples.")
-        print(f"[hmc] Saved kwargs_source_pixels.npy (sample median), kwargs_source_pixels_lower.npy, kwargs_source_pixels_upper.npy")
         return median_src, lower_src, upper_src
     except Exception as e:
         print(f"[warning] Failed to evaluate MCMC physical source pixels summary: {e}")
@@ -1022,14 +1017,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                     temp_samples,
                     diag_dir,
                     plot_filename=f'source_pixels_wn_median_uncertainties_batch_{i}.png',
-                    # Uncomment to save diagnostic pixels_wn summary arrays.
-                    # median_filename=f'source_pixels_wn_median_batch_{i}.npy',
-                    # lower_filename=f'source_pixels_wn_sigma_lower_batch_{i}.npy',
-                    # upper_filename=f'source_pixels_wn_sigma_upper_batch_{i}.npy',
                     median_filename=None,
                     lower_filename=None,
                     upper_filename=None,
                 )
+                evaluate_mcmc_source_pixels_summary(prob_model, temp_samples, diag_dir, save_npy=False)
             except Exception as ex_json:
                 print(f"[warning] Failed to save intermediate kwargs_result JSON: {ex_json}")
             
