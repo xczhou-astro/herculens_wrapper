@@ -406,6 +406,7 @@ def arguments():
         'noise_path': '../data/F277W/noise.fits',
         'psf_path': '../psf/F277W/psf_modelled.fits', 
         'source_arc_mask_path': '../data/F277W/mask_1.fits',
+        'source_arc_mask_radius': None,  # e.g. {'inner': 0.2, 'outer': 0.4} used when source_arc_mask_path is None
         'save_path': '../modeling_F277W/parametric',
 
         'source_grid_scale': 1.0, 

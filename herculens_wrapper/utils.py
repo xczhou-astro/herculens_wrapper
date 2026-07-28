@@ -258,6 +258,54 @@ def normalize_run_args_paths(args, config_dir=None):
     return args
 
 
+def create_source_arc_mask_from_radius(image_shape, pixel_scale, radius_config):
+    """
+    Create a 2D boolean ring (annulus) mask on the image plane from radius limits (in arcseconds).
+
+    Parameters
+    ----------
+    image_shape : tuple of (int, int)
+        Shape (ny, nx) of the image grid.
+    pixel_scale : float
+        Pixel scale in arcsec/pixel.
+    radius_config : dict or tuple or list
+        Specifies inner and outer radius in arcseconds.
+        Example: {'inner': 0.2, 'outer': 0.4} or (0.2, 0.4).
+
+    Returns
+    -------
+    np.ndarray (bool)
+        2D boolean array of shape image_shape.
+    """
+    if radius_config is None:
+        return None
+
+    r_inner = 0.0
+    r_outer = np.inf
+
+    if isinstance(radius_config, dict):
+        r_inner = float(radius_config.get('inner', radius_config.get('r_in', radius_config.get('min', 0.0))))
+        r_outer = float(radius_config.get('outer', radius_config.get('r_out', radius_config.get('max', np.inf))))
+    elif isinstance(radius_config, (list, tuple)) and len(radius_config) >= 2:
+        r_inner = float(radius_config[0])
+        r_outer = float(radius_config[1])
+    else:
+        raise ValueError(
+            f"Invalid source_arc_mask_radius format: {radius_config}. "
+            "Must be a dict like {{'inner': 0.2, 'outer': 0.4}} or tuple/list (0.2, 0.4)."
+        )
+
+    ny, nx = image_shape
+    x = (np.arange(nx) - (nx - 1) / 2.0) * float(pixel_scale)
+    y = (np.arange(ny) - (ny - 1) / 2.0) * float(pixel_scale)
+    xx, yy = np.meshgrid(x, y)
+    r = np.hypot(xx, yy)
+
+    mask = (r >= r_inner) & (r <= r_outer)
+    return mask
+
+
+
 def pytree_flat_param_labels(params_pytree):
     """
     Build flat parameter labels matching jax.flatten_util.ravel_pytree() order.

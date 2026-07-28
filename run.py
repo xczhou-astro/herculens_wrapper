@@ -35,6 +35,7 @@ from herculens_wrapper.utils import (
     _resolve_single_config_spec,
     center_crop,
     configure_import_paths,
+    create_source_arc_mask_from_radius,
     empty_config,
     fit_dof_and_reduced_chi2,
     get_fits_data,
@@ -294,6 +295,17 @@ def build_and_run(config_path=None):
         source_arc_mask = get_fits_data(source_arc_mask_path).astype(bool)
         if args.crop_size is not None:
             source_arc_mask = center_crop(source_arc_mask, args.crop_size)
+    elif getattr(args, 'source_arc_mask_radius', None) is not None:
+        source_arc_mask = create_source_arc_mask_from_radius(
+            image_data.shape,
+            args.pixel_scale,
+            args.source_arc_mask_radius,
+        )
+        print(
+            f"[mask] Created ring source_arc_mask from radius config "
+            f"{args.source_arc_mask_radius}: shape={source_arc_mask.shape}, "
+            f"active_pixels={int(source_arc_mask.sum())}"
+        )
     source_grid_scale = float(getattr(args, 'source_grid_scale', 1.0))
     conjugate_points = getattr(args, 'conjugate_points', None)
     if conjugate_points is not None:
