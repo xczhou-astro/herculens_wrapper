@@ -516,13 +516,15 @@ def create_prob_model(
     if init_params_path is not None and refine_prior_range is not None:
         import json
         import copy
+        from herculens_wrapper.utils import resolve_init_run_dir
         
         refine_prior_range = float(refine_prior_range)
         if refine_prior_min_frac is not None:
             refine_prior_min_frac = float(refine_prior_min_frac)
             
-        res_path = os.path.join(init_params_path, 'kwargs_result.json')
-        sig_path = os.path.join(init_params_path, 'kwargs_sigma.json')
+        init_run = resolve_init_run_dir(init_params_path)
+        res_path = os.path.join(init_run, 'kwargs_result.json')
+        sig_path = os.path.join(init_run, 'kwargs_sigma.json')
         
         if os.path.exists(res_path) and os.path.exists(sig_path):
             try:
@@ -1142,15 +1144,18 @@ def create_prob_model(
 
 
 def load_kwargs_init_json(init_params_path):
-    from herculens_wrapper.utils import resolve_project_path
+    from herculens_wrapper.utils import resolve_project_path, resolve_init_run_dir
 
     if init_params_path is None:
         raise ValueError("init_params_path is required.")
-    path = resolve_project_path(init_params_path)
-    if os.path.isdir(path):
-        path = os.path.join(path, "kwargs_result.json")
+    run_dir = resolve_init_run_dir(init_params_path)
+    path = os.path.join(run_dir, "kwargs_result.json")
     if not os.path.isfile(path):
-        raise FileNotFoundError(f"kwargs init file not found: {path!r}")
+        alt_path = resolve_project_path(init_params_path)
+        if os.path.isfile(alt_path):
+            path = alt_path
+        else:
+            raise FileNotFoundError(f"kwargs init file not found: {path!r}")
     with open(path) as f:
         return json.load(f)
 

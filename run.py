@@ -8,8 +8,6 @@ Pipeline: run optax/jaxopt first, then set init_params_path to that run
 directory and switch sampler to emcee or hmc_* for MCMC warm-started at the MAP.
 """
 
-import jax
-jax.config.update('jax_enable_x64', True)
 import datetime
 import importlib.util
 import json
@@ -185,11 +183,11 @@ def build_and_run(config_path=None):
     args = normalize_run_args_paths(args, config_dir=config_dir)
     _configure_cuda_from_args(args)
 
-    if args.save_path is None:
-        args.save_path = os.path.join(
-            _PROJECT_ROOT,
-            f'workspace{datetime.datetime.now().strftime("%Y%m%d%H%M")}',
-        )
+    # if args.save_path is None:
+    #     args.save_path = os.path.join(
+    #         _PROJECT_ROOT,
+    #         f'workspace{datetime.datetime.now().strftime("%Y%m%d%H%M")}',
+    #     )
 
     save_path = args.save_path
 
@@ -289,6 +287,7 @@ def build_and_run(config_path=None):
     with open(os.path.join(save_path, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=4, default=json_serializer)
 
+    # for source arc masks
     source_arc_mask = None
     source_arc_mask_path = getattr(args, 'source_arc_mask_path', None)
     if source_arc_mask_path is not None:
@@ -311,6 +310,7 @@ def build_and_run(config_path=None):
     if conjugate_points is not None:
         conjugate_points = np.asarray(conjugate_points, dtype=np.float64)
 
+    # for point source masks
     mask_bool = None
     if args.ps_mask_path is not None:
         mask_file = fits.open(args.ps_mask_path)
@@ -351,8 +351,8 @@ def build_and_run(config_path=None):
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
             source_arc_mask=source_arc_mask,
-            background_subtract_corner=background_subtract_corner,
-            background_subtract_which_corner=background_subtract_which_corner,
+            # background_subtract_corner=background_subtract_corner,
+            # background_subtract_which_corner=background_subtract_which_corner,
             background_offset=background_offset,
         )
     except Exception as e:

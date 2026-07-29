@@ -100,8 +100,8 @@ def plot_input_data(
     point_source_type_list=None,
     point_source_params_list=None,
     source_arc_mask=None,
-    background_subtract_corner=0,
-    background_subtract_which_corner='bottom_left',
+    # background_subtract_corner=0,
+    # background_subtract_which_corner='bottom_left',
     background_offset=0.0,
 ):
     ny, nx = image_data.shape

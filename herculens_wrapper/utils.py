@@ -230,12 +230,125 @@ def empty_config(*args, **kwargs):
     return [], []
 
 
-def resolve_init_run_dir(init_params_path):
-    """Return an existing run directory or parent dir of a kwargs/init JSON file."""
+_RESOLVED_INIT_PATHS_LOGGED = set()
+
+
+def resolve_init_run_dir(init_params_path, verbose=True):
+    """Return an existing run directory or parent dir of a kwargs/init JSON file.
+
+    If init_params_path is a directory containing comparison.json (or contains run_* subfolders),
+    it automatically selects the best run (highest log-likelihood).
+
+    If init_params_path points to a specific run folder (or file within a run folder) whose parent
+    contains comparison.json, it checks if that run is the best run and issues a warning if it is not.
+    """
+    if not init_params_path:
+        return init_params_path
+
     path = resolve_project_path(init_params_path)
-    if os.path.isdir(path):
+
+    if os.path.isfile(path):
+        target_dir = os.path.dirname(path)
+    elif os.path.isdir(path):
+        target_dir = path
+    else:
         return path
-    return os.path.dirname(path)
+
+    is_specific_run_target = (
+        os.path.isfile(os.path.join(target_dir, 'kwargs_result.json')) or
+        os.path.isfile(os.path.join(target_dir, 'kwargs_init.json'))
+    )
+
+    comp_file_in_target = os.path.join(target_dir, 'comparison.json')
+    parent_dir = os.path.dirname(os.path.abspath(target_dir))
+    comp_file_in_parent = os.path.join(parent_dir, 'comparison.json')
+
+    def _find_best_run_from_comp(comp_json_path):
+        if not os.path.isfile(comp_json_path):
+            return None, None, None
+        try:
+            with open(comp_json_path, 'r') as f:
+                comp_data = json.load(f)
+            best_key = None
+            best_ll = -float('inf')
+            runs_info = {}
+            for run_name, run_info in comp_data.items():
+                if not isinstance(run_info, dict):
+                    continue
+                metrics = run_info.get('metrics', run_info)
+                ll = None
+                for k in ('LOG_LIKELIHOOD', 'log_likelihood', 'log_like', 'LOGLIKE'):
+                    if k in metrics:
+                        ll = float(metrics[k])
+                        break
+                if ll is not None:
+                    runs_info[run_name] = ll
+                    if ll > best_ll:
+                        best_ll = ll
+                        best_key = run_name
+            return best_key, best_ll, runs_info
+        except Exception:
+            return None, None, None
+
+    # Case 1: Directory specified contains comparison.json (e.g. '../modeling_F277W/parametric_restricted_gamma/')
+    if os.path.isfile(comp_file_in_target) and not is_specific_run_target:
+        best_key, best_ll, _ = _find_best_run_from_comp(comp_file_in_target)
+        if best_key:
+            best_run_dir = os.path.join(target_dir, best_key)
+            if os.path.isdir(best_run_dir):
+                cache_key = (os.path.abspath(target_dir), 'auto_select', best_key)
+                if verbose and cache_key not in _RESOLVED_INIT_PATHS_LOGGED:
+                    _RESOLVED_INIT_PATHS_LOGGED.add(cache_key)
+                    print(f"[init_params] Automatically selected best run '{best_key}' (highest log-likelihood {best_ll:.2f}) from '{init_params_path}'")
+                return best_run_dir
+
+    # Case 2: Target directory has run_* subfolders but no comparison.json
+    if os.path.isdir(target_dir) and not is_specific_run_target:
+        subdirs = [d for d in os.listdir(target_dir) if os.path.isdir(os.path.join(target_dir, d)) and d.startswith('run_')]
+        if subdirs:
+            best_key = None
+            best_ll = -float('inf')
+            for sd in subdirs:
+                m_file = os.path.join(target_dir, sd, 'metrics.json')
+                if os.path.isfile(m_file):
+                    try:
+                        with open(m_file) as f:
+                            m_data = json.load(f)
+                        ll = float(m_data.get('LOG_LIKELIHOOD', -float('inf')))
+                        if ll > best_ll:
+                            best_ll = ll
+                            best_key = sd
+                    except Exception:
+                        pass
+            if best_key:
+                best_run_dir = os.path.join(target_dir, best_key)
+                cache_key = (os.path.abspath(target_dir), 'auto_select_scan', best_key)
+                if verbose and cache_key not in _RESOLVED_INIT_PATHS_LOGGED:
+                    _RESOLVED_INIT_PATHS_LOGGED.add(cache_key)
+                    print(f"[init_params] Automatically selected best run '{best_key}' (highest log-likelihood {best_ll:.2f}) from '{init_params_path}'")
+                return best_run_dir
+
+    # Case 3: Target is a specific run directory (e.g. '../modeling_F277W/parametric_restricted_gamma/run_0')
+    if os.path.isfile(comp_file_in_parent):
+        best_key, best_ll, runs_info = _find_best_run_from_comp(comp_file_in_parent)
+        current_run_key = os.path.basename(os.path.normpath(target_dir))
+        if best_key and current_run_key in runs_info:
+            current_ll = runs_info[current_run_key]
+            if current_run_key != best_key:
+                cache_key = (os.path.abspath(target_dir), 'warning_not_best', current_run_key)
+                if verbose and cache_key not in _RESOLVED_INIT_PATHS_LOGGED:
+                    _RESOLVED_INIT_PATHS_LOGGED.add(cache_key)
+                    print(
+                        f"[init_params] WARNING: User specified run '{current_run_key}' (log-likelihood {current_ll:.2f}), "
+                        f"which is NOT the best run in '{parent_dir}'. Best run is '{best_key}' with log-likelihood {best_ll:.2f}."
+                    )
+            else:
+                cache_key = (os.path.abspath(target_dir), 'info_best_run', current_run_key)
+                if verbose and cache_key not in _RESOLVED_INIT_PATHS_LOGGED:
+                    _RESOLVED_INIT_PATHS_LOGGED.add(cache_key)
+                    print(f"[init_params] User specified run '{current_run_key}' matches the best run in '{parent_dir}' (log-likelihood {best_ll:.2f}).")
+
+    return target_dir
 
 
 def normalize_run_args_paths(args, config_dir=None):
@@ -254,7 +367,10 @@ def normalize_run_args_paths(args, config_dir=None):
         if hasattr(args, key):
             value = getattr(args, key)
             if value is not None and isinstance(value, str):
-                setattr(args, key, resolve_project_path(value, config_dir=config_dir))
+                if key == 'init_params_path':
+                    setattr(args, key, resolve_init_run_dir(value))
+                else:
+                    setattr(args, key, resolve_project_path(value, config_dir=config_dir))
     return args
 
 
