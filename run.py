@@ -180,33 +180,23 @@ def build_and_run(config_path=None):
 
     args = run_arguments_namespace(config_module, config_path)
     config_dir = os.path.dirname(os.path.abspath(config_path))
+    
+    save_path = args.save_path
+    os.makedirs(save_path, exist_ok=True)
+    log_file = open(os.path.join(save_path, 'log.txt'), 'w')
+    sys.stdout = Tee(sys.stdout, log_file)
+    sys.stderr = Tee(sys.stderr, log_file)
+    print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
+    print(f'Starting run in: {save_path} (sampler={args.sampler!r})')
+
     args = normalize_run_args_paths(args, config_dir=config_dir)
     _configure_cuda_from_args(args)
-
-    # if args.save_path is None:
-    #     args.save_path = os.path.join(
-    #         _PROJECT_ROOT,
-    #         f'workspace{datetime.datetime.now().strftime("%Y%m%d%H%M")}',
-    #     )
-
-    save_path = args.save_path
-
-    # if os.path.exists(save_path):
-    #     raise ValueError('Save path already exists: ' + save_path)
-
-    os.makedirs(save_path, exist_ok=True)
-    print(f'Starting run in: {save_path} (sampler={args.sampler!r})')
 
     import shutil
     shutil.copy(config_path, os.path.join(save_path, os.path.basename(config_path)))
 
     with open(os.path.join(save_path, 'args.json'), 'w') as f:
         json.dump(vars(args), f, indent=4, default=json_serializer)
-
-    log_file = open(os.path.join(save_path, 'log.txt'), 'w')
-    sys.stdout = Tee(sys.stdout, log_file)
-    sys.stderr = Tee(sys.stderr, log_file)
-    print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
 
     import jax
     jax.config.update('jax_enable_x64', True)

@@ -80,12 +80,19 @@ def fit_dof_and_reduced_chi2(chi2, image_data, num_params, mask_bool=None):
 
 
 def resolve_project_path(path, config_dir=None):
-    """Resolve a config path relative to the config_dir (if provided) or project root."""
+    """Resolve a config path relative to config_dir, CWD, or project root."""
     if path is None:
         return None
     path = str(path)
     if os.path.isabs(path):
         return os.path.abspath(path)
+    if config_dir is not None:
+        cand = os.path.abspath(os.path.join(config_dir, path))
+        if os.path.exists(cand):
+            return cand
+    cand_cwd = os.path.abspath(path)
+    if os.path.exists(cand_cwd):
+        return cand_cwd
     base_dir = config_dir if config_dir is not None else PROJECT_ROOT
     return os.path.abspath(os.path.join(base_dir, path))
 
@@ -233,7 +240,7 @@ def empty_config(*args, **kwargs):
 _RESOLVED_INIT_PATHS_LOGGED = set()
 
 
-def resolve_init_run_dir(init_params_path, verbose=True):
+def resolve_init_run_dir(init_params_path, verbose=True, config_dir=None):
     """Return an existing run directory or parent dir of a kwargs/init JSON file.
 
     If init_params_path is a directory containing comparison.json (or contains run_* subfolders),
@@ -245,7 +252,7 @@ def resolve_init_run_dir(init_params_path, verbose=True):
     if not init_params_path:
         return init_params_path
 
-    path = resolve_project_path(init_params_path)
+    path = resolve_project_path(init_params_path, config_dir=config_dir)
 
     if os.path.isfile(path):
         target_dir = os.path.dirname(path)
@@ -342,11 +349,6 @@ def resolve_init_run_dir(init_params_path, verbose=True):
                         f"[init_params] WARNING: User specified run '{current_run_key}' (log-likelihood {current_ll:.2f}), "
                         f"which is NOT the best run in '{parent_dir}'. Best run is '{best_key}' with log-likelihood {best_ll:.2f}."
                     )
-            else:
-                cache_key = (os.path.abspath(target_dir), 'info_best_run', current_run_key)
-                if verbose and cache_key not in _RESOLVED_INIT_PATHS_LOGGED:
-                    _RESOLVED_INIT_PATHS_LOGGED.add(cache_key)
-                    print(f"[init_params] User specified run '{current_run_key}' matches the best run in '{parent_dir}' (log-likelihood {best_ll:.2f}).")
 
     return target_dir
 
