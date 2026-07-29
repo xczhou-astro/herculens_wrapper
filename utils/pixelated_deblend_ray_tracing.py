@@ -133,9 +133,29 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         
     print(f"Evaluating lensed contributions for all {num_to_show} components...")
     
+    def _clean_kwargs(kw_dict):
+        kw_clean = copy.deepcopy(kw_dict)
+        if 'kwargs_source' in kw_clean:
+            clean_src = []
+            for kw in kw_clean['kwargs_source']:
+                if isinstance(kw, dict):
+                    kw_c = {
+                        key: val for key, val in kw.items()
+                        if key not in ['pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid']
+                        and not isinstance(val, dict)
+                    }
+                    if 'pixels' in kw:
+                        kw_c['pixels'] = kw['pixels']
+                    clean_src.append(kw_c)
+                else:
+                    clean_src.append(kw)
+            kw_clean['kwargs_source'] = clean_src
+        return kw_clean
+
     # Pre-render standard combined model and lens light
     kwargs_all = copy.deepcopy(kwargs_result)
     kwargs_all['kwargs_source'][0]['pixels'] = source_pixels
+    kwargs_all = _clean_kwargs(kwargs_all)
     
     model_combined = lens_image.model(**kwargs_all, source_add=True, lens_light_add=True, point_source_add=True)
     model_lens_light = lens_image.model(**kwargs_all, source_add=False, lens_light_add=True, point_source_add=False)
@@ -149,6 +169,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         
         kwargs_comp = copy.deepcopy(kwargs_result)
         kwargs_comp['kwargs_source'][0]['pixels'] = masked_source
+        kwargs_comp = _clean_kwargs(kwargs_comp)
         
         comp_lensed = lens_image.model(
             **kwargs_comp, source_add=True, lens_light_add=False, point_source_add=False
@@ -232,16 +253,18 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         
     # Overlay colors/contours for each component on source plane
     color_cycle = ['cyan', 'magenta', 'orange', 'yellow', 'lime', 'pink', 'purple']
-    from matplotlib.patches import Patch
+    linestyle_cycle = ['solid', 'dashed', 'dotted', 'dashdot']
+    from matplotlib.lines import Line2D
     legend_elements = []
     for idx in range(num_to_show):
         comp = components[idx]
         color = color_cycle[idx % len(color_cycle)]
+        linestyle = linestyle_cycle[(idx // len(color_cycle)) % len(linestyle_cycle)]
         # Outline contour around component mask
-        ax_src.contour(comp['mask'], levels=[0.5], colors=[color], extent=src_plot_extent, linewidths=2.0)
-        legend_elements.append(Patch(facecolor='none', edgecolor=color, linewidth=2, label=f"C{idx+1}"))
+        ax_src.contour(comp['mask'], levels=[0.5], colors=[color], linestyles=[linestyle], extent=src_plot_extent, linewidths=2.0)
+        legend_elements.append(Line2D([0], [0], color=color, linestyle=linestyle, linewidth=2, label=f"C{idx+1}"))
         
-    ax_src.legend(handles=legend_elements, loc='upper right', framealpha=0.8)
+    ax_src.legend(handles=legend_elements, loc='upper right', framealpha=0.8, fontsize=8 if num_to_show > 8 else 10)
     ax_src.set_title("Segmented Source Plane", fontsize=12, pad=10)
     ax_src.set_xlabel('arcsec')
     ax_src.set_ylabel('arcsec')
@@ -253,15 +276,18 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     # Row 2: Lensed components (log scale)
     for idx in range(num_to_show):
         color = color_cycle[idx % len(color_cycle)]
+        linestyle = linestyle_cycle[(idx // len(color_cycle)) % len(linestyle_cycle)]
         ax_comp = axes[1, idx]
         comp_img = lensed_components[idx]
         
-        render_im(ax_comp, comp_img, img_extent, f"Lensed Component {idx+1}", is_log=is_log)
+        style_tag = f" ({linestyle})" if (idx >= len(color_cycle)) else ""
+        render_im(ax_comp, comp_img, img_extent, f"Lensed Component {idx+1}{style_tag}", is_log=is_log)
         if source_arc_mask is not None:
             ax_comp.contour(source_arc_mask, levels=[0.5], colors='lime', extent=img_extent, linewidths=1.0)
             
         for spine in ax_comp.spines.values():
             spine.set_color(color)
+            spine.set_linestyle(linestyle)
             spine.set_linewidth(2.5)
             
     # Hide any unused subplots in row 1
