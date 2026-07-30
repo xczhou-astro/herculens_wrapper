@@ -573,6 +573,10 @@ def build_and_run(config_path=None):
                 pixel_init_jitter=getattr(run_args, 'pixel_init_jitter', 0.0),
                 sample_wavelets=sample_wavelets,
                 regul_model=None,
+                require_pixelated_svi=(
+                    run_args.sampler in MCMC_SAMPLERS
+                    and source_light_type_list == ['PIXELATED']
+                ),
             )
             print(f'Number of sampled parameters: {num_params}')
             mcmc_samples = None
@@ -1094,6 +1098,10 @@ def build_and_run(config_path=None):
             pixel_init_jitter=getattr(args, 'pixel_init_jitter', 0.0),
             sample_wavelets=sample_wavelets,
             regul_model=regul_model,
+            require_pixelated_svi=(
+                sampler in MCMC_SAMPLERS
+                and source_light_type_list == ['PIXELATED']
+            ),
         )
         print(f'Number of sampled parameters: {num_params}')
         init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))

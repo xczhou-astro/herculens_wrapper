@@ -553,7 +553,6 @@ def create_prob_model(
     sample_wavelets=False,
     init_params_path=None,
     args=None,
-    likelihood_scale=None,
 ):
     refine_prior_range = None
     refine_prior_min_frac = None
@@ -949,31 +948,22 @@ def create_prob_model(
             model_std = jnp.sqrt(model_var)
             data = jnp.asarray(image_data)
 
-            mask_arc = getattr(lens_image, 'source_arc_mask', None)
-            if mask_arc is not None:
-                mask_out = np.asarray(mask_arc, dtype=bool)
-                npix = int(np.sum(mask_out))
-            else:
-                mask_out = np.ones(image_data.shape, dtype=bool)
-                npix = int(image_data.size)
-
-            l_scale = likelihood_scale
+            l_scale = args.likelihood_scale
             if l_scale is None and args is not None:
                 l_scale = getattr(args, 'likelihood_scale', 1.0)
             if l_scale is None:
                 l_scale = 1.0
             l_scale = float(l_scale)
 
+            # Fit every image pixel. ``source_arc_mask`` only restricts
+            # the rendered source component and must not mask the lens-light
+            # pixels out of the observation likelihood.
             with numpyro.handlers.scale(scale=l_scale):
-                with numpyro.plate(f"Data masked - [{npix}]", npix):
-                    numpyro.sample(
-                        "obs",
-                        dist.Normal(
-                            model_image[mask_out],
-                            model_std[mask_out],
-                        ),
-                        obs=data[mask_out],
-                    )
+                numpyro.sample(
+                    "obs",
+                    dist.Normal(model_image, model_std).to_event(2),
+                    obs=data,
+                )
             hyperparams = []
             if type_list.get('source_light_type_list') == ['PIXELATED']:
                 if prior_type == 'wavelet_penalty':
@@ -1358,6 +1348,7 @@ def get_init_params(
     pixel_init_jitter=0.0,
     sample_wavelets=False,
     regul_model=None,
+    require_pixelated_svi=False,
 ):
     """
     Return constrained NumPyro site parameters (physical values).
@@ -1367,14 +1358,56 @@ def get_init_params(
     files can be projected onto the source pixel grid.
     ``pixel_init_jitter`` adds relative Gaussian noise to ``source_pixels`` after
     loading/projection (helps NUTS escape a overly sharp local mode).
+    When ``require_pixelated_svi`` is true, initialization must come from a
+    recorded SVI run with a pixelated source, and every active Matérn source
+    latent must be restored with its exact expected shape.
     """
     key_init = jax.random.PRNGKey(random_seed)
     init_params = prob_model.get_sample(key_init)
+
+    if require_pixelated_svi and init_params_path is None:
+        raise ValueError(
+            "Pixelated-source HMC requires init_params_path to point to a "
+            "completed pixelated SVI run."
+        )
 
     if init_params_path is not None:
         init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
             os.path.abspath(str(init_params_path))
         )
+        if require_pixelated_svi:
+            init_config_path = os.path.join(init_dir, 'config.json')
+            if not os.path.isfile(init_config_path):
+                raise ValueError(
+                    "Pixelated-source HMC requires init_params_path to point to "
+                    f"a completed pixelated SVI run, but {init_config_path!r} "
+                    "does not exist."
+                )
+            try:
+                with open(init_config_path, 'r') as f:
+                    init_config = json.load(f)
+            except Exception as e:
+                raise ValueError(
+                    "Pixelated-source HMC could not read the initialization "
+                    f"run metadata from {init_config_path!r}."
+                ) from e
+
+            init_sampler = str(init_config.get('sampler', '')).strip().lower()
+            init_source_types = init_config.get('type_list', {}).get(
+                'source_light_type_list', []
+            )
+            if init_sampler != 'svi':
+                raise ValueError(
+                    "Pixelated-source HMC must be initialized by an SVI run, "
+                    f"but {init_config_path!r} records sampler={init_sampler!r}."
+                )
+            if init_source_types != ['PIXELATED']:
+                raise ValueError(
+                    "Pixelated-source HMC must be initialized by an SVI run "
+                    "using source_light_type_list=['PIXELATED'], but "
+                    f"{init_config_path!r} records {init_source_types!r}."
+                )
+
         init_info = load_kwargs_init_json(init_params_path)
         print(f"[Init] Loading kwargs from prior run: {init_dir}")
         try:
@@ -1397,7 +1430,20 @@ def get_init_params(
                 ks[0] = ks0
                 init_info['kwargs_source'] = ks
         except Exception as e:
+            if require_pixelated_svi:
+                raise ValueError(
+                    "Pixelated-source HMC could not load the saved source-pixel "
+                    f"arrays from the SVI run at {init_dir!r}."
+                ) from e
             print(f"[Init] Could not resolve pixelated source stub: {e}")
+
+        if require_pixelated_svi and (
+            not isinstance(init_info, dict) or 'kwargs_lens' not in init_info
+        ):
+            raise ValueError(
+                "Pixelated-source HMC initialization is incomplete: "
+                f"the SVI result at {init_dir!r} has no valid kwargs_lens."
+            )
 
         if isinstance(init_info, dict) and 'kwargs_lens' in init_info:
             loaded_params = kwargs2params(
@@ -1434,7 +1480,48 @@ def get_init_params(
                             loaded_params['rho_source_grid'] = jnp.asarray(ks0['rho_source_grid'], dtype=jnp.float64)
                             loaded_params['sigma_source_grid'] = jnp.asarray(ks0['sigma_source_grid'], dtype=jnp.float64)
                 else:
+                    if require_pixelated_svi:
+                        raise ValueError(
+                            "Pixelated-source HMC initialization is incomplete: "
+                            f"the SVI run at {init_dir!r} has no saved pixelated "
+                            "source image."
+                        )
                     print("[Init] Prior run was parametric. Source light parameters (pixels_wn, n, rho, sigma) will be randomly sampled from their prior distributions.")
+
+            if require_pixelated_svi:
+                candidate_matern_sites = (
+                    'pixels_wn_source_grid',
+                    'n_source_grid',
+                    'rho_source_grid',
+                    'sigma_source_grid',
+                )
+                required_matern_sites = [
+                    k for k in candidate_matern_sites if k in init_params
+                ]
+                missing_matern_sites = [
+                    k for k in required_matern_sites if k not in loaded_params
+                ]
+                if missing_matern_sites:
+                    raise ValueError(
+                        "Pixelated-source HMC initialization is incomplete: "
+                        f"the SVI run at {init_dir!r} did not provide required "
+                        f"Matérn sites {missing_matern_sites}."
+                    )
+
+                incompatible_matern_sites = []
+                for k in required_matern_sites:
+                    loaded_shape = jnp.shape(jnp.asarray(loaded_params[k]))
+                    expected_shape = jnp.shape(jnp.asarray(init_params[k]))
+                    if loaded_shape != expected_shape:
+                        incompatible_matern_sites.append(
+                            f"{k}: saved={loaded_shape}, expected={expected_shape}"
+                        )
+                if incompatible_matern_sites:
+                    raise ValueError(
+                        "Pixelated-source HMC initialization has incompatible "
+                        "SVI source-grid shapes: "
+                        + "; ".join(incompatible_matern_sites)
+                    )
 
             n_matched = 0
             n_skipped = 0
