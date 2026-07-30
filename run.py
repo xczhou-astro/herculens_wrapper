@@ -674,7 +674,8 @@ def build_and_run(config_path=None):
                 print(f'[plots] initial_guess_model.png skipped: {e}')
 
             if run_args.sampler == 'svi':
-                best_params, extra = run_svi(run_prob_model, image_data, run_args, init_params)
+                svi_init_params = init_params if run_args.init_params_path is not None else None
+                best_params, extra = run_svi(run_prob_model, image_data, run_args, svi_init_params)
                 if 'loss_history' in extra:
                     history = {'loss_history': np.asarray(extra['loss_history']).tolist()}
                     with open(os.path.join(run_save_path, 'svi_loss_history.json'), 'w') as f:

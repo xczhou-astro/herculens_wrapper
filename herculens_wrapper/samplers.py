@@ -286,7 +286,12 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
 
         # 2. Generate trace and density plots using arviz
         try:
-            axes = az.plot_trace_dist(idata, var_names=ordered_keys)
+            axes = az.plot_trace_dist(
+                idata,
+                var_names=ordered_keys,
+                aes={'color': ['chain']},
+                visuals={'trace': {'linestyle': '-'}, 'dist': {'linestyle': '-'}},
+            )
             fig = plt.gcf()
             fig.tight_layout()
             plot_path = os.path.join(target_dir, f"mcmc_diagnostics_{suffix}.png")

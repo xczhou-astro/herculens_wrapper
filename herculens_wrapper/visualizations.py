@@ -369,28 +369,21 @@ def plot_source_plane(
         adapted_pixel_scale = grid_width / npix
         print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
     else:
-        mask = getattr(lens_image, 'source_arc_mask', None)
-        if mask is None:
-            try:
-                ny, nx = lens_image.Grid.num_pixel_axes
-                p_scale = float(lens_image.Grid.pixel_width)
-            except Exception:
-                ny, nx = num_pixel, num_pixel
-                p_scale = source_pixel_scale
-            extent = _image_extent(ny, nx, p_scale)
-            x = np.linspace(extent[0], extent[1], nx)
-            y = np.linspace(extent[2], extent[3], ny)
-            xx, yy = np.meshgrid(x, y)
-        else:
-            fov = num_pixel * source_pixel_scale
-            x = np.linspace(-fov / 2, fov / 2, num_pixel)
-            y = np.linspace(-fov / 2, fov / 2, num_pixel)
-            xx, yy = np.meshgrid(x, y)
-            extent = [-fov / 2, fov / 2, -fov / 2, fov / 2]
+        try:
+            ny, nx = lens_image.Grid.num_pixel_axes
+            p_scale = float(lens_image.Grid.pixel_width)
+        except Exception:
+            ny, nx = num_pixel, num_pixel
+            p_scale = source_pixel_scale
+
+        extent = _image_extent(ny, nx, p_scale)
+        x = np.linspace(extent[0], extent[1], nx)
+        y = np.linspace(extent[2], extent[3], ny)
+        xx, yy = np.meshgrid(x, y)
 
         source_for_plot = np.asarray(
             lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
-        )
+        ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
 
     # Initialize adaptive limits defaulting to the full grid extent
     xmin_sq, xmax_sq = extent[0], extent[1]
@@ -592,7 +585,7 @@ def plot_composite_2x3_panel(
         xx_src, yy_src = np.meshgrid(x_src, y_src)
         source_for_plot = np.asarray(
             lens_image.SourceModel.surface_brightness(xx_src, yy_src, kwargs_result['kwargs_source'])
-        )
+        ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
 
     # Caustics
     caustics = []
