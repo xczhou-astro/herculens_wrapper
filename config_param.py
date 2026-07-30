@@ -40,13 +40,12 @@ def lens_light_config(image_size=None, pixel_scale=None, args=None):
         sigma_low = sigma_bins[i]
         sigma_high = sigma_bins[i + 1]
 
-        init_sigma = 10**(0.5 * (np.log10(sigma_low) + np.log10(sigma_high)))
-        sigma_unc = 0.2 * init_sigma
         lens_light_params_list.append({
             # LogNormal(log_loc, log_scale); median=exp(log_loc).
             # Herculens Gaussian amp is total flux.
             'amp': [2.0, 0.1],
-            'sigma': [init_sigma, sigma_unc, sigma_low, sigma_high],  # Binds Gaussian i to bin i
+            # LogUniform(low, high), bounded to Gaussian scale bin i.
+            'sigma': [sigma_low, sigma_high],
             'e1': [0.0, 0.1, -0.5, 0.5], 
             'e2': [0.0, 0.1, -0.5, 0.5], 
             'center_x': [0.0, 0.1, -0.2, 0.2], 
@@ -93,7 +92,8 @@ def source_light_config(image_size=None, pixel_scale=None, args=None,
                     # LogNormal(log_loc, log_scale); median=exp(log_loc).
                     # Gaussian amp is total flux.
                     'amp': [2.0, 0.1],
-                    'sigma': [sigma_low, sigma_high], 
+                    # LogUniform(low, high), bounded to Gaussian scale bin i.
+                    'sigma': [sigma_low, sigma_high],
                     'e1': [0.0, 0.2, -0.5, 0.5], 
                     'e2': [0.0, 0.2, -0.5, 0.5], 
                     'center_x': [0.0, 0.5, -0.3, 0.3], 

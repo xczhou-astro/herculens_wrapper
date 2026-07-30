@@ -434,7 +434,7 @@ def _sample_param_from_prior(site_name, key, param):
     """
     Sample a parameter prior based on specification convention:
     - len == 2: LogNormal(log_loc, log_scale) if key == 'amp',
-      else Uniform(low, high)
+      LogUniform(low, high) if key == 'sigma', else Uniform(low, high)
     - len == 4: TruncatedNormal(mean, std, low, high)
     - scalar: fixed value
     """
@@ -442,6 +442,13 @@ def _sample_param_from_prior(site_name, key, param):
         if len(param) == 2:
             if key == 'amp' or key.endswith('_amp'):
                 return numpyro.sample(site_name, dist.LogNormal(param[0], param[1]))
+            elif key == 'sigma' or key.endswith('_sigma'):
+                if param[0] <= 0 or param[1] <= param[0]:
+                    raise ValueError(
+                        f"LogUniform prior for site '{site_name}' requires "
+                        f"0 < low < high, got {param}."
+                    )
+                return numpyro.sample(site_name, dist.LogUniform(param[0], param[1]))
             else:
                 return numpyro.sample(site_name, dist.Uniform(param[0], param[1]))
         elif len(param) == 4:
@@ -478,7 +485,12 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
         kwargs_model = {}
         for k, v in model.items():
             if isinstance(v, list):
-                kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
+                if k == 'amp' and len(v) == 2:
+                    kwargs_model[k] = np.exp(v[0])
+                elif k == 'sigma' and len(v) == 2:
+                    kwargs_model[k] = np.sqrt(v[0] * v[1])
+                else:
+                    kwargs_model[k] = v[0]
             else:
                 kwargs_model[k] = v
         kwargs['kwargs_lens_light'].append(kwargs_model)
@@ -494,7 +506,12 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
             kwargs_model = {}
             for k, v in model.items():
                 if isinstance(v, list):
-                    kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
+                    if k == 'amp' and len(v) == 2:
+                        kwargs_model[k] = np.exp(v[0])
+                    elif k == 'sigma' and len(v) == 2:
+                        kwargs_model[k] = np.sqrt(v[0] * v[1])
+                    else:
+                        kwargs_model[k] = v[0]
                 else:
                     kwargs_model[k] = v
         kwargs['kwargs_source'].append(kwargs_model)
@@ -505,7 +522,12 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
         kwargs_model = {}
         for k, v in model.items():
             if isinstance(v, list):
-                kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
+                if k == 'amp' and len(v) == 2:
+                    kwargs_model[k] = np.exp(v[0])
+                elif k == 'sigma' and len(v) == 2:
+                    kwargs_model[k] = np.sqrt(v[0] * v[1])
+                else:
+                    kwargs_model[k] = v[0]
             else:
                 kwargs_model[k] = v
         kwargs_point_source.append(kwargs_model)
