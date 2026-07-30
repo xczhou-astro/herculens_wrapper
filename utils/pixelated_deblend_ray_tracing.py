@@ -205,18 +205,16 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     fig, axes = plt.subplots(2, n_cols, figsize=(5 * n_cols + 1 * n_cols, 10))
     
     # Helpers for rendering in linear/log
-    pixel_area = float(lens_image.Grid.pixel_area)
-    
     def render_im(ax, img_raw, extent, title, colormap='twilight', is_log=False):
-        img = img_raw / pixel_area
+        img = img_raw
         if is_log:
             vmin = np.percentile(img[img > 0], 10) if np.any(img > 0) else 1e-4
             log_img = np.log10(np.maximum(img, vmin))
             im = ax.imshow(log_img, origin='lower', cmap=colormap, extent=extent)
-            plt.colorbar(im, ax=ax, label='log10(flux / arcsec$^2$)')
+            plt.colorbar(im, ax=ax, label='log10(pixel flux)')
         else:
             im = ax.imshow(img, origin='lower', cmap=colormap, extent=extent)
-            plt.colorbar(im, ax=ax, label='flux / arcsec$^2$')
+            plt.colorbar(im, ax=ax, label='Pixel flux')
         ax.set_title(title, fontsize=12, pad=10)
         ax.set_xlabel('arcsec')
         ax.set_ylabel('arcsec')
@@ -249,7 +247,7 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
     # Panel 5: Segmented Source Plane (always linear scale!)
     ax_src = axes[0, 4]
     im_src = ax_src.imshow(source_pixels, origin='lower', cmap='twilight', extent=src_plot_extent)
-    plt.colorbar(im_src, ax=ax_src, label='flux (counts / s)')
+    plt.colorbar(im_src, ax=ax_src, label='Pixel flux')
         
     # Overlay colors/contours for each component on source plane
     color_cycle = ['cyan', 'magenta', 'orange', 'yellow', 'lime', 'pink', 'purple']

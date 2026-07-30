@@ -84,7 +84,11 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')
         axes[i].set_title(titles[i])
-        plt.colorbar(im, ax=axes[i], label=cbar_label)
+        is_residual = i == 2 or 'residual' in titles[i].lower() or 'chi' in titles[i].lower()
+        value_label = 'Standardized residual' if is_residual else 'Pixel flux'
+        if not is_residual and cbar_label == 'log':
+            value_label += ' (log scale)'
+        plt.colorbar(im, ax=axes[i], label=value_label)
     plt.tight_layout()
     if savefilename is not None:
         plt.savefig(savefilename, dpi=300, bbox_inches='tight')
@@ -118,7 +122,7 @@ def plot_input_data(
     axes[0].set_title(f'Image data{title_suffix}')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
-    plt.colorbar(im0, ax=axes[0], label='linear')
+    plt.colorbar(im0, ax=axes[0], label='Pixel flux')
 
     if (
         point_source_type_list is not None
@@ -145,13 +149,13 @@ def plot_input_data(
     axes[1].set_title('Noise map')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
-    plt.colorbar(im1, ax=axes[1], label='linear')
+    plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty')
 
     im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight')
     axes[2].set_title('PSF kernel')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
-    plt.colorbar(im2, ax=axes[2], label='linear')
+    plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value')
 
     plt.tight_layout()
     if save_path is not None:
@@ -161,14 +165,14 @@ def plot_input_data(
     # 2. Log Scale Plot
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    norm_img, label_img = _norm_from_plot_scale('log', image_data)
+    norm_img, _ = _norm_from_plot_scale('log', image_data)
     im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_img)
     if source_arc_mask is not None:
         axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     axes[0].set_title(f'Image data (log){title_suffix}')
     axes[0].set_xlabel('arcsec')
     axes[0].set_ylabel('arcsec')
-    plt.colorbar(im0, ax=axes[0], label=label_img)
+    plt.colorbar(im0, ax=axes[0], label='Pixel flux (log scale)')
 
     if (
         point_source_type_list is not None
@@ -189,19 +193,19 @@ def plot_input_data(
                 k += 1
         axes[0].legend(loc='best', fontsize=8)
 
-    norm_noise, label_noise = _norm_from_plot_scale('log', noise_map)
+    norm_noise, _ = _norm_from_plot_scale('log', noise_map)
     im1 = axes[1].imshow(noise_map, origin='lower', cmap='twilight', extent=extent, norm=norm_noise)
     axes[1].set_title('Noise map (log)')
     axes[1].set_xlabel('arcsec')
     axes[1].set_ylabel('arcsec')
-    plt.colorbar(im1, ax=axes[1], label=label_noise)
+    plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty (log scale)')
 
-    norm_psf, label_psf = _norm_from_plot_scale('log', psf_data)
+    norm_psf, _ = _norm_from_plot_scale('log', psf_data)
     im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight', norm=norm_psf)
     axes[2].set_title('PSF kernel (log)')
     axes[2].set_xlabel('pixel')
     axes[2].set_ylabel('pixel')
-    plt.colorbar(im2, ax=axes[2], label=label_psf)
+    plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value (log scale)')
 
     plt.tight_layout()
     if save_path is not None:
@@ -281,15 +285,15 @@ def plot_image_plane(
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[0, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[0, 0].set_title('Extended Source (Lensed)')
-    plt.colorbar(im0, ax=ax[0, 0], label='linear')
+    plt.colorbar(im0, ax=ax[0, 0], label='Pixel flux')
 
     im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='twilight', extent=extent)
     ax[0, 1].set_title('Lens Light')
-    plt.colorbar(im1, ax=ax[0, 1], label='linear')
+    plt.colorbar(im1, ax=ax[0, 1], label='Pixel flux')
 
     im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='twilight', extent=extent)
     ax[0, 2].set_title('Point Sources')
-    plt.colorbar(im2, ax=ax[0, 2], label='linear')
+    plt.colorbar(im2, ax=ax[0, 2], label='Pixel flux')
 
     im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
@@ -297,13 +301,13 @@ def plot_image_plane(
     for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
         ax[1, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
     ax[1, 0].set_title('Composite')
-    plt.colorbar(im3, ax=ax[1, 0], label='linear')
+    plt.colorbar(im3, ax=ax[1, 0], label='Pixel flux')
 
     im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[1, 1].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 1].set_title('Image Data')
-    plt.colorbar(im4, ax=ax[1, 1], label='linear')
+    plt.colorbar(im4, ax=ax[1, 1], label='Pixel flux')
 
     if residual_vis_max > 0.0:
         vmax_res = float(residual_vis_max)
@@ -313,7 +317,7 @@ def plot_image_plane(
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 2].set_title('Residuals (model - data) / noise')
-    plt.colorbar(im5, ax=ax[1, 2])
+    plt.colorbar(im5, ax=ax[1, 2], label='Standardized residual')
 
     for a in ax.ravel():
         a.set_xlabel('arcsec')
@@ -335,6 +339,7 @@ def plot_source_plane(
     output_filename='source_plane.png',
     source_arc_mask=None,
 ):
+    """Plot source-plane values in Herculens image-data-pixel flux units."""
     is_pixelated = (
         'kwargs_source' in kwargs_result
         and len(kwargs_result['kwargs_source']) > 0
@@ -460,7 +465,10 @@ def plot_source_plane(
 
     im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title(f'Extended Source{scale_suffix}')
-    plt.colorbar(im0, ax=axes[0], label=cbar_label)
+    source_flux_label = 'Pixel flux'
+    if cbar_label == 'log':
+        source_flux_label += ' (log scale)'
+    plt.colorbar(im0, ax=axes[0], label=source_flux_label)
 
     im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
@@ -468,7 +476,7 @@ def plot_source_plane(
     for caust_x, caust_y in caustics:
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
-    plt.colorbar(im1, ax=axes[1], label=cbar_label)
+    plt.colorbar(im1, ax=axes[1], label=source_flux_label)
 
     if mapped_ring_contours:
         for ax in axes:
@@ -726,6 +734,7 @@ def plot_lens_light_subtracted_image(
     if mask is not None:
         ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[0].set_title('Image data')
+    label_0 = 'Pixel flux (log scale)' if label_0 == 'log' else 'Pixel flux'
     plt.colorbar(im0, ax=ax[0], label=label_0)
 
     norm_1, label_1 = _norm_from_plot_scale(plot_scale, model_lens_light)
@@ -767,6 +776,7 @@ def plot_lens_light_subtracted_image(
                 ax[1].plot(center_x, center_y, '+', color='black', markersize=4, alpha=0.8)
                 
     ax[1].set_title('Lens light model')
+    label_1 = 'Pixel flux (log scale)' if label_1 == 'log' else 'Pixel flux'
     plt.colorbar(im1, ax=ax[1], label=label_1)
 
     if noise_map is not None:
@@ -776,14 +786,14 @@ def plot_lens_light_subtracted_image(
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
-        plt.colorbar(im2, ax=ax[2], label='linear')
+        plt.colorbar(im2, ax=ax[2], label='Signal-to-noise')
     else:
         vmax_res = float(np.max(np.abs(subtracted)))
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light')
-        plt.colorbar(im2, ax=ax[2], label='linear')
+        plt.colorbar(im2, ax=ax[2], label='Pixel flux')
 
     for a in ax:
         a.set_xlabel('arcsec')
@@ -851,9 +861,10 @@ def plot_ring_model_comparison(
     for idx, (panel, title, cmap) in enumerate(panels):
         if idx < 2:
             norm, cbar_label = _norm_from_plot_scale(plot_scale, panel)
+            cbar_label = 'Pixel flux (log scale)' if cbar_label == 'log' else 'Pixel flux'
             vmin, vmax = None, None
         else:
-            norm, cbar_label = None, 'linear'
+            norm, cbar_label = None, 'Standardized residual'
             if residual_vis_max > 0.0:
                 vmax = float(residual_vis_max)
             else:

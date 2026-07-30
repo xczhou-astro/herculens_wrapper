@@ -433,14 +433,15 @@ def _kwargs_list_to_jax(kw_list):
 def _sample_param_from_prior(site_name, key, param):
     """
     Sample a parameter prior based on specification convention:
-    - len == 2: LogUniform(low, high) if key == 'amp', else Uniform(low, high)
+    - len == 2: LogNormal(log_loc, log_scale) if key == 'amp',
+      else Uniform(low, high)
     - len == 4: TruncatedNormal(mean, std, low, high)
     - scalar: fixed value
     """
     if isinstance(param, (list, tuple)):
         if len(param) == 2:
             if key == 'amp' or key.endswith('_amp'):
-                return numpyro.sample(site_name, dist.LogUniform(param[0], param[1]))
+                return numpyro.sample(site_name, dist.LogNormal(param[0], param[1]))
             else:
                 return numpyro.sample(site_name, dist.Uniform(param[0], param[1]))
         elif len(param) == 4:
@@ -477,13 +478,9 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
         kwargs_model = {}
         for k, v in model.items():
             if isinstance(v, list):
-                kwargs_model[k] = v[0]
+                kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
             else:
                 kwargs_model[k] = v
-        if 'amp' in model and 'sigma' in model and isinstance(model['amp'], list) and isinstance(model['sigma'], list):
-            A_init = model['amp'][0]
-            sigma_init = model['sigma'][0]
-            kwargs_model['amp'] = A_init * (sigma_init ** 2)
         kwargs['kwargs_lens_light'].append(kwargs_model)
         
     # 3. Source light
@@ -497,13 +494,9 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
             kwargs_model = {}
             for k, v in model.items():
                 if isinstance(v, list):
-                    kwargs_model[k] = v[0]
+                    kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
                 else:
                     kwargs_model[k] = v
-            if 'amp' in model and 'sigma' in model and isinstance(model['amp'], list) and isinstance(model['sigma'], list):
-                A_init = model['amp'][0]
-                sigma_init = model['sigma'][0]
-                kwargs_model['amp'] = A_init * (sigma_init ** 2)
         kwargs['kwargs_source'].append(kwargs_model)
 
     # 4. Point source
@@ -512,7 +505,7 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
         kwargs_model = {}
         for k, v in model.items():
             if isinstance(v, list):
-                kwargs_model[k] = v[0]
+                kwargs_model[k] = np.exp(v[0]) if k == 'amp' and len(v) == 2 else v[0]
             else:
                 kwargs_model[k] = v
         kwargs_point_source.append(kwargs_model)
@@ -752,11 +745,7 @@ def create_prob_model(
                 if not (fix_lens_light and kwargs_lens_light_fixed is not None):
                     for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
                         model = {}
-                        has_amp = 'amp' in lens_light_model
-                        has_sigma = 'sigma' in lens_light_model
                         for key, param in lens_light_model.items():
-                            if key == 'amp' and has_sigma:
-                                continue
                             link_spec = _normalize_link_spec(param)
                             if link_spec is not None:
                                 model[key] = _resolve_link(bank, link_spec, context=f"lens_light[{i}].{key}")
@@ -764,16 +753,6 @@ def create_prob_model(
                                 model[key] = _sample_param_from_prior(f'lens_light_{key}_{i}', key, param)
                             else:
                                 model[key] = param
-
-                        if has_amp and not has_sigma:
-                            pass  # amp handled in main loop
-                        elif has_amp and has_sigma:
-                            amp_param = lens_light_model['amp']
-                            if isinstance(amp_param, (list, tuple)):
-                                amp = _sample_param_from_prior(f'lens_light_amp_{i}', 'amp', amp_param)
-                            else:
-                                amp = amp_param
-                            model['amp'] = amp
 
                         prior_lens_light.append(model)
 
@@ -851,11 +830,7 @@ def create_prob_model(
                 if not (fix_source_light and kwargs_source_light_fixed is not None) and 'source_light_params_list' in param_list:
                     for i, source_light_model in enumerate(param_list['source_light_params_list']):
                         model = {}
-                        has_amp = 'amp' in source_light_model
-                        has_sigma = 'sigma' in source_light_model
                         for key, param in source_light_model.items():
-                            if key == 'amp' and has_sigma:
-                                continue
                             link_spec = _normalize_link_spec(param)
                             if link_spec is not None:
                                 model[key] = _resolve_link(bank, link_spec, context=f"source_light[{i}].{key}")
@@ -863,16 +838,6 @@ def create_prob_model(
                                 model[key] = _sample_param_from_prior(f'source_{key}_{i}', key, param)
                             else:
                                 model[key] = param
-
-                        if has_amp and not has_sigma:
-                            pass  # amp handled in main loop
-                        elif has_amp and has_sigma:
-                            amp_param = source_light_model['amp']
-                            if isinstance(amp_param, (list, tuple)):
-                                amp = _sample_param_from_prior(f'source_amp_{i}', 'amp', amp_param)
-                            else:
-                                amp = amp_param
-                            model['amp'] = amp
 
                         prior_source_light.append(model)
 
@@ -929,14 +894,15 @@ def create_prob_model(
                             elif isinstance(param, (list, tuple)) and len(param) == 2:
                                 model[key] = numpyro.sample(
                                     f'ps_{key}_{i}',
-                                    dist.LogUniform(param[0], param[1]).expand((n_img,)).to_event(1),
+                                    dist.LogNormal(param[0], param[1]).expand((n_img,)).to_event(1),
                                 )
                             elif isinstance(param, (int, float, np.floating)):
                                 model[key] = jnp.ones((n_img,)) * float(param)
                             else:
                                 raise ValueError(
                                     f"For IMAGE_POSITIONS, point_source[{i}].amp must be a length-{n_img} "
-                                    f"list/array, a scalar, or a LogUniform prior [low, high]."
+                                    "list/array, a scalar, or a LogNormal prior "
+                                    "[log_loc, log_scale]."
                                 )
                         elif isinstance(param, (list, tuple)):
                             model[key] = _sample_param_from_prior(f'ps_{key}_{i}', key, param)
@@ -1065,12 +1031,15 @@ def create_prob_model(
                             elif key == 'amp':
                                 if f'lens_light_amp_{i}' in params:
                                     kw['amp'] = params[f'lens_light_amp_{i}']
-                                elif f'lens_light_A_{i}' in params and f'lens_light_sigma_{i}' in params:
-                                    kw['amp'] = params[f'lens_light_A_{i}'] * (params[f'lens_light_sigma_{i}'] ** 2)
                                 elif f'lens_light_{key}_{i}' in params:
                                     kw['amp'] = params[f'lens_light_{key}_{i}']
                                 else:
-                                    kw['amp'] = param[0] if isinstance(param, list) else param
+                                    kw['amp'] = (
+                                        np.exp(param[0])
+                                        if isinstance(param, list) and len(param) == 2
+                                        else param[0] if isinstance(param, list)
+                                        else param
+                                    )
                             elif isinstance(param, list):
                                 kw[key] = params[f'lens_light_{key}_{i}']
                             else:
@@ -1141,12 +1110,15 @@ def create_prob_model(
                             elif key == 'amp':
                                 if f'source_amp_{i}' in params:
                                     kw['amp'] = params[f'source_amp_{i}']
-                                elif f'source_A_{i}' in params and f'source_sigma_{i}' in params:
-                                    kw['amp'] = params[f'source_A_{i}'] * (params[f'source_sigma_{i}'] ** 2)
                                 elif f'source_{key}_{i}' in params:
                                     kw['amp'] = params[f'source_{key}_{i}']
                                 else:
-                                    kw['amp'] = param[0] if isinstance(param, list) else param
+                                    kw['amp'] = (
+                                        np.exp(param[0])
+                                        if isinstance(param, list) and len(param) == 2
+                                        else param[0] if isinstance(param, list)
+                                        else param
+                                    )
                             elif isinstance(param, list):
                                 kw[key] = params[f'source_{key}_{i}']
                             else:
@@ -1264,8 +1236,10 @@ def _project_analytic_kwargs_to_pixel_source(
     """
     Initialize pixel values from analytic kwargs_source on the PIXELATED grid.
 
-    Surface brightness is evaluated on the source pixel grid and scaled by the
-    image-grid pixel area (Herculens convention for pixelated sources).
+    Surface brightness is evaluated on the source grid and converted to pixel
+    flux using the image-data pixel area. This matches Herculens' pixelated
+    source convention: ``pixels`` are stored in image-data-pixel flux units,
+    regardless of the source-grid sampling.
     """
     if source_light_type_list is None:
         source_light_type_list = _infer_analytic_source_light_types(kwargs_source_analytic)
@@ -1313,14 +1287,9 @@ def kwargs2params(
                         continue
                     if key not in kwargs['kwargs_lens_light'][i]:
                         continue
-                    if key == 'amp' and 'sigma' in kwargs['kwargs_lens_light'][i]:
-                        amp_val = float(kwargs['kwargs_lens_light'][i]['amp'])
-                        sig_val = float(kwargs['kwargs_lens_light'][i]['sigma'])
-                        A_val = amp_val / (sig_val ** 2 + 1e-12)
-                        params[f'lens_light_A_{i}'] = jnp.asarray(A_val)
-                        params[f'lens_light_amp_{i}'] = jnp.asarray(amp_val)
-                    else:
-                        params[f'lens_light_{key}_{i}'] = jnp.asarray(kwargs['kwargs_lens_light'][i][key])
+                    params[f'lens_light_{key}_{i}'] = jnp.asarray(
+                        kwargs['kwargs_lens_light'][i][key]
+                    )
     
     if type_list is not None and type_list.get('source_light_type_list') == ['PIXELATED']:
         pass
@@ -1333,14 +1302,9 @@ def kwargs2params(
                             continue
                         if key not in kwargs['kwargs_source'][i]:
                             continue
-                        if key == 'amp' and 'sigma' in kwargs['kwargs_source'][i]:
-                            amp_val = float(kwargs['kwargs_source'][i]['amp'])
-                            sig_val = float(kwargs['kwargs_source'][i]['sigma'])
-                            A_val = amp_val / (sig_val ** 2 + 1e-12)
-                            params[f'source_A_{i}'] = jnp.asarray(A_val)
-                            params[f'source_amp_{i}'] = jnp.asarray(amp_val)
-                        else:
-                            params[f'source_{key}_{i}'] = jnp.asarray(kwargs['kwargs_source'][i][key])
+                        params[f'source_{key}_{i}'] = jnp.asarray(
+                            kwargs['kwargs_source'][i][key]
+                        )
     if 'point_source_params_list' in param_list and 'kwargs_point_source' in kwargs:
         ps_type_list = [None] * len(param_list['point_source_params_list'])
         for i, point_source_model in enumerate(param_list['point_source_params_list']):

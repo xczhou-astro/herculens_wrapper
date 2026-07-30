@@ -372,8 +372,12 @@ def _save_hmc_pixels_wn_summary(
 
 def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy=True):
     """
-    Evaluate physical 2D source surface brightness images across ALL MCMC samples
-    using JAX vmap and compute the sample-wise median, 16th, and 84th percentiles.
+    Evaluate physical 2D source pixel-flux images across ALL MCMC samples using
+    JAX vmap and compute the sample-wise median, 16th, and 84th percentiles.
+
+    Herculens stores pixelated-source values as flux per image-data pixel, so
+    these arrays can be compared directly with image-plane pixel fluxes without
+    an additional pixel-area conversion.
     """
     key = 'pixels_wn_source_grid'
     if key not in samples:

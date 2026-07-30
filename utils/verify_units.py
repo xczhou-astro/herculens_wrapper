@@ -92,10 +92,10 @@ def verify_units(run_dir):
     reduced_chi2 = chi2 / float(image_data.size)
     
     print("\n--- Diagnostic Statistics ---")
-    print(f"Total Observed Data Flux (counts/s): {data_sum:.4f}")
-    print(f"Total Model Prediction Flux (counts/s): {model_sum:.4f}")
-    print(f"Observed peak value (counts/s): {np.max(image_data):.4f}")
-    print(f"Model peak value (counts/s): {np.max(model_combined):.4f}")
+    print(f"Total Observed Data Flux: {data_sum:.4f}")
+    print(f"Total Model Prediction Flux: {model_sum:.4f}")
+    print(f"Observed peak pixel flux: {np.max(image_data):.4f}")
+    print(f"Model peak pixel flux: {np.max(model_combined):.4f}")
     print(f"Mean residual value: {np.mean(residuals):.4f} sigma")
     print(f"Reduced Chi-squared (chi2/N_pixels): {reduced_chi2:.4f}")
     
@@ -110,16 +110,16 @@ def verify_units(run_dir):
     # Plotted without any scaling to demonstrate direct correspondence
     im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
     axes[0].set_title("Input Observed Data Cutout")
-    plt.colorbar(im0, ax=axes[0], label="flux (counts/s)")
+    plt.colorbar(im0, ax=axes[0], label="Pixel flux")
     
     im1 = axes[1].imshow(model_combined, origin='lower', cmap='twilight', extent=extent)
     axes[1].set_title("Composite Model Prediction")
-    plt.colorbar(im1, ax=axes[1], label="flux (counts/s)")
+    plt.colorbar(im1, ax=axes[1], label="Pixel flux")
     
     vmax_res = float(np.max(np.abs(residuals)))
     im2 = axes[2].imshow(residuals, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
     axes[2].set_title("Residuals (Model - Data) / Noise")
-    plt.colorbar(im2, ax=axes[2], label="sigma (standard deviations)")
+    plt.colorbar(im2, ax=axes[2], label="Standardized residual")
     
     for ax in axes:
         ax.set_xlabel("arcsec")

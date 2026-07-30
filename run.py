@@ -867,6 +867,8 @@ def build_and_run(config_path=None):
                 image_data=np.asarray(image_data),
                 noise_map=np.asarray(noise_map),
                 source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
+                image_unit=np.asarray('pixel_flux'),
+                noise_unit=np.asarray('pixel_flux'),
             )
             print(f'Run {n} complete. Outputs in {run_save_path}')
             run_successful = True
@@ -1289,6 +1291,8 @@ def build_and_run(config_path=None):
             image_data=np.asarray(image_data),
             noise_map=np.asarray(noise_map),
             source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
+            image_unit=np.asarray('pixel_flux'),
+            noise_unit=np.asarray('pixel_flux'),
         )
         print(f'Run complete. Outputs in {save_path}')
         return save_path

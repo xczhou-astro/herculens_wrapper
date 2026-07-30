@@ -475,9 +475,20 @@ def kwargs_best_to_json_pixelated_npy(
                 if save_pixel_arrays:
                     pixels = np.asarray(ks0['pixels'])
                     np.save(os.path.join(save_path, pixels_filename), pixels)
-                    ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename}
+                    ks0['pixels'] = {
+                        '_format': 'pixelated_pixels_npy',
+                        'file': pixels_filename,
+                        '_unit': 'pixel_flux',
+                        '_pixel_area_reference': 'image_data_pixel',
+                    }
                 else:
-                    ks0['pixels'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_filename, '_save_disabled': True}
+                    ks0['pixels'] = {
+                        '_format': 'pixelated_pixels_npy',
+                        'file': pixels_filename,
+                        '_unit': 'pixel_flux',
+                        '_pixel_area_reference': 'image_data_pixel',
+                        '_save_disabled': True,
+                    }
             if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
                 if save_pixel_arrays:
                     pixels_wn = np.asarray(ks0['pixels_wn'])
