@@ -479,7 +479,7 @@ def _build_hmc_chain_init_params(prob_model, init_params_unconst, args, num_chai
                 )
             try:
                 constrained = to_constrained(prob_model, proposal)
-                log_prob = float(prob_model.log_prob(constrained, constrained=True))
+                log_prob = float(np.sum(prob_model.log_prob(constrained, constrained=True)))
                 if np.isfinite(log_prob):
                     accepted = proposal
                     accepted_log_prob = log_prob
@@ -1036,6 +1036,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 plot_image_plane,
                 plot_ring_model_comparison,
                 plot_source_plane,
+                plot_composite_2x3_panel,
                 display,
             )
             
@@ -1079,6 +1080,26 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
                 except Exception as ex:
                     print(f"[warning] Failed to plot intermediate image plane: {ex}")
                 
+                # Composite 2x3 panel plot
+                try:
+                    residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
+                    plot_composite_2x3_panel(
+                        l_image,
+                        temp_kwargs,
+                        p_scale,
+                        img_data,
+                        ns_map,
+                        diag_dir,
+                        residual_vis_max=residual_vis_max,
+                        output_filename=f"composite_batch_{i}.png",
+                        model_extended_override=temp_src,
+                        model_lens_light_override=temp_lens_light,
+                        model_composite_override=temp_best_fit,
+                    )
+                    print(f"[hmc] Saved intermediate composite 2x3 visualization to {diag_dir}/composite_batch_{i}.png")
+                except Exception as ex:
+                    print(f"[warning] Failed to plot intermediate composite 2x3 panel: {ex}")
+
                 # Best fit model plots (linear and log)
                 try:
                     chi2 = float(np.sum(((temp_best_fit - img_data) / ns_map) ** 2))

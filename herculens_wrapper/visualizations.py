@@ -333,6 +333,7 @@ def plot_source_plane(
     plot_caustics=True,
     plot_scale='linear',
     output_filename='source_plane.png',
+    source_arc_mask=None,
 ):
     is_pixelated = (
         'kwargs_source' in kwargs_result
@@ -417,6 +418,48 @@ def plot_source_plane(
         except Exception as e:
             print(f'[plot_source_plane] Could not compute caustics: {e}')
 
+    # Map lensed ring / source_arc_mask boundary back to source plane
+    ring_mask = source_arc_mask
+    if ring_mask is None:
+        ring_mask = getattr(lens_image, 'source_arc_mask', None)
+
+    mapped_ring_contours = []
+    if ring_mask is not None:
+        try:
+            mask_arr = np.asarray(ring_mask).astype(bool)
+            if np.any(mask_arr) and not np.all(mask_arr):
+                if hasattr(lens_image, 'Grid') and hasattr(lens_image.Grid, 'pixel_coordinates'):
+                    img_x, img_y = lens_image.Grid.pixel_coordinates
+                    img_x = np.asarray(img_x)
+                    img_y = np.asarray(img_y)
+                    if img_x.ndim == 1 and img_y.ndim == 1:
+                        img_x, img_y = np.meshgrid(img_x, img_y)
+
+                    fig_dummy, ax_dummy = plt.subplots()
+                    cs = ax_dummy.contour(img_x, img_y, mask_arr.astype(float), levels=[0.5])
+                    segments = cs.allsegs[0] if (hasattr(cs, 'allsegs') and len(cs.allsegs) > 0) else []
+                    plt.close(fig_dummy)
+
+                    if len(segments) > 0:
+                        def _seg_area(seg):
+                            if len(seg) < 3:
+                                return 0.0
+                            x_s, y_s = seg[:, 0], seg[:, 1]
+                            return 0.5 * np.abs(np.dot(x_s, np.roll(y_s, 1)) - np.dot(y_s, np.roll(x_s, 1)))
+                        outer_seg = max(segments, key=_seg_area)
+                        segments = [outer_seg]
+
+                    kwargs_lens = kwargs_result.get('kwargs_lens', None)
+                    for seg in segments:
+                        if len(seg) > 0:
+                            x_b_img, y_b_img = seg[:, 0], seg[:, 1]
+                            beta_x_b, beta_y_b = lens_image.MassModel.ray_shooting(
+                                x_b_img, y_b_img, kwargs_lens
+                            )
+                            mapped_ring_contours.append((np.asarray(beta_x_b), np.asarray(beta_y_b)))
+        except Exception as e:
+            print(f'[plot_source_plane] Could not compute mapped ring boundary: {e}')
+
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
@@ -433,6 +476,11 @@ def plot_source_plane(
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
     plt.colorbar(im1, ax=axes[1], label=cbar_label)
+
+    if mapped_ring_contours:
+        for ax in axes:
+            for beta_x_b, beta_y_b in mapped_ring_contours:
+                ax.plot(beta_x_b, beta_y_b, color='orange', lw=1.5, ls='--', alpha=0.95)
 
     support_bounds = locals().get('source_support_bounds', None)
     if support_bounds is None:
@@ -454,6 +502,201 @@ def plot_source_plane(
         a.set_ylabel('arcsec')
         a.set_xlim(xmin_sq, xmax_sq)
         a.set_ylim(ymin_sq, ymax_sq)
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def plot_composite_2x3_panel(
+    lens_image,
+    kwargs_result,
+    pixel_scale,
+    image_data,
+    noise_map,
+    save_path,
+    residual_vis_max=0.0,
+    output_filename='composite.png',
+    model_extended_override=None,
+    model_lens_light_override=None,
+    model_composite_override=None,
+    source_arc_mask=None,
+):
+    ny, nx = image_data.shape
+    extent_img = _image_extent(ny, nx, pixel_scale)
+
+    mask = source_arc_mask
+    if mask is None:
+        mask = getattr(lens_image, 'source_arc_mask', None)
+
+    # Clean kwargs_source for model evaluation if needed
+    clean_kwargs = dict(kwargs_result)
+    if 'kwargs_source' in kwargs_result:
+        clean_kwargs['kwargs_source'] = [
+            {'pixels': k['pixels']} if (isinstance(k, dict) and 'pixels' in k) else k
+            for k in kwargs_result['kwargs_source']
+        ]
+
+    # 1. Evaluate image plane components
+    if model_lens_light_override is not None:
+        model_lens_light = model_lens_light_override
+    elif 'kwargs_lens_light' in kwargs_result and len(kwargs_result.get('kwargs_lens_light', [])) > 0:
+        model_lens_light = lens_image.model(
+            **clean_kwargs, lens_light_add=True, source_add=False, point_source_add=False,
+        )
+    else:
+        model_lens_light = np.zeros((ny, nx))
+
+    if model_extended_override is not None:
+        model_extended = model_extended_override
+    else:
+        model_extended = lens_image.model(
+            **clean_kwargs, source_add=True, lens_light_add=False, point_source_add=False,
+        )
+
+    if model_composite_override is not None:
+        model_composite = model_composite_override
+    else:
+        model_composite = lens_image.model(**clean_kwargs, source_add=True, point_source_add=True, lens_light_add=True)
+
+    residuals = (model_composite - image_data) / noise_map
+    chi2 = float(np.sum(residuals ** 2))
+    subtracted = image_data - model_lens_light
+
+    # 2. Evaluate source plane reconstruction
+    is_pixelated = (
+        'kwargs_source' in kwargs_result
+        and len(kwargs_result['kwargs_source']) > 0
+        and isinstance(kwargs_result['kwargs_source'][0], dict)
+        and 'pixels' in kwargs_result['kwargs_source'][0]
+    )
+
+    if is_pixelated:
+        source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
+        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+            kwargs_lens = kwargs_result.get('kwargs_lens', None)
+            npix_src = source_for_plot.shape[0]
+            _, _, extent_src = lens_image.get_source_coordinates(
+                kwargs_lens,
+                npix_src=npix_src,
+                source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0)
+            )
+            extent_src = list(np.asarray(extent_src))
+        else:
+            extent_src = list(lens_image.SourceModel.pixel_grid.extent)
+    else:
+        p_scale = float(getattr(lens_image.Grid, 'pixel_width', pixel_scale))
+        extent_src = _image_extent(ny, nx, p_scale)
+        x_src = np.linspace(extent_src[0], extent_src[1], nx)
+        y_src = np.linspace(extent_src[2], extent_src[3], ny)
+        xx_src, yy_src = np.meshgrid(x_src, y_src)
+        source_for_plot = np.asarray(
+            lens_image.SourceModel.surface_brightness(xx_src, yy_src, kwargs_result['kwargs_source'])
+        )
+
+    # Caustics
+    caustics = []
+    try:
+        _, caustics = model_util.critical_lines_caustics(
+            lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+        )
+    except Exception:
+        pass
+
+    # Ray-trace outer ring boundary to source plane
+    mapped_ring_contours = []
+    if mask is not None:
+        try:
+            mask_arr = np.asarray(mask).astype(bool)
+            if np.any(mask_arr) and not np.all(mask_arr):
+                if hasattr(lens_image, 'Grid') and hasattr(lens_image.Grid, 'pixel_coordinates'):
+                    img_x, img_y = lens_image.Grid.pixel_coordinates
+                    img_x = np.asarray(img_x)
+                    img_y = np.asarray(img_y)
+                    if img_x.ndim == 1 and img_y.ndim == 1:
+                        img_x, img_y = np.meshgrid(img_x, img_y)
+
+                    fig_dummy, ax_dummy = plt.subplots()
+                    cs = ax_dummy.contour(img_x, img_y, mask_arr.astype(float), levels=[0.5])
+                    segments = cs.allsegs[0] if (hasattr(cs, 'allsegs') and len(cs.allsegs) > 0) else []
+                    plt.close(fig_dummy)
+
+                    if len(segments) > 0:
+                        def _seg_area(seg):
+                            if len(seg) < 3:
+                                return 0.0
+                            x_s, y_s = seg[:, 0], seg[:, 1]
+                            return 0.5 * np.abs(np.dot(x_s, np.roll(y_s, 1)) - np.dot(y_s, np.roll(x_s, 1)))
+                        outer_seg = max(segments, key=_seg_area)
+                        segments = [outer_seg]
+
+                    kwargs_lens = kwargs_result.get('kwargs_lens', None)
+                    for seg in segments:
+                        if len(seg) > 0:
+                            x_b_img, y_b_img = seg[:, 0], seg[:, 1]
+                            beta_x_b, beta_y_b = lens_image.MassModel.ray_shooting(
+                                x_b_img, y_b_img, kwargs_lens
+                            )
+                            mapped_ring_contours.append((np.asarray(beta_x_b), np.asarray(beta_y_b)))
+        except Exception:
+            pass
+
+    # Render 2x3 panel plot with mixed scales: Data & Model in log scale; rest in linear scale. Colorbar ONLY on Residual.
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+
+    norm_data, _ = _norm_from_plot_scale('log', image_data)
+    norm_model, _ = _norm_from_plot_scale('log', model_composite)
+    norm_sub, _ = _norm_from_plot_scale('linear', subtracted)
+    norm_src_lensed, _ = _norm_from_plot_scale('linear', model_extended)
+    norm_src_plane, _ = _norm_from_plot_scale('linear', source_for_plot)
+
+    # Panel (0, 0): Data (Log scale, no colorbar)
+    axes[0, 0].imshow(image_data, origin='lower', extent=extent_img, cmap='twilight', norm=norm_data)
+    if mask is not None:
+        axes[0, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+    axes[0, 0].set_title('Data')
+
+    # Panel (0, 1): Model (Log scale, no colorbar)
+    axes[0, 1].imshow(model_composite, origin='lower', extent=extent_img, cmap='twilight', norm=norm_model)
+    if mask is not None:
+        axes[0, 1].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+    axes[0, 1].set_title('Model')
+
+    # Panel (0, 2): Residual (Linear scale, WITH COLORBAR)
+    if residual_vis_max > 0.0:
+        vmax_res = float(residual_vis_max)
+    else:
+        vmax_res = float(np.max(np.abs(residuals)))
+    im2 = axes[0, 2].imshow(residuals, origin='lower', extent=extent_img, cmap='bwr', vmin=-vmax_res, vmax=vmax_res)
+    if mask is not None:
+        axes[0, 2].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+    axes[0, 2].set_title(f'Residual (chi^2 = {chi2:.2f})')
+    plt.colorbar(im2, ax=axes[0, 2], label='(model - data) / noise')
+
+    # Panel (1, 0): Data - Lens Light (Linear scale, no colorbar)
+    axes[1, 0].imshow(subtracted, origin='lower', extent=extent_img, cmap='twilight', norm=norm_sub)
+    if mask is not None:
+        axes[1, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+    axes[1, 0].set_title('Data - Lens Light')
+
+    # Panel (1, 1): Lensed Source (Linear scale, no colorbar)
+    axes[1, 1].imshow(model_extended, origin='lower', extent=extent_img, cmap='twilight', norm=norm_src_lensed)
+    if mask is not None:
+        axes[1, 1].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+    axes[1, 1].set_title('Lensed Source')
+
+    # Panel (1, 2): Source (Source Plane, Linear scale, no colorbar)
+    axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
+    for caust_x, caust_y in caustics:
+        axes[1, 2].plot(caust_x, caust_y, color='lime', lw=1.0)
+    if mapped_ring_contours:
+        for beta_x_b, beta_y_b in mapped_ring_contours:
+            axes[1, 2].plot(beta_x_b, beta_y_b, color='orange', lw=1.5, ls='--', alpha=0.95)
+    axes[1, 2].set_title('Source')
+
+    for a in axes.ravel():
+        a.set_xlabel('arcsec')
+        a.set_ylabel('arcsec')
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
@@ -1212,6 +1455,15 @@ def generate_run_plots(
         plot_scale='log',
         contour_mask=mask,
         residual_vis_max=residual_vis_max,
+    ))
+
+    _try('composite.png', lambda: plot_composite_2x3_panel(
+        lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
+        residual_vis_max=residual_vis_max,
+        output_filename='composite.png',
+        model_extended_override=comp_src,
+        model_lens_light_override=comp_lens_light,
+        model_composite_override=comp_total,
     ))
 
     _try('image_plane.png', lambda: plot_image_plane(

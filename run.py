@@ -651,8 +651,8 @@ def build_and_run(config_path=None):
                         except Exception as e:
                             print(f"[svi-warmup] Warning: SVI source warmup failed, proceeding with standard initialization. Error: {e}")
 
-            init_log_prob = float(run_prob_model.log_prob(init_params, constrained=True))
-            init_log_likelihood = float(run_prob_model.log_likelihood(init_params))
+            init_log_prob = float(np.sum(run_prob_model.log_prob(init_params, constrained=True)))
+            init_log_likelihood = float(np.sum(run_prob_model.log_likelihood(init_params)))
             print(
                 f'Initial log-prob: {init_log_prob:.2f} '
                 f'(log-likelihood: {init_log_likelihood:.2f})'
@@ -821,7 +821,7 @@ def build_and_run(config_path=None):
                     print(f"[warning] Failed to compute source pixel scale for metrics: {e}")
 
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
-            log_likelihood = float(run_prob_model.log_likelihood(best_params))
+            log_likelihood = float(np.sum(run_prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 run_save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
                 num_params_free=num_params_free,
@@ -1093,8 +1093,8 @@ def build_and_run(config_path=None):
             regul_model=regul_model,
         )
         print(f'Number of sampled parameters: {num_params}')
-        init_log_prob = float(prob_model.log_prob(init_params, constrained=True))
-        init_log_likelihood = float(prob_model.log_likelihood(init_params))
+        init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))
+        init_log_likelihood = float(np.sum(prob_model.log_likelihood(init_params)))
         print(
             f'Initial log-prob: {init_log_prob:.2f} '
             f'(log-likelihood: {init_log_likelihood:.2f})'
@@ -1181,7 +1181,7 @@ def build_and_run(config_path=None):
                 output_deterministics,
             )
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
-            log_likelihood = float(prob_model.log_likelihood(best_params))
+            log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
                 num_params_free=num_params_free,
@@ -1247,7 +1247,7 @@ def build_and_run(config_path=None):
                 output_deterministics,
             )
             chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
-            log_likelihood = float(prob_model.log_likelihood(best_params))
+            log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
                 num_params_free=num_params,

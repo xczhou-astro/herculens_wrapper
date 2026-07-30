@@ -503,6 +503,7 @@ def create_prob_model(
     sample_wavelets=False,
     init_params_path=None,
     args=None,
+    likelihood_scale=None,
 ):
     refine_prior_range = None
     refine_prior_min_frac = None
@@ -931,11 +932,35 @@ def create_prob_model(
             numpyro.deterministic('model_image', model_image)
             model_var = noise.C_D_model(model_image)
             model_std = jnp.sqrt(model_var)
-            obs = jnp.asarray(image_data)
-            numpyro.sample('obs', dist.Independent(dist.Normal(model_image, model_std), 2), obs=obs)
+            data = jnp.asarray(image_data)
 
+            mask_arc = getattr(lens_image, 'source_arc_mask', None)
+            if mask_arc is not None:
+                mask_out = np.asarray(mask_arc, dtype=bool)
+                npix = int(np.sum(mask_out))
+            else:
+                mask_out = np.ones(image_data.shape, dtype=bool)
+                npix = int(image_data.size)
+
+            l_scale = likelihood_scale
+            if l_scale is None and args is not None:
+                l_scale = getattr(args, 'likelihood_scale', 1.0)
+            if l_scale is None:
+                l_scale = 1.0
+            l_scale = float(l_scale)
+
+            with numpyro.handlers.scale(scale=l_scale):
+                with numpyro.plate(f"Data masked - [{npix}]", npix):
+                    numpyro.sample(
+                        "obs",
+                        dist.Normal(
+                            model_image[mask_out],
+                            model_std[mask_out],
+                        ),
+                        obs=data[mask_out],
+                    )
             hyperparams = []
-            if type_list['source_light_type_list'] == ['PIXELATED']:
+            if type_list.get('source_light_type_list') == ['PIXELATED']:
                 if prior_type == 'wavelet_penalty':
                     lambda_0, lambda_1 = pixelated_prior.get('regul_strengths', (3.0, 3.0))
                     hyperparams = [
@@ -957,7 +982,6 @@ def create_prob_model(
                         'source_regul',
                         regul_model.log_prob(model_params, hyperparams),
                     )
-
             if 'point_source_type_list' in type_list and 'IMAGE_POSITIONS' in type_list['point_source_type_list']:
                 sigma_source = 1e-3
                 try:
