@@ -1510,12 +1510,22 @@ def get_init_params(
 
                 incompatible_matern_sites = []
                 for k in required_matern_sites:
-                    loaded_shape = jnp.shape(jnp.asarray(loaded_params[k]))
-                    expected_shape = jnp.shape(jnp.asarray(init_params[k]))
+                    loaded_arr = jnp.asarray(loaded_params[k])
+                    expected_arr = jnp.asarray(init_params[k])
+                    loaded_shape = jnp.shape(loaded_arr)
+                    expected_shape = jnp.shape(expected_arr)
                     if loaded_shape != expected_shape:
-                        incompatible_matern_sites.append(
-                            f"{k}: saved={loaded_shape}, expected={expected_shape}"
-                        )
+                        # JSON serializes one-element NumPyro plates as scalars.
+                        # Restore their model shape without relaxing validation
+                        # for the high-dimensional source-pixel array.
+                        if loaded_arr.size == expected_arr.size == 1:
+                            loaded_params[k] = jnp.reshape(
+                                loaded_arr, expected_shape
+                            )
+                        else:
+                            incompatible_matern_sites.append(
+                                f"{k}: saved={loaded_shape}, expected={expected_shape}"
+                            )
                 if incompatible_matern_sites:
                     raise ValueError(
                         "Pixelated-source HMC initialization has incompatible "
