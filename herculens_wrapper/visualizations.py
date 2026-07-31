@@ -1298,7 +1298,7 @@ def _mass_ellipticity_annotation(summary):
 
 
 def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path, lens_mass_summary=None):
-    """Plot 2D convergence and magnification maps with critical lines."""
+    """Plot 2D convergence, magnification, and radial convergence profiles."""
     # 1. Evaluate 2D convergence and magnification on image grid
     nx, ny = lens_image.Grid.num_pixel_axes
     x_grid_img, y_grid_img = lens_image.Grid.pixel_coordinates
@@ -1317,8 +1317,27 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
     except Exception as e:
         print(f"[plot_mass_and_convergence] Could not compute critical lines: {e}")
 
-    # 3. Plotting (1x2 grid)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    # 3. Azimuthally averaged convergence about the primary mass centre.
+    primary_mass = kwargs_lens[0] if kwargs_lens else {}
+    center_x = float(primary_mass.get('center_x', 0.0))
+    center_y = float(primary_mass.get('center_y', 0.0))
+    radius_map = np.hypot(np.asarray(x_grid_img) - center_x, np.asarray(y_grid_img) - center_y)
+    valid_kappa = np.isfinite(radius_map) & np.isfinite(kappa_map)
+    radial_bins = np.linspace(0.0, float(np.nanmax(radius_map[valid_kappa])), 61)
+    radial_centers = 0.5 * (radial_bins[:-1] + radial_bins[1:])
+    radial_index = np.digitize(radius_map[valid_kappa], radial_bins) - 1
+    radial_mean = np.full(radial_centers.shape, np.nan)
+    radial_p16 = np.full(radial_centers.shape, np.nan)
+    radial_p84 = np.full(radial_centers.shape, np.nan)
+    kappa_values = kappa_map[valid_kappa]
+    for index in range(radial_centers.size):
+        values = kappa_values[radial_index == index]
+        if values.size:
+            radial_mean[index] = np.mean(values)
+            radial_p16[index], radial_p84[index] = np.percentile(values, [16.0, 84.0])
+
+    # 4. Plotting (1x3 grid)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     extent = _image_extent(ny, nx, pixel_scale)
     
     # --- Panel 0: 2D Convergence Map ---
@@ -1360,6 +1379,22 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
     if crit_lines:
         axes[1].legend(loc='upper right', fontsize=8)
     plt.colorbar(im_mag, ax=axes[1], label=r'log10($|\mu|$)')
+
+    # --- Panel 2: Radial convergence profile ---
+    finite_profile = np.isfinite(radial_mean)
+    axes[2].plot(
+        radial_centers[finite_profile], radial_mean[finite_profile],
+        color='black', lw=1.8, label=r'Azimuthal mean $\kappa$',
+    )
+    axes[2].fill_between(
+        radial_centers[finite_profile], radial_p16[finite_profile], radial_p84[finite_profile],
+        color='tab:blue', alpha=0.25, label='16th-84th percentile',
+    )
+    axes[2].axhline(0.0, color='0.5', lw=0.8, ls='--')
+    axes[2].set_xlabel('Radius from primary mass centre (arcsec)')
+    axes[2].set_ylabel(r'Convergence $\kappa$')
+    axes[2].set_title(r'Radial Convergence Profile')
+    axes[2].legend(loc='best', fontsize=8)
     
     annotation = _mass_ellipticity_annotation(lens_mass_summary or {})
     if annotation is not None:
