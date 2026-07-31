@@ -948,11 +948,8 @@ def create_prob_model(
             model_std = jnp.sqrt(model_var)
             data = jnp.asarray(image_data)
 
-            l_scale = args.likelihood_scale
-            if l_scale is None and args is not None:
-                l_scale = getattr(args, 'likelihood_scale', 1.0)
-            if l_scale is None:
-                l_scale = 1.0
+
+            l_scale = getattr(args, 'likelihood_scale', 1.0)
             l_scale = float(l_scale)
 
             # Fit every image pixel. ``source_arc_mask`` only restricts
