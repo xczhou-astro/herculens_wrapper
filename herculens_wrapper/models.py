@@ -733,13 +733,19 @@ def create_prob_model(
         if prior_type == 'wavelet_penalty':
             regul_model = w_regul_model
 
+    def _get_fixed_lens_kwargs():
+        """Resolve fixed mass kwargs, including a joint-model callback."""
+        if callable(kwargs_lens_fixed):
+            return kwargs_lens_fixed()
+        return kwargs_lens_fixed
+
     class ProbModel(NumpyroModel):
 
         def model(self):
 
             prior_lens_mass = []
             if fix_lens_mass and kwargs_lens_fixed is not None:
-                prior_lens_mass = _kwargs_list_to_jax(kwargs_lens_fixed)
+                prior_lens_mass = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
             
             bank = {'lens': prior_lens_mass}
             
@@ -1005,7 +1011,7 @@ def create_prob_model(
 
             kwargs_lens = []
             if fix_lens_mass and kwargs_lens_fixed is not None:
-                kwargs_lens = _kwargs_list_to_jax(kwargs_lens_fixed)
+                kwargs_lens = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
             
             bank = {'lens': kwargs_lens}
             

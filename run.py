@@ -180,6 +180,10 @@ def build_and_run(config_path=None):
 
     args = run_arguments_namespace(config_module, config_path)
     config_dir = os.path.dirname(os.path.abspath(config_path))
+    args = normalize_run_args_paths(args, config_dir=config_dir)
+    if bool(getattr(args, 'use_multiband', False)):
+        from run_multiband import build_and_run_multiband
+        return build_and_run_multiband(config_path)
     
     save_path = args.save_path
     os.makedirs(save_path, exist_ok=True)
@@ -189,7 +193,6 @@ def build_and_run(config_path=None):
     print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
     print(f'Starting run in: {save_path} (sampler={args.sampler!r})')
 
-    args = normalize_run_args_paths(args, config_dir=config_dir)
     _configure_cuda_from_args(args)
 
     import shutil
