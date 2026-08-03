@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from types import SimpleNamespace
 
 import jax
 jax.config.update('jax_enable_x64', True)
@@ -27,11 +28,11 @@ from herculens_wrapper.utils import (
 
 configure_import_paths()
 
-_BAND_FILES = {
-    'data_path': 'Data_cutout.fits',
-    'noise_path': 'noise.fits',
-    'psf_path': 'psf_modelled.fits',
-    'source_arc_mask_path': 'mask_1.fits',
+_BAND_FILE_NAMES = {
+    'data_path': ('data_name', 'Data_cutout.fits'),
+    'noise_path': ('noise_name', 'noise.fits'),
+    'psf_path': ('psf_name', 'psf_modelled.fits'),
+    'source_arc_mask_path': ('source_arc_mask_name', 'mask_1.fits'),
 }
 
 
@@ -54,9 +55,16 @@ def _call_config(function, image_size, pixel_scale, args, band_name):
         return function(image_size=image_size, pixel_scale=pixel_scale, args=args)
 
 
-def _band_paths(root, band_name):
-    directory = os.path.join(root, band_name)
-    paths = {key: os.path.join(directory, filename) for key, filename in _BAND_FILES.items()}
+def _band_paths(args, band_name):
+    """Resolve ``{base_path}/{band}/{filename}`` inputs for one band."""
+    paths = {
+        path_key: os.path.join(
+            getattr(args, path_key),
+            band_name,
+            getattr(args, name_key, default_name),
+        )
+        for path_key, (name_key, default_name) in _BAND_FILE_NAMES.items()
+    }
     missing = [path for path in paths.values() if not os.path.isfile(path)]
     if missing:
         raise FileNotFoundError(f"Missing multiband files for {band_name!r}: {missing}")
@@ -125,6 +133,59 @@ def _load_joint_initialization(prob_model, bands, init_path, random_seed):
     return init_params
 
 
+def _load_fixed_light_kwargs(init_path, bands):
+    """Load the shared mass and each band's lens light for source-only warmup."""
+    init_root = os.path.abspath(init_path)
+    with open(os.path.join(init_root, 'kwargs_lens_shared.json')) as handle:
+        kwargs_lens = json.load(handle)['kwargs_lens']
+    kwargs_lens_light = {}
+    for band in bands:
+        run_dir = os.path.join(init_root, band['name'])
+        with open(os.path.join(run_dir, 'kwargs_result.json')) as handle:
+            kwargs = _materialize_pixel_arrays(
+                json.load(handle), run_dir,
+            )
+        kwargs_lens_light[band['name']] = kwargs.get('kwargs_lens_light', [])
+    return kwargs_lens, kwargs_lens_light
+
+
+def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
+    """Optimize joint source parameters with the prior mass and lens light fixed."""
+    if (
+        args.sampler != 'svi'
+        or getattr(args, 'pixelated_init_method', None) != 'svi_warmup'
+        or not init_path
+        or not any(band['type_list'].get('source_light_type_list') == ['PIXELATED'] for band in bands)
+    ):
+        return init_params
+    max_iterations = int(getattr(args, 'num_iterations_warmup', 0))
+    if max_iterations <= 0:
+        return init_params
+
+    from herculens_wrapper.multiband import create_multiband_prob_model
+    from herculens_wrapper.samplers import get_active_sample_sites, run_svi
+
+    kwargs_lens, kwargs_lens_light = _load_fixed_light_kwargs(init_path, bands)
+    warmup_model = create_multiband_prob_model(
+        bands,
+        prob_model.lens_mass_params_list,
+        prob_model.lens_mass_type_list,
+        args,
+        fixed_lens_mass=kwargs_lens,
+        fixed_lens_light_by_band=kwargs_lens_light,
+    )
+    active_sites = set(get_active_sample_sites(warmup_model, rng_seed=args.random_seed))
+    warmup_init = {key: value for key, value in init_params.items() if key in active_sites}
+    warmup_args = SimpleNamespace(**vars(args))
+    warmup_args.max_iterations_svi = max_iterations
+    print(f'[multiband:svi-warmup] Optimizing source parameters for {max_iterations} iterations.')
+    best_warmup, _ = run_svi(warmup_model, None, warmup_args, warmup_init)
+    for key, value in best_warmup.items():
+        if key in init_params:
+            init_params[key] = value
+    return init_params
+
+
 def _band_hmc_samples(samples, band):
     """Expose shared mass and one band's sites under the usual single-band names."""
     prefix = f"{band['site_prefix']}/"
@@ -150,7 +211,6 @@ def build_and_run_multiband(config_path=None):
     band_names = list(getattr(args, 'band_names', []))
     if len(band_names) < 2:
         raise ValueError('band_names must contain at least two bands.')
-    data_root = resolve_project_path(args.multiband_data_path, config_dir=os.path.dirname(config_path))
     save_path = resolve_project_path(args.save_path, config_dir=os.path.dirname(config_path))
     os.makedirs(save_path, exist_ok=True)
     shutil.copy(config_path, os.path.join(save_path, os.path.basename(config_path)))
@@ -177,7 +237,7 @@ def build_and_run_multiband(config_path=None):
     shared_mass_params = None
     shared_mass_types = None
     for index, band_name in enumerate(band_names):
-        paths = _band_paths(data_root, band_name)
+        paths = _band_paths(args, band_name)
         image_data = get_fits_data(paths['data_path'])
         noise_map = get_fits_data(paths['noise_path'])
         psf_data = get_fits_data(paths['psf_path'])
@@ -219,9 +279,6 @@ def build_and_run_multiband(config_path=None):
             source_grid_scale=float(getattr(args, 'source_grid_scale', 1.0)),
             conjugate_points=getattr(args, 'conjugate_points', None),
         )
-        band_dir = os.path.join(save_path, band_name)
-        os.makedirs(band_dir, exist_ok=True)
-        plot_input_data(image_data, noise_map, psf_data, args.pixel_scale, band_dir, point_types, point_params, source_arc_mask)
         bands.append({
             'name': band_name,
             'site_prefix': band_site_prefix(index, band_name),
@@ -231,70 +288,111 @@ def build_and_run_multiband(config_path=None):
             'psf_data': psf_data,
             'type_list': type_list,
             'param_list': param_list,
-            'save_path': band_dir,
+            'save_path': None,
         })
 
     prob_model = create_multiband_prob_model(bands, shared_mass_params, shared_mass_types, args)
     for band, band_model in zip(bands, prob_model.band_models):
         band['prob_model'] = band_model
     sampler = args.sampler
-    mcmc_samples = None
-    init_path = getattr(args, 'init_params_path', None)
-    init_params = (
-        _load_joint_initialization(prob_model, bands, init_path, args.random_seed)
-        if init_path else prob_model.get_sample(jax.random.PRNGKey(args.random_seed))
-    )
-    if sampler == 'svi':
-        best_params, extra = run_svi(prob_model, None, args, init_params)
-    elif sampler == 'optax':
-        best_params, extra = run_optax(prob_model, args, init_params)
-    elif sampler == 'hmc':
-        if not init_path:
-            raise ValueError('Joint multiband HMC requires init_params_path from a joint SVI/Optax run.')
-        mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params, init_path)
-        np.savez_compressed(os.path.join(save_path, 'hmc_samples.npz'), **{
-            key: np.asarray(value) for key, value in mcmc_samples.items()
-        })
-    else:
-        raise ValueError(f'Unsupported multiband sampler {sampler!r}.')
-
-    kwargs_by_band = prob_model.params2kwargs_by_band(best_params)
-    shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
-    with open(os.path.join(save_path, 'kwargs_lens_shared.json'), 'w') as handle:
-        json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
-    for band in bands:
-        kwargs_best = kwargs_by_band[band['name']]
-        band_samples = _band_hmc_samples(mcmc_samples, band) if mcmc_samples is not None else None
-        if band_samples is not None:
-            source_summary = evaluate_mcmc_source_pixels_summary(
-                band['prob_model'], band_samples, band['save_path'], save_npy=True,
+    base_save_path = save_path
+    n_runs = int(getattr(args, 'n_runs', 1))
+    if sampler == 'hmc':
+        n_runs = 1
+    base_random_seed = int(args.random_seed)
+    init_root = getattr(args, 'init_params_path', None)
+    comparison = {}
+    for run_index in range(n_runs):
+        run_path = base_save_path if n_runs == 1 else os.path.join(base_save_path, f'run_{run_index}')
+        run_seed = base_random_seed + run_index
+        os.makedirs(run_path, exist_ok=True)
+        args.save_path = run_path
+        args.random_seed = run_seed
+        shutil.copy(config_path, os.path.join(run_path, os.path.basename(config_path)))
+        with open(os.path.join(run_path, 'args.json'), 'w') as handle:
+            json.dump(vars(args), handle, indent=4, default=json_serializer)
+        run_init_path = init_root
+        for band in bands:
+            band['save_path'] = os.path.join(run_path, band['name'])
+            os.makedirs(band['save_path'], exist_ok=True)
+            plot_input_data(
+                band['image_data'], band['noise_map'], band['psf_data'], args.pixel_scale,
+                band['save_path'], band['type_list']['point_source_type_list'],
+                band['param_list']['point_source_params_list'],
+                getattr(band['lens_image'], 'source_arc_mask', None),
             )
-            if source_summary is not None and kwargs_best.get('kwargs_source'):
-                kwargs_best['kwargs_source'][0]['pixels'] = source_summary[0]
-        kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, band['save_path'], band['type_list'])
-        with open(os.path.join(band['save_path'], 'kwargs_result.json'), 'w') as handle:
-            json.dump(kwargs_json, handle, indent=4, default=json_serializer)
-        with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
-            json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
-        if band_samples is not None:
-            save_hmc_diagnostics(band_samples, int(args.num_chains_hmc_numpyro), band['save_path'], 'final', band['prob_model'])
-        best_fit_model = band['lens_image'].model(**kwargs_best)
-        chi2 = float(np.sum(((best_fit_model - band['image_data']) / band['noise_map']) ** 2))
-        n_params = sum(np.asarray(value).size for value in best_params.values())
-        reduced_chi2 = chi2 / max(int(band['image_data'].size) - n_params, 1)
-        generate_run_plots(
-            lens_image=band['lens_image'], kwargs_best=kwargs_best,
-            image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
-            pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
-            best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=reduced_chi2,
-            extra=extra, mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
-            init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
-            point_source_params_list=band['param_list']['point_source_params_list'],
-            regul_model=None, param_list=band['param_list'],
-            residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+
+        init_params = (
+            _load_joint_initialization(prob_model, bands, run_init_path, run_seed)
+            if run_init_path else prob_model.get_sample(jax.random.PRNGKey(run_seed))
         )
-    print(f'[multiband] Run complete. Outputs in {save_path}')
-    return save_path
+        mcmc_samples = None
+        if sampler == 'svi':
+            init_params = _run_pixelated_svi_warmup(
+                prob_model, bands, args, init_params, run_init_path,
+            )
+            best_params, extra = run_svi(prob_model, None, args, init_params)
+        elif sampler == 'optax':
+            best_params, extra = run_optax(prob_model, args, init_params)
+        elif sampler == 'hmc':
+            if not run_init_path:
+                raise ValueError('Joint multiband HMC requires init_params_path from a joint SVI/Optax run.')
+            mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params, run_init_path)
+            np.savez_compressed(os.path.join(run_path, 'hmc_samples.npz'), **{
+                key: np.asarray(value) for key, value in mcmc_samples.items()
+            })
+        else:
+            raise ValueError(f'Unsupported multiband sampler {sampler!r}.')
+
+        kwargs_by_band = prob_model.params2kwargs_by_band(best_params)
+        shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
+        with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
+            json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
+        comparison[f'run_{run_index}'] = {'seed': run_seed, 'bands': {}}
+        for band in bands:
+            kwargs_best = kwargs_by_band[band['name']]
+            band_samples = _band_hmc_samples(mcmc_samples, band) if mcmc_samples is not None else None
+            if band_samples is not None:
+                source_summary = evaluate_mcmc_source_pixels_summary(
+                    band['prob_model'], band_samples, band['save_path'], save_npy=True,
+                )
+                if source_summary is not None and kwargs_best.get('kwargs_source'):
+                    kwargs_best['kwargs_source'][0]['pixels'] = source_summary[0]
+            kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, band['save_path'], band['type_list'])
+            with open(os.path.join(band['save_path'], 'kwargs_result.json'), 'w') as handle:
+                json.dump(kwargs_json, handle, indent=4, default=json_serializer)
+            with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
+                json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
+            if band_samples is not None:
+                save_hmc_diagnostics(
+                    band_samples, int(args.num_chains_hmc_numpyro), band['save_path'],
+                    'final', band['prob_model'],
+                )
+            best_fit_model = band['lens_image'].model(**kwargs_best)
+            chi2 = float(np.sum(((best_fit_model - band['image_data']) / band['noise_map']) ** 2))
+            n_params = sum(np.asarray(value).size for value in best_params.values())
+            reduced_chi2 = chi2 / max(int(band['image_data'].size) - n_params, 1)
+            comparison[f'run_{run_index}']['bands'][band['name']] = {
+                'chi2': chi2,
+                'reduced_chi2': reduced_chi2,
+            }
+            generate_run_plots(
+                lens_image=band['lens_image'], kwargs_best=kwargs_best,
+                image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
+                pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
+                best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=reduced_chi2,
+                extra=extra, mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
+                init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
+                point_source_params_list=band['param_list']['point_source_params_list'],
+                regul_model=None, param_list=band['param_list'],
+                residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+            )
+        print(f'[multiband] Run {run_index} complete. Outputs in {run_path}')
+
+    if n_runs > 1:
+        with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
+            json.dump(comparison, handle, indent=4, default=json_serializer)
+    return base_save_path
 
 
 if __name__ == '__main__':

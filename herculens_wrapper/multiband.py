@@ -19,7 +19,14 @@ def band_site_prefix(index, band_name):
     return f'band_{index}_{label}'
 
 
-def create_multiband_prob_model(bands, lens_mass_params_list, lens_mass_type_list, args):
+def create_multiband_prob_model(
+    bands,
+    lens_mass_params_list,
+    lens_mass_type_list,
+    args,
+    fixed_lens_mass=None,
+    fixed_lens_light_by_band=None,
+):
     """Build a joint likelihood with shared mass and band-specific light models."""
     if not bands:
         raise ValueError('At least one band is required for a multiband model.')
@@ -38,6 +45,11 @@ def create_multiband_prob_model(bands, lens_mass_params_list, lens_mass_type_lis
             args=args,
             fix_lens_mass=True,
             kwargs_lens_fixed=lambda holder=holder: holder['kwargs_lens'],
+            fix_lens_light=fixed_lens_light_by_band is not None,
+            kwargs_lens_light_fixed=(
+                fixed_lens_light_by_band[band['name']]
+                if fixed_lens_light_by_band is not None else None
+            ),
         ))
 
     def mass_kwargs_from_params(params, sample=False):
@@ -59,14 +71,22 @@ def create_multiband_prob_model(bands, lens_mass_params_list, lens_mass_type_lis
 
     class MultiBandProbModel(NumpyroModel):
         def model(self):
-            kwargs_lens = mass_kwargs_from_params({}, sample=True)
+            kwargs_lens = (
+                fixed_lens_mass
+                if fixed_lens_mass is not None
+                else mass_kwargs_from_params({}, sample=True)
+            )
             for holder in holders:
                 holder['kwargs_lens'] = kwargs_lens
             for band, band_model in zip(bands, band_models):
                 numpyro.handlers.scope(band_model.model, prefix=band['site_prefix'])()
 
         def params2kwargs_by_band(self, params):
-            kwargs_lens = mass_kwargs_from_params(params, sample=False)
+            kwargs_lens = (
+                fixed_lens_mass
+                if fixed_lens_mass is not None
+                else mass_kwargs_from_params(params, sample=False)
+            )
             results = {}
             for band, holder, band_model in zip(bands, holders, band_models):
                 holder['kwargs_lens'] = kwargs_lens
@@ -81,7 +101,11 @@ def create_multiband_prob_model(bands, lens_mass_params_list, lens_mass_type_lis
 
         def params2kwargs(self, params):
             return {
-                'kwargs_lens': mass_kwargs_from_params(params, sample=False),
+                'kwargs_lens': (
+                    fixed_lens_mass
+                    if fixed_lens_mass is not None
+                    else mass_kwargs_from_params(params, sample=False)
+                ),
                 'kwargs_by_band': self.params2kwargs_by_band(params),
             }
 

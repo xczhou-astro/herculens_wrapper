@@ -478,7 +478,10 @@ def build_and_run(config_path=None):
     n_runs = int(getattr(args, 'n_runs', 1))
     sampler = args.sampler
 
-    if sampler != 'svi' and not getattr(args, 'pipeline', False):
+    # HMC explores one posterior with ``num_chains_hmc_numpyro`` chains. It is
+    # initialized from one selected pixelated-SVI run, rather than repeating
+    # the whole HMC fit for every SVI candidate.
+    if sampler in MCMC_SAMPLERS and not getattr(args, 'pipeline', False):
         n_runs = 1
 
     def run_one_iteration(
@@ -502,6 +505,19 @@ def build_and_run(config_path=None):
             run_args.sampler = sampler_override
         if init_params_path_override is not None:
             run_args.init_params_path = init_params_path_override
+
+        run_kwargs_lens_fixed = (
+            resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
+            if fix_lens_mass else None
+        )
+        run_kwargs_lens_light_fixed = (
+            resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
+            if fix_lens_light else None
+        )
+        run_kwargs_source_light_fixed = (
+            resolve_fixed_kwargs(run_args.init_params_path, 'source_light')
+            if fix_source_light else None
+        )
 
         # Redirect logging for this individual run
         run_log_path = os.path.join(run_save_path, 'log.txt')
@@ -532,11 +548,11 @@ def build_and_run(config_path=None):
                 param_list, type_list, lens_image, image_data, noise_map,
                 regul_model=None,
                 fix_lens_light=fix_lens_light,
-                kwargs_lens_light_fixed=kwargs_lens_light_fixed,
+                kwargs_lens_light_fixed=run_kwargs_lens_light_fixed,
                 fix_lens_mass=fix_lens_mass,
-                kwargs_lens_fixed=kwargs_lens_fixed,
+                kwargs_lens_fixed=run_kwargs_lens_fixed,
                 fix_source_light=fix_source_light,
-                kwargs_source_light_fixed=kwargs_source_light_fixed,
+                kwargs_source_light_fixed=run_kwargs_source_light_fixed,
                 init_params_path=run_args.init_params_path,
                 args=run_args,
             )
@@ -590,7 +606,7 @@ def build_and_run(config_path=None):
             if init_method is None:
                 if bool(getattr(run_args, 'run_power_init', False)):
                     init_method = 'power_init'
-                elif int(getattr(run_args, 'max_iterations_svi_warmup', 0)) > 0 and run_args.sampler == 'svi':
+                elif int(getattr(run_args, 'num_iterations_warmup', 0)) > 0 and run_args.sampler == 'svi':
                     init_method = 'svi_warmup'
                 else:
                     init_method = 'none'
@@ -598,7 +614,7 @@ def build_and_run(config_path=None):
             if source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
                 if init_method == 'power_init':
                     try:
-                        max_power_it = int(getattr(run_args, 'max_iterations_power_init', 2000))
+                        max_power_it = int(getattr(run_args, 'num_iterations_warmup', 2000))
                         print(f"\n[pixelated-init: power_init] Fitting Matérn power spectrum parameters ({max_power_it} iters) from parametric source...")
                         ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
                         k_grid = PowerSpectrum.K_grid((ny, nx))
@@ -619,7 +635,7 @@ def build_and_run(config_path=None):
                         print(f"[pixelated-init: power_init] Warning: power_init failed: {e}")
 
                 elif init_method == 'svi_warmup' and run_args.sampler == 'svi':
-                    max_warmup_it = int(getattr(run_args, 'max_iterations_svi_warmup', 0))
+                    max_warmup_it = int(getattr(run_args, 'num_iterations_warmup', 0))
                     if max_warmup_it > 0:
                         try:
                             print(f"\n[svi-warmup] Starting {max_warmup_it} iteration warmup for pixelated source parameters...")
@@ -1032,7 +1048,11 @@ def build_and_run(config_path=None):
         for n in range(n_runs):
             run_save_path = os.path.join(save_path, f'run_{n}')
             run_seed = args.random_seed + n
-            metrics_data = run_one_iteration(n, run_save_path, run_seed)
+            metrics_data = run_one_iteration(
+                n, run_save_path, run_seed,
+                init_params_path_override=args.init_params_path,
+                append_log=args.sampler in MCMC_SAMPLERS and os.path.isdir(run_save_path),
+            )
             if metrics_data is not None:
                 comparison_results[f"run_{n}"] = {
                     "seed": run_seed,
