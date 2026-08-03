@@ -284,6 +284,8 @@ def build_and_run_multiband(config_path=None):
         plot_input_data,
         plot_corner_traced_params,
         plot_multiband_composite,
+        plot_multiband_source_reconstructions,
+        plot_loss_curve,
     )
 
     lens_mass_config = getattr(config_module, 'lens_mass_config', empty_config)
@@ -471,14 +473,50 @@ def build_and_run_multiband(config_path=None):
         )
         try:
             initial_kwargs_by_band = prob_model.params2kwargs_by_band(init_params)
+            initial_kwargs_json_by_band = {}
+            initial_band_results = []
             for band in bands:
+                initial_kwargs_json = kwargs_best_to_json_pixelated_npy(
+                    initial_kwargs_by_band[band['name']],
+                    band['save_path'],
+                    band['type_list'],
+                    pixels_filename='kwargs_source_pixels_init.npy',
+                    pixels_wn_filename='kwargs_source_pixels_wn_init.npy',
+                )
+                initial_kwargs_json_by_band[band['name']] = _rebase_pixel_array_references(
+                    initial_kwargs_json, band['name'],
+                )
                 initial_model = band['lens_image'].model(**initial_kwargs_by_band[band['name']])
                 initial_chi2 = float(np.sum(
                     ((initial_model - band['image_data']) / band['noise_map']) ** 2
                 ))
                 print(f"Initial {band['name']} chi^2: {initial_chi2:.2f}")
+                initial_band_results.append({
+                    'name': band['name'],
+                    'lens_image': band['lens_image'],
+                    'kwargs_result': initial_kwargs_by_band[band['name']],
+                    'image_data': band['image_data'],
+                    'noise_map': band['noise_map'],
+                    'pixel_scale': args.pixel_scale,
+                })
+            with open(os.path.join(run_path, 'kwargs_init.json'), 'w') as handle:
+                json.dump({
+                    'kwargs_lens': initial_kwargs_by_band[band_names[0]]['kwargs_lens'],
+                    'kwargs_by_band': initial_kwargs_json_by_band,
+                }, handle, indent=4, default=json_serializer)
+            plot_multiband_composite(
+                initial_band_results,
+                run_path,
+                residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                output_filename='initial_guess_model.png',
+            )
+            plot_multiband_source_reconstructions(
+                initial_band_results,
+                run_path,
+                output_filename='initial_source_model.png',
+            )
         except Exception as error:
-            print(f'[init] Per-band initial chi^2 skipped: {error}')
+            print(f'[init] Initial multi-band diagnostics skipped: {error}')
         mcmc_samples = None
         if sampler == 'svi':
             init_params = _run_pixelated_svi_warmup(
@@ -490,6 +528,10 @@ def build_and_run_multiband(config_path=None):
                     json.dump(
                         {'loss_history': np.asarray(extra['loss_history']).tolist()}, handle, indent=4,
                     )
+                try:
+                    plot_loss_curve(np.asarray(extra['loss_history']), run_path)
+                except Exception as error:
+                    print(f'[plots] loss_curve.png skipped: {error}')
             if 'result' in extra:
                 with open(os.path.join(run_path, 'svi_guide_params.pkl'), 'wb') as handle:
                     pickle.dump(extra['result'].params, handle)
@@ -630,10 +672,7 @@ def build_and_run_multiband(config_path=None):
                 image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
                 pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
                 best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=reduced_chi2,
-                extra=(
-                    {'loss_history': extra['loss_history']}
-                    if sampler == 'svi' and 'loss_history' in extra else None
-                ),
+                extra=None,
                 mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
                 init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
                 point_source_params_list=band['param_list']['point_source_params_list'],

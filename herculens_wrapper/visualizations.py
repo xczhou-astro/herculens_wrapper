@@ -704,7 +704,12 @@ def plot_composite_2x3_panel(
     plt.close()
 
 
-def plot_multiband_composite(band_results, save_path, residual_vis_max=0.0):
+def plot_multiband_composite(
+    band_results,
+    save_path,
+    residual_vis_max=0.0,
+    output_filename='multiband_composite.png',
+):
     """Save one six-panel diagnostic row for every band in a joint fit."""
     if not band_results:
         return
@@ -824,7 +829,53 @@ def plot_multiband_composite(band_results, save_path, residual_vis_max=0.0):
         axes[row, 0].set_ylabel(f"{band['name']}\narcsec")
 
     figure.tight_layout()
-    output_path = os.path.join(save_path, 'multiband_composite.png')
+    output_path = os.path.join(save_path, output_filename)
+    figure.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close(figure)
+    print(f'[plots] {output_path}')
+
+
+def plot_multiband_source_reconstructions(band_results, save_path, output_filename):
+    """Plot one initial or final pixelated source reconstruction per band."""
+    def has_pixels(band):
+        source = band['kwargs_result'].get('kwargs_source', [])
+        return bool(source) and isinstance(source[0], dict) and source[0].get('pixels') is not None
+
+    pixelated_bands = [band for band in band_results if has_pixels(band)]
+    if not pixelated_bands:
+        return
+
+    figure, axes = plt.subplots(len(pixelated_bands), 1, figsize=(6, 5 * len(pixelated_bands)), squeeze=False)
+    for row, band in enumerate(pixelated_bands):
+        lens_image = band['lens_image']
+        kwargs_result = band['kwargs_result']
+        source_pixels = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
+        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+            _, _, extent = lens_image.get_source_coordinates(
+                kwargs_result.get('kwargs_lens'), npix_src=source_pixels.shape[0],
+                source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
+            )
+            extent = list(np.asarray(extent))
+        else:
+            extent = list(lens_image.SourceModel.pixel_grid.extent)
+
+        axis = axes[row, 0]
+        image = axis.imshow(source_pixels, origin='lower', extent=extent, cmap='twilight')
+        try:
+            _, caustics = model_util.critical_lines_caustics(
+                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+            )
+            for caustic_x, caustic_y in caustics:
+                axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
+        except Exception:
+            pass
+        axis.set_title(f"{band['name']} Initial Source Reconstruction")
+        axis.set_xlabel('arcsec')
+        axis.set_ylabel('arcsec')
+        figure.colorbar(image, ax=axis, label='Pixel flux')
+
+    figure.tight_layout()
+    output_path = os.path.join(save_path, output_filename)
     figure.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close(figure)
     print(f'[plots] {output_path}')
