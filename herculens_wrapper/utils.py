@@ -33,6 +33,10 @@ class Tee:
         for f in self.files:
             f.flush()
 
+    def close(self):
+        """Provide the file-like close API without closing shared stdio streams."""
+        self.flush()
+
 
 
 def json_serializer(obj):
