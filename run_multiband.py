@@ -282,6 +282,7 @@ def build_and_run_multiband(config_path=None):
     from herculens_wrapper.visualizations import (
         generate_run_plots,
         plot_input_data,
+        plot_corner_traced_params,
         plot_multiband_composite,
     )
 
@@ -555,6 +556,16 @@ def build_and_run_multiband(config_path=None):
                     }
             except Exception as error:
                 print(f'[{sampler}] Failed to derive per-band kwargs_sigma.json: {error}')
+        if posterior_samples is not None:
+            try:
+                plot_corner_traced_params(
+                    posterior_samples,
+                    run_path,
+                    filename='corner_multiband.png',
+                    param_list=None,
+                )
+            except Exception as error:
+                print(f'[plots] corner_multiband.png skipped: {error}')
         shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
         with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
             json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
@@ -630,6 +641,16 @@ def build_and_run_multiband(config_path=None):
                 residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
                 mcmc_component_medians=component_medians,
             )
+            if sampler == 'svi' and posterior_samples is not None:
+                try:
+                    plot_corner_traced_params(
+                        _band_hmc_samples(posterior_samples, band),
+                        band['save_path'],
+                        filename='corner_svi.png',
+                        param_list=band['param_list'],
+                    )
+                except Exception as error:
+                    print(f"[plots] {band['name']} corner_svi.png skipped: {error}")
             combined_band_results.append({
                 'name': band['name'],
                 'lens_image': band['lens_image'],
