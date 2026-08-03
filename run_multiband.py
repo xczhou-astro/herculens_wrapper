@@ -269,7 +269,7 @@ def build_and_run_multiband(config_path=None):
     print(f'Starting multi-band run in: {save_path} (sampler={args.sampler!r})')
     log_jax_device_layout(args)
 
-    from herculens_wrapper.models import create_lens_image
+    from herculens_wrapper.models import create_lens_image, validate_param_list
     from herculens_wrapper.multiband import band_site_prefix, create_multiband_prob_model
     from herculens_wrapper.samplers import (
         evaluate_mcmc_component_medians,
@@ -362,6 +362,7 @@ def build_and_run_multiband(config_path=None):
             'source_light_params_list': source_params,
             'point_source_params_list': point_params,
         }
+        validate_param_list(type_list, param_list)
         print(f'[{band_name}] Data shape: {image_data.shape}; active source-mask pixels: {int(source_arc_mask.sum())}')
         print(f'[{band_name}] Lens mass type list: {mass_types}')
         print(f'[{band_name}] Lens light type list: {lens_light_types}')
@@ -464,6 +465,12 @@ def build_and_run_multiband(config_path=None):
                     'supersampling_factor': args.supersampling_factor,
                 },
             }, handle, indent=4, default=json_serializer)
+        mcmc_samples = None
+        if sampler == 'svi':
+            init_params = _run_pixelated_svi_warmup(
+                prob_model, bands, args, init_params, run_init_path,
+            )
+
         init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))
         init_log_likelihood = _joint_log_likelihood(prob_model, init_params)
         print(f'Number of sampled parameters: {num_params}')
@@ -517,11 +524,7 @@ def build_and_run_multiband(config_path=None):
             )
         except Exception as error:
             print(f'[init] Initial multi-band diagnostics skipped: {error}')
-        mcmc_samples = None
         if sampler == 'svi':
-            init_params = _run_pixelated_svi_warmup(
-                prob_model, bands, args, init_params, run_init_path,
-            )
             best_params, extra = run_svi(prob_model, None, args, init_params)
             if 'loss_history' in extra:
                 with open(os.path.join(run_path, 'svi_loss_history.json'), 'w') as handle:
@@ -660,18 +663,16 @@ def build_and_run_multiband(config_path=None):
             best_fit_model = band['lens_image'].model(**kwargs_best)
             metrics_model = component_medians.get('total') if component_medians else best_fit_model
             chi2 = float(np.sum(((metrics_model - band['image_data']) / band['noise_map']) ** 2))
-            reduced_chi2 = chi2 / max(int(band['image_data'].size) - num_params, 1)
             total_chi2 += chi2
             total_data_pixels += int(band['image_data'].size)
             comparison[f'run_{run_index}']['bands'][band['name']] = {
                 'chi2': chi2,
-                'reduced_chi2': reduced_chi2,
             }
             generate_run_plots(
                 lens_image=band['lens_image'], kwargs_best=kwargs_best,
                 image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
                 pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
-                best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=reduced_chi2,
+                best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=None,
                 extra=None,
                 mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
                 init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
@@ -718,16 +719,26 @@ def build_and_run_multiband(config_path=None):
                 'kwargs_lens': shared_lens,
                 'kwargs_by_band': combined_kwargs_by_band,
             }, handle, indent=4, default=json_serializer)
-        dof = max(total_data_pixels - num_params, 1)
+        num_params_free = num_params
+        for band in bands:
+            if band['type_list'].get('source_light_type_list') != ['PIXELATED']:
+                continue
+            ny, nx = band['lens_image'].SourceModel.pixel_grid.num_pixel_axes
+            if getattr(band['prob_model'], 'prior_type', 'matern') == 'wavelet_sparsity':
+                num_params_free -= int(getattr(band['prob_model'], 'nscales', 1)) * ny * nx
+            else:
+                num_params_free -= ny * nx
+        num_params_free = max(int(num_params_free), 0)
+        dof = max(total_data_pixels - num_params_free, 1)
         metrics = {
-            'BIC': float(num_params * np.log(total_data_pixels) - 2 * total_log_likelihood),
+            'BIC': float(num_params_free * np.log(total_data_pixels) - 2 * total_log_likelihood),
             'CHI2': float(total_chi2),
             'CHI2_NPIX2': float(total_chi2 / total_data_pixels),
             'REDUCED_CHI2': float(total_chi2 / dof),
             'CHI2_DOF': int(dof),
             'N_DATA_PIXELS': int(total_data_pixels),
             'N_PARAMS_FITTED': int(num_params),
-            'N_PARAMS_FREE': int(num_params),
+            'N_PARAMS_FREE': num_params_free,
             'LOG_LIKELIHOOD': total_log_likelihood,
         }
         with open(os.path.join(run_path, 'metrics.json'), 'w') as handle:
