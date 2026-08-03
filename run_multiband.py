@@ -220,13 +220,18 @@ def build_and_run_multiband(config_path=None):
     from herculens_wrapper.models import create_lens_image
     from herculens_wrapper.multiband import band_site_prefix, create_multiband_prob_model
     from herculens_wrapper.samplers import (
+        evaluate_mcmc_component_medians,
         evaluate_mcmc_source_pixels_summary,
         run_hmc,
         run_optax,
         run_svi,
         save_hmc_diagnostics,
     )
-    from herculens_wrapper.visualizations import generate_run_plots, plot_input_data
+    from herculens_wrapper.visualizations import (
+        generate_run_plots,
+        plot_input_data,
+        plot_multiband_composite,
+    )
 
     lens_mass_config = getattr(config_module, 'lens_mass_config', empty_config)
     lens_light_config = getattr(config_module, 'lens_light_config', empty_config)
@@ -349,15 +354,23 @@ def build_and_run_multiband(config_path=None):
         with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
             json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
         comparison[f'run_{run_index}'] = {'seed': run_seed, 'bands': {}}
+        combined_band_results = []
         for band in bands:
             kwargs_best = kwargs_by_band[band['name']]
             band_samples = _band_hmc_samples(mcmc_samples, band) if mcmc_samples is not None else None
+            component_medians = None
             if band_samples is not None:
                 source_summary = evaluate_mcmc_source_pixels_summary(
                     band['prob_model'], band_samples, band['save_path'], save_npy=True,
                 )
                 if source_summary is not None and kwargs_best.get('kwargs_source'):
                     kwargs_best['kwargs_source'][0]['pixels'] = source_summary[0]
+                try:
+                    component_medians = evaluate_mcmc_component_medians(
+                        band['prob_model'], band_samples,
+                    )
+                except Exception as error:
+                    print(f"[plots] HMC component medians for {band['name']} skipped: {error}")
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, band['save_path'], band['type_list'])
             with open(os.path.join(band['save_path'], 'kwargs_result.json'), 'w') as handle:
                 json.dump(kwargs_json, handle, indent=4, default=json_serializer)
@@ -386,7 +399,31 @@ def build_and_run_multiband(config_path=None):
                 point_source_params_list=band['param_list']['point_source_params_list'],
                 regul_model=None, param_list=band['param_list'],
                 residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                mcmc_component_medians=component_medians,
             )
+            combined_band_results.append({
+                'name': band['name'],
+                'lens_image': band['lens_image'],
+                'kwargs_result': kwargs_best,
+                'image_data': band['image_data'],
+                'noise_map': band['noise_map'],
+                'pixel_scale': args.pixel_scale,
+                'model_lens_light': (
+                    component_medians.get('lens_light') if component_medians else None
+                ),
+                'model_lensed_source': (
+                    component_medians.get('source') if component_medians else None
+                ),
+                'model_total': component_medians.get('total') if component_medians else None,
+            })
+        try:
+            plot_multiband_composite(
+                combined_band_results,
+                run_path,
+                residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+            )
+        except Exception as error:
+            print(f'[plots] multiband_composite.png skipped: {error}')
         print(f'[multiband] Run {run_index} complete. Outputs in {run_path}')
 
     if n_runs > 1:

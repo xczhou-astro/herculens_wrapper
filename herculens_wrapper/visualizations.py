@@ -704,6 +704,132 @@ def plot_composite_2x3_panel(
     plt.close()
 
 
+def plot_multiband_composite(band_results, save_path, residual_vis_max=0.0):
+    """Save one six-panel diagnostic row for every band in a joint fit."""
+    if not band_results:
+        return
+
+    panel_titles = (
+        'Data', 'Model', 'Residual', 'Data - Lens Light',
+        'Lensed Source', 'Source Reconstruction',
+    )
+    figure, axes = plt.subplots(
+        len(band_results), len(panel_titles), figsize=(30, 5 * len(band_results)),
+        squeeze=False,
+    )
+
+    for row, band in enumerate(band_results):
+        lens_image = band['lens_image']
+        kwargs_result = band['kwargs_result']
+        image_data = np.asarray(band['image_data'])
+        noise_map = np.asarray(band['noise_map'])
+        pixel_scale = float(band['pixel_scale'])
+        extent_img = _image_extent(*image_data.shape, pixel_scale)
+        image_mask = getattr(lens_image, 'source_arc_mask', None)
+        if image_mask is not None:
+            image_mask = np.asarray(image_mask)
+
+        model_lens_light = band.get('model_lens_light')
+        if model_lens_light is None:
+            if kwargs_result.get('kwargs_lens_light'):
+                model_lens_light = lens_image.model(
+                    **kwargs_result, lens_light_add=True, source_add=False, point_source_add=False,
+                )
+            else:
+                model_lens_light = np.zeros_like(image_data)
+        model_lens_light = np.asarray(model_lens_light)
+
+        model_lensed_source = band.get('model_lensed_source')
+        if model_lensed_source is None:
+            model_lensed_source = lens_image.model(
+                **kwargs_result, lens_light_add=False, source_add=True, point_source_add=False,
+            )
+        model_lensed_source = np.asarray(model_lensed_source)
+
+        model_total = band.get('model_total')
+        if model_total is None:
+            model_total = lens_image.model(
+                **kwargs_result, lens_light_add=True, source_add=True, point_source_add=True,
+            )
+        model_total = np.asarray(model_total)
+        residual = (model_total - image_data) / noise_map
+        data_minus_lens = image_data - model_lens_light
+
+        source = kwargs_result.get('kwargs_source', [{}])[0]
+        source_pixels = source.get('pixels')
+        if source_pixels is not None and getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+            source_pixels = np.asarray(source_pixels)
+            _, _, extent_src = lens_image.get_source_coordinates(
+                kwargs_result.get('kwargs_lens'), npix_src=source_pixels.shape[0],
+                source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
+            )
+            extent_src = list(np.asarray(extent_src))
+        elif source_pixels is not None:
+            source_pixels = np.asarray(source_pixels)
+            extent_src = list(lens_image.SourceModel.pixel_grid.extent)
+        else:
+            extent_src = _image_extent(*image_data.shape, pixel_scale)
+            x_src = np.linspace(extent_src[0], extent_src[1], image_data.shape[1])
+            y_src = np.linspace(extent_src[2], extent_src[3], image_data.shape[0])
+            xx_src, yy_src = np.meshgrid(x_src, y_src)
+            source_pixels = np.asarray(
+                lens_image.SourceModel.surface_brightness(
+                    xx_src, yy_src, kwargs_result.get('kwargs_source', []),
+                )
+            ) * float(getattr(lens_image.Grid, 'pixel_area', pixel_scale**2))
+
+        image_panels = (image_data, model_total, residual, data_minus_lens, model_lensed_source)
+        for column, values in enumerate(image_panels):
+            axis = axes[row, column]
+            if column < 2:
+                norm, _ = _norm_from_plot_scale('log', values)
+                image = axis.imshow(values, origin='lower', extent=extent_img, cmap='twilight', norm=norm)
+            elif column == 2:
+                finite = values[np.isfinite(values)]
+                vmax = float(residual_vis_max) if residual_vis_max > 0 else (
+                    float(np.max(np.abs(finite))) if finite.size else 1.0
+                )
+                image = axis.imshow(
+                    values, origin='lower', extent=extent_img, cmap='bwr', vmin=-vmax, vmax=vmax,
+                )
+                figure.colorbar(image, ax=axis, fraction=0.046, pad=0.04, label='(model - data) / noise')
+            else:
+                image = axis.imshow(values, origin='lower', extent=extent_img, cmap='twilight')
+            if image_mask is not None:
+                axis.contour(image_mask, levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+
+        source_axis = axes[row, 5]
+        source_axis.imshow(source_pixels, origin='lower', extent=extent_src, cmap='twilight')
+        try:
+            _, caustics = model_util.critical_lines_caustics(
+                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+            )
+            for caustic_x, caustic_y in caustics:
+                source_axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
+        except Exception:
+            pass
+        support_bounds = getattr(lens_image, 'source_support_bounds', None)
+        if support_bounds is not None:
+            xmin, xmax, ymin, ymax = [float(value) for value in support_bounds]
+            source_axis.plot(
+                [xmin, xmax, xmax, xmin, xmin], [ymin, ymin, ymax, ymax, ymin],
+                color='cyan', lw=1.2, ls='--', alpha=0.9,
+            )
+
+        for column, axis in enumerate(axes[row]):
+            if row == 0:
+                axis.set_title(panel_titles[column])
+            axis.set_xlabel('arcsec')
+            axis.set_ylabel('arcsec')
+        axes[row, 0].set_ylabel(f"{band['name']}\narcsec")
+
+    figure.tight_layout()
+    output_path = os.path.join(save_path, 'multiband_composite.png')
+    figure.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close(figure)
+    print(f'[plots] {output_path}')
+
+
 def plot_lens_light_subtracted_image(
     lens_image, kwargs_result, pixel_scale, image_data, noise_map=None, save_path=None,
     plot_scale='linear', residual_vis_max=0.0,
