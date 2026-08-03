@@ -519,6 +519,42 @@ def build_and_run_multiband(config_path=None):
                 print(f'[svi] Failed to draw guide samples for kwargs_sigma.json: {error}')
 
         kwargs_by_band = prob_model.params2kwargs_by_band(best_params)
+        kwargs_sigma_by_band = None
+        if posterior_samples is not None:
+            try:
+                if sampler == 'svi':
+                    joint_sigma_params = {
+                        key: np.std(np.asarray(value), axis=0)
+                        for key, value in posterior_samples.items()
+                    }
+                    kwargs_sigma_by_band = prob_model.params2kwargs_by_band(joint_sigma_params)
+                else:
+                    joint_p16 = {
+                        key: np.percentile(np.asarray(value), 16, axis=0)
+                        for key, value in posterior_samples.items()
+                    }
+                    joint_p50 = {
+                        key: np.percentile(np.asarray(value), 50, axis=0)
+                        for key, value in posterior_samples.items()
+                    }
+                    joint_p84 = {
+                        key: np.percentile(np.asarray(value), 84, axis=0)
+                        for key, value in posterior_samples.items()
+                    }
+                    lower_by_band = prob_model.params2kwargs_by_band({
+                        key: joint_p50[key] - joint_p16[key] for key in joint_p50
+                    })
+                    upper_by_band = prob_model.params2kwargs_by_band({
+                        key: joint_p84[key] - joint_p50[key] for key in joint_p50
+                    })
+                    kwargs_sigma_by_band = {
+                        band_name: _zip_asymmetric_uncertainties(
+                            lower_by_band[band_name], upper_by_band[band_name],
+                        )
+                        for band_name in band_names
+                    }
+            except Exception as error:
+                print(f'[{sampler}] Failed to derive per-band kwargs_sigma.json: {error}')
         shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
         with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
             json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
@@ -552,37 +588,11 @@ def build_and_run_multiband(config_path=None):
             )
             with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
                 json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
-            if posterior_samples is not None:
+            if kwargs_sigma_by_band is not None:
                 try:
-                    posterior_band_samples = _band_hmc_samples(posterior_samples, band)
-                    if sampler == 'svi':
-                        sigma_params = {
-                            key: np.std(np.asarray(value), axis=0)
-                            for key, value in posterior_band_samples.items()
-                        }
-                        kwargs_sigma = band['prob_model'].params2kwargs(sigma_params)
-                    else:
-                        p16 = {
-                            key: np.percentile(np.asarray(value), 16, axis=0)
-                            for key, value in posterior_band_samples.items()
-                        }
-                        p50 = {
-                            key: np.percentile(np.asarray(value), 50, axis=0)
-                            for key, value in posterior_band_samples.items()
-                        }
-                        p84 = {
-                            key: np.percentile(np.asarray(value), 84, axis=0)
-                            for key, value in posterior_band_samples.items()
-                        }
-                        kwargs_lower = band['prob_model'].params2kwargs({
-                            key: p50[key] - p16[key] for key in p50
-                        })
-                        kwargs_upper = band['prob_model'].params2kwargs({
-                            key: p84[key] - p50[key] for key in p50
-                        })
-                        kwargs_sigma = _zip_asymmetric_uncertainties(kwargs_lower, kwargs_upper)
                     kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(
-                        kwargs_sigma, band['save_path'], band['type_list'], save_pixel_arrays=False,
+                        kwargs_sigma_by_band[band['name']], band['save_path'], band['type_list'],
+                        save_pixel_arrays=False,
                     )
                     with open(os.path.join(band['save_path'], 'kwargs_sigma.json'), 'w') as handle:
                         json.dump(kwargs_sigma_json, handle, indent=4, default=json_serializer)
@@ -609,7 +619,11 @@ def build_and_run_multiband(config_path=None):
                 image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
                 pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
                 best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=reduced_chi2,
-                extra=extra, mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
+                extra=(
+                    {'loss_history': extra['loss_history']}
+                    if sampler == 'svi' and 'loss_history' in extra else None
+                ),
+                mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
                 init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
                 point_source_params_list=band['param_list']['point_source_params_list'],
                 regul_model=None, param_list=band['param_list'],
