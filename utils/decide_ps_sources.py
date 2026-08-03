@@ -232,7 +232,7 @@ def plot_catalog_image_panel(
     ax.imshow(
         image_data,
         origin="lower",
-        cmap="magma",
+        cmap="twilight",
         vmin=vmin,
         vmax=vmax,
         interpolation="nearest",
@@ -682,7 +682,7 @@ if __name__ == "__main__":
         ax.imshow(
             image_data,
             origin="lower",
-            cmap="magma",
+            cmap="twilight",
             vmin=vmin,
             vmax=vmax,
             interpolation="nearest",

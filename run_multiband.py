@@ -261,6 +261,18 @@ def build_and_run_multiband(config_path=None):
         raise ValueError('band_names must contain at least two bands.')
     save_path = resolve_project_path(args.save_path, config_dir=os.path.dirname(config_path))
     os.makedirs(save_path, exist_ok=True)
+    configured_n_runs = int(getattr(args, 'n_runs', 1))
+    composite_log_file = None
+    composite_log_stdout = None
+    composite_log_stderr = None
+    if args.sampler == 'svi' and configured_n_runs > 1:
+        composite_log_file = open(os.path.join(save_path, 'log.txt'), 'w')
+        composite_log_stdout = sys.stdout
+        composite_log_stderr = sys.stderr
+        composite_log_file.write(f"Start at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        composite_log_file.flush()
+        sys.stdout = Tee(sys.stdout, composite_log_file)
+        sys.stderr = Tee(sys.stderr, composite_log_file)
     shutil.copy(config_path, os.path.join(save_path, os.path.basename(config_path)))
     with open(os.path.join(save_path, 'args.json'), 'w') as handle:
         json.dump(vars(args), handle, indent=4, default=json_serializer)
@@ -767,9 +779,16 @@ def build_and_run_multiband(config_path=None):
         run_log_file.close()
         sys.stdout = original_stdout
         sys.stderr = original_stderr
+        print(f'[multiband] Run {run_index} logged complete at {end_timestamp}')
 
     with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
         json.dump(comparison, handle, indent=4, default=json_serializer)
+    if composite_log_file is not None:
+        composite_end = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        composite_log_file.write(f'End at {composite_end}\n')
+        composite_log_file.close()
+        sys.stdout = composite_log_stdout
+        sys.stderr = composite_log_stderr
     return base_save_path
 
 

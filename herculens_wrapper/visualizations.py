@@ -758,6 +758,7 @@ def plot_multiband_composite(
             )
         model_total = np.asarray(model_total)
         residual = (model_total - image_data) / noise_map
+        chi2 = float(np.sum(residual ** 2))
         data_minus_lens = image_data - model_lens_light
 
         source = kwargs_result.get('kwargs_source', [{}])[0]
@@ -822,7 +823,9 @@ def plot_multiband_composite(
             )
 
         for column, axis in enumerate(axes[row]):
-            if row == 0:
+            if column == 2:
+                axis.set_title(f'Residual (chi^2 = {chi2:.2f})')
+            elif row == 0:
                 axis.set_title(panel_titles[column])
             axis.set_xlabel('arcsec')
             axis.set_ylabel('arcsec')
