@@ -3,8 +3,11 @@
 import importlib.util
 import json
 import os
+import pickle
 import shutil
+import shlex
 import sys
+import copy
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -22,6 +25,7 @@ from herculens_wrapper.utils import (
     get_fits_data,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
+    log_jax_device_layout,
     normalize_run_args_paths,
     resolve_project_path,
     run_arguments_namespace,
@@ -201,6 +205,40 @@ def _band_hmc_samples(samples, band):
     return result
 
 
+def _zip_asymmetric_uncertainties(lower, upper):
+    """Represent HMC 16th/84th-percentile offsets in the usual JSON format."""
+    if isinstance(lower, dict) and isinstance(upper, dict):
+        return {
+            key: _zip_asymmetric_uncertainties(lower[key], upper[key])
+            for key in lower
+        }
+    if isinstance(lower, list) and isinstance(upper, list):
+        return [
+            _zip_asymmetric_uncertainties(left, right)
+            for left, right in zip(lower, upper)
+        ]
+    lower_array = np.asarray(lower)
+    upper_array = np.asarray(upper)
+    if lower_array.ndim == 0:
+        return [float(lower_array), float(upper_array)]
+    return np.stack([lower_array, upper_array], axis=0)
+
+
+def _rebase_pixel_array_references(payload, band_name):
+    """Make pixel-array stubs in a joint result relative to its run directory."""
+    if isinstance(payload, dict):
+        result = {
+            key: _rebase_pixel_array_references(value, band_name)
+            for key, value in payload.items()
+        }
+        if result.get('_format') == 'pixelated_pixels_npy' and result.get('file'):
+            result['file'] = os.path.join(band_name, result['file'])
+        return result
+    if isinstance(payload, list):
+        return [_rebase_pixel_array_references(value, band_name) for value in payload]
+    return copy.deepcopy(payload)
+
+
 def build_and_run_multiband(config_path=None):
     if config_path is None:
         config_path = _resolve_single_config_spec(sys.argv[1] if len(sys.argv) > 1 else 'config.py')
@@ -218,6 +256,10 @@ def build_and_run_multiband(config_path=None):
     shutil.copy(config_path, os.path.join(save_path, os.path.basename(config_path)))
     with open(os.path.join(save_path, 'args.json'), 'w') as handle:
         json.dump(vars(args), handle, indent=4, default=json_serializer)
+
+    print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
+    print(f'Starting multi-band run in: {save_path} (sampler={args.sampler!r})')
+    log_jax_device_layout(args)
 
     from herculens_wrapper.models import create_lens_image
     from herculens_wrapper.multiband import band_site_prefix, create_multiband_prob_model
@@ -256,6 +298,36 @@ def build_and_run_multiband(config_path=None):
         if image_data.shape != noise_map.shape or image_data.shape != source_arc_mask.shape:
             raise ValueError(f'Data, noise, and mask shapes must agree for {band_name!r}.')
 
+        background_offset = 0.0
+        background_size = int(getattr(args, 'background_subtract_corner', 0))
+        background_corner = str(
+            getattr(args, 'background_subtract_which_corner', 'bottom_left')
+        ).lower().strip()
+        if background_size > 0:
+            if background_size > min(image_data.shape):
+                raise ValueError(
+                    f"background_subtract_corner={background_size} is larger than "
+                    f"the {band_name!r} image dimensions {image_data.shape}"
+                )
+            corner_slices = {
+                'bottom_left': (slice(0, background_size), slice(0, background_size)),
+                'bottom_right': (slice(0, background_size), slice(-background_size, None)),
+                'top_left': (slice(-background_size, None), slice(0, background_size)),
+                'top_right': (slice(-background_size, None), slice(-background_size, None)),
+            }
+            if background_corner not in corner_slices:
+                raise ValueError(
+                    'background_subtract_which_corner must be one of: '
+                    'bottom_left, bottom_right, top_left, top_right'
+                )
+            background_offset = float(np.nanmedian(image_data[corner_slices[background_corner]]))
+            image_data = image_data - background_offset
+            print(
+                f'[bkg:{band_name}] Derived global background offset of {background_offset:.6f} '
+                f'from {background_corner} corner ({background_size}x{background_size} pixels) '
+                'and subtracted it.'
+            )
+
         image_size = image_data.shape[0]
         mass_types, mass_params = _call_config(lens_mass_config, image_size, args.pixel_scale, args, band_name)
         if shared_mass_params is None:
@@ -279,6 +351,11 @@ def build_and_run_multiband(config_path=None):
             'source_light_params_list': source_params,
             'point_source_params_list': point_params,
         }
+        print(f'[{band_name}] Data shape: {image_data.shape}; active source-mask pixels: {int(source_arc_mask.sum())}')
+        print(f'[{band_name}] Lens mass type list: {mass_types}')
+        print(f'[{band_name}] Lens light type list: {lens_light_types}')
+        print(f'[{band_name}] Source light type list: {source_types}')
+        print(f'[{band_name}] Point source type list: {point_types}')
         lens_image = create_lens_image(
             param_list, type_list, image_data, noise_map, psf_data, args.pixel_scale,
             kwargs_numerics={'supersampling_factor': args.supersampling_factor},
@@ -295,6 +372,7 @@ def build_and_run_multiband(config_path=None):
             'psf_data': psf_data,
             'type_list': type_list,
             'param_list': param_list,
+            'background_offset': background_offset,
             'save_path': None,
         })
 
@@ -309,6 +387,13 @@ def build_and_run_multiband(config_path=None):
     base_random_seed = int(args.random_seed)
     init_root = getattr(args, 'init_params_path', None)
     comparison = {}
+    if sampler == 'svi' and n_runs > 1:
+        print(f'Starting joint SVI multi-run in: {base_save_path} (n_runs={n_runs})')
+    elif sampler == 'hmc':
+        print(
+            f'Starting joint HMC in: {base_save_path} '
+            f'(num_chains={int(args.num_chains_hmc_numpyro)})'
+        )
     for run_index in range(n_runs):
         run_path = base_save_path if n_runs == 1 else os.path.join(base_save_path, f'run_{run_index}')
         run_seed = base_random_seed + run_index
@@ -341,18 +426,64 @@ def build_and_run_multiband(config_path=None):
                 band['save_path'], band['type_list']['point_source_type_list'],
                 band['param_list']['point_source_params_list'],
                 getattr(band['lens_image'], 'source_arc_mask', None),
+                background_offset=band['background_offset'],
             )
 
         init_params = (
             _load_joint_initialization(prob_model, bands, run_init_path, run_seed)
             if run_init_path else prob_model.get_sample(jax.random.PRNGKey(run_seed))
         )
+        num_params = prob_model.count_sampled_parameters()
+        with open(os.path.join(run_path, 'config.json'), 'w') as handle:
+            json.dump({
+                'bands': {
+                    band['name']: {
+                        'type_list': band['type_list'],
+                        'param_list': band['param_list'],
+                        'background_offset': band['background_offset'],
+                    }
+                    for band in bands
+                },
+                'shared_lens_mass_type_list': shared_mass_types,
+                'shared_lens_mass_params_list': shared_mass_params,
+                'num_params': num_params,
+                'sampler': sampler,
+                'init_params_path': run_init_path,
+                'kwargs_numerics_fit': {
+                    'supersampling_factor': args.supersampling_factor,
+                },
+            }, handle, indent=4, default=json_serializer)
+        init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))
+        init_log_likelihood = float(np.sum(prob_model.log_likelihood(init_params)))
+        print(f'Number of sampled parameters: {num_params}')
+        print(
+            f'Initial joint log-prob: {init_log_prob:.2f} '
+            f'(log-likelihood: {init_log_likelihood:.2f})'
+        )
+        try:
+            initial_kwargs_by_band = prob_model.params2kwargs_by_band(init_params)
+            for band in bands:
+                initial_model = band['lens_image'].model(**initial_kwargs_by_band[band['name']])
+                initial_chi2 = float(np.sum(
+                    ((initial_model - band['image_data']) / band['noise_map']) ** 2
+                ))
+                print(f"Initial {band['name']} chi^2: {initial_chi2:.2f}")
+        except Exception as error:
+            print(f'[init] Per-band initial chi^2 skipped: {error}')
         mcmc_samples = None
         if sampler == 'svi':
             init_params = _run_pixelated_svi_warmup(
                 prob_model, bands, args, init_params, run_init_path,
             )
             best_params, extra = run_svi(prob_model, None, args, init_params)
+            if 'loss_history' in extra:
+                with open(os.path.join(run_path, 'svi_loss_history.json'), 'w') as handle:
+                    json.dump(
+                        {'loss_history': np.asarray(extra['loss_history']).tolist()}, handle, indent=4,
+                    )
+            if 'result' in extra:
+                with open(os.path.join(run_path, 'svi_guide_params.pkl'), 'wb') as handle:
+                    pickle.dump(extra['result'].params, handle)
         elif sampler == 'optax':
             best_params, extra = run_optax(prob_model, args, init_params)
         elif sampler == 'hmc':
@@ -365,12 +496,30 @@ def build_and_run_multiband(config_path=None):
         else:
             raise ValueError(f'Unsupported multiband sampler {sampler!r}.')
 
+        posterior_samples = mcmc_samples
+        if sampler == 'svi' and 'guide' in extra and 'result' in extra:
+            try:
+                cpu_device = jax.devices('cpu')[0]
+                guide_params = jax.tree_util.tree_map(
+                    lambda value: jax.device_put(value, cpu_device), extra['result'].params,
+                )
+                with jax.default_device(cpu_device):
+                    posterior_samples = extra['guide'].sample_posterior(
+                        jax.random.PRNGKey(run_seed + 12345), guide_params, sample_shape=(2000,),
+                    )
+            except Exception as error:
+                print(f'[svi] Failed to draw guide samples for kwargs_sigma.json: {error}')
+
         kwargs_by_band = prob_model.params2kwargs_by_band(best_params)
         shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
         with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
             json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
         comparison[f'run_{run_index}'] = {'seed': run_seed, 'bands': {}}
         combined_band_results = []
+        combined_kwargs_by_band = {}
+        result_arrays = {}
+        total_chi2 = 0.0
+        total_data_pixels = 0
         for band in bands:
             kwargs_best = kwargs_by_band[band['name']]
             band_samples = _band_hmc_samples(mcmc_samples, band) if mcmc_samples is not None else None
@@ -390,17 +539,59 @@ def build_and_run_multiband(config_path=None):
             kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_best, band['save_path'], band['type_list'])
             with open(os.path.join(band['save_path'], 'kwargs_result.json'), 'w') as handle:
                 json.dump(kwargs_json, handle, indent=4, default=json_serializer)
+            combined_kwargs_by_band[band['name']] = _rebase_pixel_array_references(
+                kwargs_json, band['name'],
+            )
             with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
                 json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
+            if posterior_samples is not None:
+                try:
+                    posterior_band_samples = _band_hmc_samples(posterior_samples, band)
+                    if sampler == 'svi':
+                        sigma_params = {
+                            key: np.std(np.asarray(value), axis=0)
+                            for key, value in posterior_band_samples.items()
+                        }
+                        kwargs_sigma = band['prob_model'].params2kwargs(sigma_params)
+                    else:
+                        p16 = {
+                            key: np.percentile(np.asarray(value), 16, axis=0)
+                            for key, value in posterior_band_samples.items()
+                        }
+                        p50 = {
+                            key: np.percentile(np.asarray(value), 50, axis=0)
+                            for key, value in posterior_band_samples.items()
+                        }
+                        p84 = {
+                            key: np.percentile(np.asarray(value), 84, axis=0)
+                            for key, value in posterior_band_samples.items()
+                        }
+                        kwargs_lower = band['prob_model'].params2kwargs({
+                            key: p50[key] - p16[key] for key in p50
+                        })
+                        kwargs_upper = band['prob_model'].params2kwargs({
+                            key: p84[key] - p50[key] for key in p50
+                        })
+                        kwargs_sigma = _zip_asymmetric_uncertainties(kwargs_lower, kwargs_upper)
+                    kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(
+                        kwargs_sigma, band['save_path'], band['type_list'], save_pixel_arrays=False,
+                    )
+                    with open(os.path.join(band['save_path'], 'kwargs_sigma.json'), 'w') as handle:
+                        json.dump(kwargs_sigma_json, handle, indent=4, default=json_serializer)
+                    print(f"[{sampler}] Saved {band['name']} kwargs_sigma.json")
+                except Exception as error:
+                    print(f"[{sampler}] Failed to save {band['name']} kwargs_sigma.json: {error}")
             if band_samples is not None:
                 save_hmc_diagnostics(
                     band_samples, int(args.num_chains_hmc_numpyro), band['save_path'],
                     'final', band['prob_model'],
                 )
             best_fit_model = band['lens_image'].model(**kwargs_best)
-            chi2 = float(np.sum(((best_fit_model - band['image_data']) / band['noise_map']) ** 2))
-            n_params = sum(np.asarray(value).size for value in best_params.values())
-            reduced_chi2 = chi2 / max(int(band['image_data'].size) - n_params, 1)
+            metrics_model = component_medians.get('total') if component_medians else best_fit_model
+            chi2 = float(np.sum(((metrics_model - band['image_data']) / band['noise_map']) ** 2))
+            reduced_chi2 = chi2 / max(int(band['image_data'].size) - num_params, 1)
+            total_chi2 += chi2
+            total_data_pixels += int(band['image_data'].size)
             comparison[f'run_{run_index}']['bands'][band['name']] = {
                 'chi2': chi2,
                 'reduced_chi2': reduced_chi2,
@@ -432,6 +623,43 @@ def build_and_run_multiband(config_path=None):
                 ),
                 'model_total': component_medians.get('total') if component_medians else None,
             })
+            result_arrays[f'{band["name"]}_best_fit_model'] = np.asarray(metrics_model)
+            result_arrays[f'{band["name"]}_image_data'] = np.asarray(band['image_data'])
+            result_arrays[f'{band["name"]}_noise_map'] = np.asarray(band['noise_map'])
+            result_arrays[f'{band["name"]}_source_arc_mask'] = np.asarray(
+                getattr(band['lens_image'], 'source_arc_mask', None)
+            )
+
+        total_log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
+        with open(os.path.join(run_path, 'kwargs_result.json'), 'w') as handle:
+            json.dump({
+                'kwargs_lens': shared_lens,
+                'kwargs_by_band': combined_kwargs_by_band,
+            }, handle, indent=4, default=json_serializer)
+        dof = max(total_data_pixels - num_params, 1)
+        metrics = {
+            'BIC': float(num_params * np.log(total_data_pixels) - 2 * total_log_likelihood),
+            'CHI2': float(total_chi2),
+            'CHI2_NPIX2': float(total_chi2 / total_data_pixels),
+            'REDUCED_CHI2': float(total_chi2 / dof),
+            'CHI2_DOF': int(dof),
+            'N_DATA_PIXELS': int(total_data_pixels),
+            'N_PARAMS_FITTED': int(num_params),
+            'N_PARAMS_FREE': int(num_params),
+            'LOG_LIKELIHOOD': total_log_likelihood,
+        }
+        with open(os.path.join(run_path, 'metrics.json'), 'w') as handle:
+            json.dump(metrics, handle, indent=4, default=json_serializer)
+        comparison[f'run_{run_index}']['metrics'] = metrics
+        np.savez_compressed(
+            os.path.join(run_path, 'modeling_result.npz'),
+            **result_arrays,
+        )
+        print(
+            f"Joint reduced chi^2: {metrics['REDUCED_CHI2']:.4f} "
+            f"(chi^2={metrics['CHI2']:.2f}, dof={metrics['CHI2_DOF']}); "
+            f"BIC: {metrics['BIC']:.2f}, log-likelihood: {total_log_likelihood:.2f}"
+        )
         try:
             plot_multiband_composite(
                 combined_band_results,
@@ -447,9 +675,8 @@ def build_and_run_multiband(config_path=None):
         sys.stdout = original_stdout
         sys.stderr = original_stderr
 
-    if n_runs > 1:
-        with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
-            json.dump(comparison, handle, indent=4, default=json_serializer)
+    with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
+        json.dump(comparison, handle, indent=4, default=json_serializer)
     return base_save_path
 
 
