@@ -239,6 +239,14 @@ def _rebase_pixel_array_references(payload, band_name):
     return copy.deepcopy(payload)
 
 
+def _joint_log_likelihood(prob_model, params):
+    """Sum likelihood terms from every band-scoped NumPyro observation site."""
+    from numpyro.infer.util import log_likelihood
+
+    terms_by_site = log_likelihood(prob_model.model, params, batch_ndims=0)
+    return float(sum(np.sum(np.asarray(term)) for term in terms_by_site.values()))
+
+
 def build_and_run_multiband(config_path=None):
     if config_path is None:
         config_path = _resolve_single_config_spec(sys.argv[1] if len(sys.argv) > 1 else 'config.py')
@@ -454,7 +462,7 @@ def build_and_run_multiband(config_path=None):
                 },
             }, handle, indent=4, default=json_serializer)
         init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))
-        init_log_likelihood = float(np.sum(prob_model.log_likelihood(init_params)))
+        init_log_likelihood = _joint_log_likelihood(prob_model, init_params)
         print(f'Number of sampled parameters: {num_params}')
         print(
             f'Initial joint log-prob: {init_log_prob:.2f} '
@@ -630,7 +638,7 @@ def build_and_run_multiband(config_path=None):
                 getattr(band['lens_image'], 'source_arc_mask', None)
             )
 
-        total_log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
+        total_log_likelihood = _joint_log_likelihood(prob_model, best_params)
         with open(os.path.join(run_path, 'kwargs_result.json'), 'w') as handle:
             json.dump({
                 'kwargs_lens': shared_lens,
