@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import sys
+from datetime import datetime
 from types import SimpleNamespace
 
 import jax
@@ -24,6 +25,7 @@ from herculens_wrapper.utils import (
     normalize_run_args_paths,
     resolve_project_path,
     run_arguments_namespace,
+    Tee,
 )
 
 configure_import_paths()
@@ -311,6 +313,20 @@ def build_and_run_multiband(config_path=None):
         run_path = base_save_path if n_runs == 1 else os.path.join(base_save_path, f'run_{run_index}')
         run_seed = base_random_seed + run_index
         os.makedirs(run_path, exist_ok=True)
+        run_log_path = os.path.join(run_path, 'log.txt')
+        resume_run = sampler == 'hmc' and os.path.isfile(run_log_path)
+        run_log_file = open(run_log_path, 'a' if resume_run else 'w')
+        original_stdout = sys.stdout
+        original_stderr = sys.stderr
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        run_log_file.write(f"{'Resume' if resume_run else 'Start'} at {timestamp}\n")
+        run_log_file.flush()
+        sys.stdout = Tee(sys.stdout, run_log_file)
+        sys.stderr = Tee(sys.stderr, run_log_file)
+
+        print(f'\n========================================')
+        print(f'Starting multi-band run {run_index} (seed={run_seed}, sampler={sampler!r})')
+        print(f'========================================')
         args.save_path = run_path
         args.random_seed = run_seed
         shutil.copy(config_path, os.path.join(run_path, os.path.basename(config_path)))
@@ -425,6 +441,11 @@ def build_and_run_multiband(config_path=None):
         except Exception as error:
             print(f'[plots] multiband_composite.png skipped: {error}')
         print(f'[multiband] Run {run_index} complete. Outputs in {run_path}')
+        end_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        run_log_file.write(f'End at {end_timestamp}\n')
+        run_log_file.close()
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
 
     if n_runs > 1:
         with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
