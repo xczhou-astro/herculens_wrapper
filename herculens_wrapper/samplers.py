@@ -885,13 +885,6 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     if checkpoint_interval <= 0 or checkpoint_interval > num_samples_total:
         checkpoint_interval = num_samples_total
         
-    batch_sizes = []
-    current_samples = 0
-    while current_samples < num_samples_total:
-        size = min(checkpoint_interval, num_samples_total - current_samples)
-        batch_sizes.append(size)
-        current_samples += size
-        
     rng_key = jax.random.PRNGKey(args.random_seed)
     rng_key, rng_key_ = jax.random.split(rng_key)
     
@@ -902,6 +895,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     checkpoint_path = os.path.join(save_path, "hmc_checkpoint.pkl")
     start_batch_idx = 0
     last_state = None
+    completed_samples = 0
     
     if os.path.exists(checkpoint_path):
         print(f"[hmc] Found existing checkpoint at {checkpoint_path}. Attempting to resume...")
@@ -914,25 +908,64 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 {k: np.asarray(v) for k, v in batch.items()}
                 for batch in all_samples
             ]
+            for batch in all_samples:
+                if not batch:
+                    continue
+                first_value = next(iter(batch.values()))
+                batch_total = int(np.asarray(first_value).shape[0])
+                if batch_total % num_chains:
+                    raise ValueError(
+                        'Checkpoint sample count is incompatible with the configured number of chains.'
+                    )
+                completed_samples += batch_total // num_chains
             last_state = ckpt['last_state']
             start_batch_idx = ckpt['completed_batches']
-            print(f"[hmc] Resuming from batch {start_batch_idx+1} (completed {start_batch_idx} batches).")
+            saved_num_chains = ckpt.get('num_chains')
+            saved_interval = ckpt.get('checkpoint_interval')
+            if saved_num_chains is not None and int(saved_num_chains) != num_chains:
+                raise ValueError(
+                    f'Checkpoint uses num_chains={saved_num_chains}, but the current '
+                    f'configuration requests num_chains_hmc_numpyro={num_chains}.'
+                )
+            if saved_interval is not None and int(saved_interval) != checkpoint_interval:
+                raise ValueError(
+                    f'Checkpoint uses checkpoint_interval_hmc_numpyro={saved_interval}, but '
+                    f'the current configuration requests {checkpoint_interval}. Keep the '
+                    'checkpoint interval unchanged when extending HMC sampling.'
+                )
+            print(
+                f"[hmc] Resuming after {completed_samples} draws per chain "
+                f"({start_batch_idx} completed batches)."
+            )
+        except ValueError:
+            raise
         except Exception as e:
             print(f"[hmc] Failed to load checkpoint: {e}. Starting from scratch.")
             all_samples = []
             last_state = None
             start_batch_idx = 0
+
+    if completed_samples > num_samples_total:
+        raise ValueError(
+            f'Checkpoint already contains {completed_samples} draws per chain, exceeding '
+            f'num_samples_hmc_numpyro={num_samples_total}. Use a larger target or start a new run.'
+        )
+    batch_sizes = []
+    remaining_samples = num_samples_total - completed_samples
+    while remaining_samples > 0:
+        size = min(checkpoint_interval, remaining_samples)
+        batch_sizes.append(size)
+        remaining_samples -= size
+    total_batch_count = start_batch_idx + len(batch_sizes)
             
-    for i, size in enumerate(batch_sizes):
-        if i < start_batch_idx:
-            print(f"[hmc] Batch {i+1} already completed. Skipping.")
-            continue
+    for batch_offset, size in enumerate(batch_sizes):
+        i = start_batch_idx + batch_offset
             
         if disable_gibbs:
-            print(f"[hmc] Running joint NUTS batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
+            print(f"[hmc] Running joint NUTS batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
         else:
-            print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{len(batch_sizes)} (drawing {size} samples, total {num_samples_total})...")
-        if i == 0:
+            print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
+        if last_state is None:
             mcmc = infer.MCMC(
                 outer_kernel,
                 num_warmup=num_warmup,
@@ -991,6 +1024,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     'last_state': last_state,
                     'all_samples': all_samples,
                     'completed_batches': i + 1,
+                    'num_chains': num_chains,
+                    'checkpoint_interval': checkpoint_interval,
                 }, f)
             print(f"[hmc] Saved checkpoint to: {checkpoint_path}")
         except Exception as e:

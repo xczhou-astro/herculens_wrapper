@@ -217,6 +217,37 @@ def _hmc_run_finished(log_path):
     return bool(lines and lines[-1].lower().startswith('end at'))
 
 
+def _hmc_checkpoint_samples_per_chain(run_path, args):
+    """Return completed draws per chain from a compatible HMC checkpoint."""
+    checkpoint_path = os.path.join(run_path, 'hmc_checkpoint.pkl')
+    if not os.path.isfile(checkpoint_path):
+        return None
+    try:
+        with open(checkpoint_path, 'rb') as handle:
+            checkpoint = pickle.load(handle)
+        configured_chains = int(args.num_chains_hmc_numpyro)
+        saved_chains = checkpoint.get('num_chains')
+        if saved_chains is not None and int(saved_chains) != configured_chains:
+            raise ValueError(
+                f'checkpoint uses num_chains={saved_chains}, but configuration requests '
+                f'num_chains_hmc_numpyro={configured_chains}'
+            )
+        completed = 0
+        for batch in checkpoint.get('all_samples', []):
+            if not batch:
+                continue
+            first_value = next(iter(batch.values()))
+            batch_total = int(np.asarray(first_value).shape[0])
+            if batch_total % configured_chains:
+                raise ValueError(
+                    'checkpoint sample count is incompatible with the configured number of chains'
+                )
+            completed += batch_total // configured_chains
+        return completed
+    except Exception as error:
+        raise ValueError(f'Could not inspect HMC checkpoint {checkpoint_path!r}: {error}') from error
+
+
 def _load_fixed_light_kwargs(init_path, bands):
     """Load the shared mass and each band's lens light for source-only warmup."""
     init_root = os.path.abspath(init_path)
@@ -647,8 +678,23 @@ def build_and_run_multiband(config_path=None):
         os.makedirs(run_path, exist_ok=True)
         run_log_path = os.path.join(run_path, 'log.txt')
         if sampler == 'hmc' and _hmc_run_finished(run_log_path):
-            print(f'[hmc] Existing run is complete ({run_log_path}); skipping it.')
-            return base_save_path
+            completed_draws = _hmc_checkpoint_samples_per_chain(run_path, args)
+            if completed_draws is None:
+                raise FileNotFoundError(
+                    f'HMC run at {run_path!r} is marked complete but has no checkpoint. '
+                    'Cannot safely extend it without restarting the chain.'
+                )
+            requested_draws = int(args.num_samples_hmc_numpyro)
+            if completed_draws >= requested_draws:
+                print(
+                    f'[hmc] Existing run is complete with {completed_draws} draws per chain '
+                    f'(requested {requested_draws}); skipping it.'
+                )
+                return base_save_path
+            print(
+                f'[hmc] Extending completed run from {completed_draws} to '
+                f'{requested_draws} draws per chain without repeating warm-up.'
+            )
         resume_run = sampler == 'hmc' and os.path.isfile(run_log_path)
         run_log_file = open(run_log_path, 'a' if resume_run else 'w')
         original_stdout = sys.stdout
