@@ -248,6 +248,46 @@ def _hmc_checkpoint_samples_per_chain(run_path, args):
         raise ValueError(f'Could not inspect HMC checkpoint {checkpoint_path!r}: {error}') from error
 
 
+def _report_hmc_warm_start_reproduction(init_root, bands, initial_kwargs_by_band):
+    """Numerically compare restored HMC inputs with the selected SVI outputs."""
+    for band in bands:
+        name = band['name']
+        restored_kwargs = initial_kwargs_by_band[name]
+        restored_model = np.asarray(band['lens_image'].model(**restored_kwargs))
+        prior_model_path = os.path.join(init_root, 'modeling_result.npz')
+        model_key = f'{name}_best_fit_model'
+        if os.path.isfile(prior_model_path):
+            with np.load(prior_model_path) as prior_result:
+                if model_key in prior_result:
+                    saved_model = np.asarray(prior_result[model_key])
+                    if saved_model.shape == restored_model.shape:
+                        delta = restored_model - saved_model
+                        rms = float(np.sqrt(np.mean(delta**2)))
+                        max_abs = float(np.max(np.abs(delta)))
+                        print(
+                            f'[hmc:init] {name} restored-model check: '
+                            f'rms_difference={rms:.3e}, max_abs_difference={max_abs:.3e}'
+                        )
+                    else:
+                        print(
+                            f'[hmc:init] {name} restored-model check skipped: '
+                            f'saved shape={saved_model.shape}, current shape={restored_model.shape}'
+                        )
+
+        source_path = os.path.join(init_root, name, 'kwargs_source_pixels.npy')
+        restored_source = restored_kwargs.get('kwargs_source', [{}])[0].get('pixels')
+        if os.path.isfile(source_path) and restored_source is not None:
+            saved_source = np.load(source_path)
+            restored_source = np.asarray(restored_source)
+            if saved_source.shape == restored_source.shape:
+                delta = restored_source - saved_source
+                print(
+                    f'[hmc:init] {name} restored-source check: '
+                    f'rms_difference={float(np.sqrt(np.mean(delta**2))):.3e}, '
+                    f'max_abs_difference={float(np.max(np.abs(delta))):.3e}'
+                )
+
+
 def _load_fixed_light_kwargs(init_path, bands):
     """Load the shared mass and each band's lens light for source-only warmup."""
     init_root = os.path.abspath(init_path)
@@ -782,6 +822,10 @@ def build_and_run_multiband(config_path=None):
         )
         try:
             initial_kwargs_by_band = prob_model.params2kwargs_by_band(init_params)
+            if sampler == 'hmc':
+                _report_hmc_warm_start_reproduction(
+                    run_init_path, bands, initial_kwargs_by_band,
+                )
             initial_kwargs_json_by_band = {}
             initial_band_results = []
             for band in bands:
