@@ -486,6 +486,12 @@ def build_and_run_multiband(config_path=None):
     lens_light_config = getattr(config_module, 'lens_light_config', empty_config)
     source_light_config = getattr(config_module, 'source_light_config', empty_config)
     point_source_config = getattr(config_module, 'point_source_config', empty_config)
+    kwargs_lens_equation_solver_model = {
+        'nsolutions': getattr(args, 'ps_nsolutions', 5),
+        'niter': getattr(args, 'ps_niter', 10),
+        'scale_factor': getattr(args, 'ps_scale_factor', 2),
+        'nsubdivisions': getattr(args, 'ps_nsubdivisions', 3),
+    }
 
     bands = []
     shared_mass_params = None
@@ -565,6 +571,7 @@ def build_and_run_multiband(config_path=None):
         lens_image = create_lens_image(
             param_list, type_list, image_data, noise_map, psf_data, args.pixel_scale,
             kwargs_numerics={'supersampling_factor': args.supersampling_factor},
+            kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
             source_arc_mask=source_arc_mask,
             source_grid_scale=float(getattr(args, 'source_grid_scale', 1.0)),
             conjugate_points=getattr(args, 'conjugate_points', None),
@@ -672,6 +679,7 @@ def build_and_run_multiband(config_path=None):
                 'kwargs_numerics_fit': {
                     'supersampling_factor': args.supersampling_factor,
                 },
+                'kwargs_lens_equation_solver_model': kwargs_lens_equation_solver_model,
             }, handle, indent=4, default=json_serializer)
         mcmc_samples = None
         if sampler == 'svi':
@@ -747,7 +755,10 @@ def build_and_run_multiband(config_path=None):
         except Exception as error:
             print(f'[init] Initial multi-band diagnostics skipped: {error}')
         if sampler == 'svi':
-            best_params, extra = run_svi(prob_model, None, args, init_params)
+            # Match the single-band behavior: without a warm start the guide
+            # chooses its own init_to_median location from prior samples.
+            svi_init_params = init_params if run_init_path else None
+            best_params, extra = run_svi(prob_model, None, args, svi_init_params)
             if 'loss_history' in extra:
                 with open(os.path.join(run_path, 'svi_loss_history.json'), 'w') as handle:
                     json.dump(
