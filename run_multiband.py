@@ -158,16 +158,22 @@ def _load_joint_initialization(
             required = ('pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid')
             missing = [key for key in required if key not in source]
             if missing:
-                raise ValueError(
-                    f'Pixelated SVI warm start for {band["name"]!r} is missing {missing}. '
-                    'Expected saved pixels_wn and Matérn parameters.'
+                if require_pixelated_svi:
+                    raise ValueError(
+                        f'Pixelated SVI warm start for {band["name"]!r} is missing {missing}. '
+                        'Expected saved pixels_wn and Matérn parameters.'
+                    )
+                print(
+                    f'[multiband:svi] {band["name"]} has no saved pixelated source; '
+                    'initializing its pixels_wn and Matérn parameters from their priors.'
                 )
-            band_params.update({
-                'pixels_wn_source_grid': jnp.asarray(source['pixels_wn']),
-                'n_source_grid': jnp.asarray(source['n_source_grid']),
-                'rho_source_grid': jnp.asarray(source['rho_source_grid']),
-                'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
-            })
+            else:
+                band_params.update({
+                    'pixels_wn_source_grid': jnp.asarray(source['pixels_wn']),
+                    'n_source_grid': jnp.asarray(source['n_source_grid']),
+                    'rho_source_grid': jnp.asarray(source['rho_source_grid']),
+                    'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
+                })
         prefix = f"{band['site_prefix']}/"
         for key, value in band_params.items():
             if prefix + key in init_params:
@@ -535,13 +541,14 @@ def build_and_run_multiband(config_path=None):
         n_runs = 1
     base_random_seed = int(args.random_seed)
     init_root = getattr(args, 'init_params_path', None)
+    if init_root:
+        init_root = resolve_init_run_dir(init_root, config_dir=os.path.dirname(config_path))
+        if not os.path.isdir(init_root):
+            raise FileNotFoundError(f'Multiband initialization path does not exist: {init_root!r}')
+        print(f'[multiband] Selected initialization run: {init_root}')
     if sampler == 'hmc':
         if not init_root:
             raise ValueError('Joint multiband HMC requires init_params_path from a pixelated SVI run.')
-        init_root = resolve_init_run_dir(init_root, config_dir=os.path.dirname(config_path))
-        if not os.path.isdir(init_root):
-            raise FileNotFoundError(f'Multiband HMC initialization path does not exist: {init_root!r}')
-        print(f'[multiband] Selected pixelated-SVI warm start: {init_root}')
     comparison = {}
     if sampler == 'svi' and n_runs > 1:
         print(f'Starting joint SVI multi-run in: {base_save_path} (n_runs={n_runs})')
