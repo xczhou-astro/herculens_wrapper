@@ -126,6 +126,13 @@ def _load_joint_initialization(
     from herculens_wrapper.models import kwargs2params
 
     init_params = prob_model.get_sample(jax.random.PRNGKey(random_seed))
+    # ``get_sample`` includes the Matérn deterministic pixel image.  It is a
+    # prior draw and must not override restored pixels_wn/n/rho/sigma when
+    # params2kwargs builds the initial diagnostic source/model images.
+    init_params = {
+        key: value for key, value in init_params.items()
+        if key.rsplit('/', 1)[-1] != 'pixels_source_grid'
+    }
     init_root = os.path.abspath(init_path)
     if require_pixelated_svi:
         _validate_pixelated_svi_initialization(init_root, bands)
