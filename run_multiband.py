@@ -119,13 +119,16 @@ def _validate_pixelated_svi_initialization(init_root, bands):
             )
 
 
-def _load_joint_initialization(prob_model, bands, init_path, random_seed):
+def _load_joint_initialization(
+    prob_model, bands, init_path, random_seed, require_pixelated_svi=False,
+):
     """Load a prior joint run into constrained multiband sampling sites."""
     from herculens_wrapper.models import kwargs2params
 
     init_params = prob_model.get_sample(jax.random.PRNGKey(random_seed))
     init_root = os.path.abspath(init_path)
-    _validate_pixelated_svi_initialization(init_root, bands)
+    if require_pixelated_svi:
+        _validate_pixelated_svi_initialization(init_root, bands)
     shared_path = os.path.join(init_root, 'kwargs_lens_shared.json')
     if not os.path.isfile(shared_path):
         raise FileNotFoundError(f'Multiband HMC warm start is missing {shared_path!r}.')
@@ -586,7 +589,10 @@ def build_and_run_multiband(config_path=None):
             )
 
         init_params = (
-            _load_joint_initialization(prob_model, bands, run_init_path, run_seed)
+            _load_joint_initialization(
+                prob_model, bands, run_init_path, run_seed,
+                require_pixelated_svi=(sampler == 'hmc'),
+            )
             if run_init_path else prob_model.get_sample(jax.random.PRNGKey(run_seed))
         )
         num_params = prob_model.count_sampled_parameters()
