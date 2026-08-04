@@ -1007,15 +1007,23 @@ def create_prob_model(
                     ),
                 )
 
-        def params2kwargs(self, params):
+        def params2kwargs(self, params, kwargs_lens_override=None):
+            """Convert constrained sites to lens-model kwargs.
+
+            ``kwargs_lens_override`` is used by the multi-band diagnostic
+            evaluator.  It supplies the shared mass directly for each
+            posterior sample instead of reading the sampling-model callback.
+            """
 
             kwargs_lens = []
-            if fix_lens_mass and kwargs_lens_fixed is not None:
+            if kwargs_lens_override is not None:
+                kwargs_lens = _kwargs_list_to_jax(kwargs_lens_override)
+            elif fix_lens_mass and kwargs_lens_fixed is not None:
                 kwargs_lens = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
             
             bank = {'lens': kwargs_lens}
             
-            if not (fix_lens_mass and kwargs_lens_fixed is not None):
+            if kwargs_lens_override is None and not (fix_lens_mass and kwargs_lens_fixed is not None):
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                     kw = {}
                     for key, param in lens_mass_model.items():

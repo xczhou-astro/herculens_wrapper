@@ -143,7 +143,13 @@ def model_image_from_deterministics(prob_model, kwargs, deterministics=None):
     return lens_image.model(**kwargs)
 
 
-def evaluate_mcmc_component_medians(prob_model, samples, batch_size=500):
+def evaluate_mcmc_component_medians(
+    prob_model,
+    samples,
+    batch_size=500,
+    active_sites=None,
+    kwargs_lens_from_params=None,
+):
     """
     Evaluates total, source-only, lens-light-only, and no-lens-light model images 
     for all MCMC samples using fast vectorized JAX vmap and computes their pixel-by-pixel medians.
@@ -156,7 +162,9 @@ def evaluate_mcmc_component_medians(prob_model, samples, batch_size=500):
     if lens_image is None:
         raise ValueError("prob_model does not expose lens_image for MCMC median evaluation.")
 
-    active_sites = set(get_active_sample_sites(prob_model))
+    active_sites = set(
+        get_active_sample_sites(prob_model) if active_sites is None else active_sites
+    )
     sample_keys = [k for k in samples.keys() if k in active_sites]
     if not sample_keys:
         sample_keys = list(samples.keys())
@@ -167,7 +175,13 @@ def evaluate_mcmc_component_medians(prob_model, samples, batch_size=500):
     has_point_source = bool(type_list.get('point_source_type_list'))
 
     def eval_single(sample_dict):
-        kw = prob_model.params2kwargs(sample_dict)
+        kwargs_lens = (
+            kwargs_lens_from_params(sample_dict)
+            if kwargs_lens_from_params is not None else None
+        )
+        kw = prob_model.params2kwargs(
+            sample_dict, kwargs_lens_override=kwargs_lens,
+        )
         img_total = jnp.squeeze(lens_image.model(**kw))
         img_source = jnp.squeeze(lens_image.model(
             **kw, source_add=True, lens_light_add=False, point_source_add=False
@@ -236,9 +250,18 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         import numpy as np
 
         # Focus on lens mass and power spectrum related parameters
+        def local_site_name(key):
+            return key.rsplit('/', 1)[-1]
+
         target_keys = [
-            k for k in samples.keys() 
-            if (('lens_' in k and 'lens_light_' not in k) or k in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid'))
+            key for key in samples.keys()
+            if (
+                ('lens_' in local_site_name(key)
+                 and 'lens_light_' not in local_site_name(key))
+                or local_site_name(key) in (
+                    'n_source_grid', 'rho_source_grid', 'sigma_source_grid',
+                )
+            )
         ]
 
         if not target_keys:

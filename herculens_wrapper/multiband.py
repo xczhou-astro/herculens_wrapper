@@ -89,14 +89,15 @@ def create_multiband_prob_model(
             )
             results = {}
             for band, holder, band_model in zip(bands, holders, band_models):
-                holder['kwargs_lens'] = kwargs_lens
                 prefix = f"{band['site_prefix']}/"
                 band_params = {
                     key[len(prefix):]: value
                     for key, value in params.items()
                     if key.startswith(prefix)
                 }
-                results[band['name']] = band_model.params2kwargs(band_params)
+                results[band['name']] = band_model.params2kwargs(
+                    band_params, kwargs_lens_override=kwargs_lens,
+                )
             return results
 
         def params2kwargs(self, params):
@@ -114,5 +115,8 @@ def create_multiband_prob_model(
     model.band_models = band_models
     model.lens_mass_params_list = lens_mass_params_list
     model.lens_mass_type_list = lens_mass_type_list
+    model.mass_kwargs_from_params = lambda params: mass_kwargs_from_params(
+        params, sample=False,
+    )
     model.type_list = {'lens_mass_type_list': lens_mass_type_list}
     return model

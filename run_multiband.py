@@ -456,61 +456,33 @@ def _joint_log_likelihood(prob_model, params):
 
 def _save_multiband_hmc_batch_diagnostics(
     samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
-    evaluate_mcmc_component_medians, evaluate_mcmc_source_pixels_summary,
-    save_hmc_pixels_wn_summary,
-    plot_multiband_composite, generate_run_plots,
+    prob_model, evaluate_mcmc_component_medians,
+    evaluate_mcmc_source_pixels_summary, plot_multiband_composite,
 ):
-    """Write checkpoint diagnostics by projecting joint samples into each band."""
+    """Save the compact joint HMC diagnostic set for one checkpoint."""
     batch_root = os.path.join(run_path, 'diagnostics', f'batch_{batch_index}')
     os.makedirs(batch_root, exist_ok=True)
     combined_results = []
     for band in bands:
-        band_dir = os.path.join(batch_root, band['name'])
-        os.makedirs(band_dir, exist_ok=True)
         band_samples = _band_hmc_samples(samples, band)
-        save_hmc_pixels_wn_summary(
-            band_samples, band_dir,
-            plot_filename=f'source_pixels_wn_median_uncertainties_batch_{batch_index}.png',
-        )
         median_params = {
             key: np.median(np.asarray(value), axis=0)
             for key, value in band_samples.items()
         }
-        kwargs_best = band['prob_model'].params2kwargs(median_params)
+        kwargs_best = band['prob_model'].params2kwargs(
+            median_params,
+            kwargs_lens_override=prob_model.mass_kwargs_from_params(median_params),
+        )
         source_summary = evaluate_mcmc_source_pixels_summary(
-            band['prob_model'], band_samples, band_dir, save_npy=False,
+            band['prob_model'], band_samples, batch_root, save_npy=False,
         )
         if source_summary is not None and kwargs_best.get('kwargs_source'):
             kwargs_best['kwargs_source'][0]['pixels'] = source_summary[0]
 
-        kwargs_json = kwargs_best_to_json_pixelated_npy(
-            kwargs_best, band_dir, band['type_list'], save_pixel_arrays=False,
-        )
-        with open(os.path.join(band_dir, f'kwargs_result_batch_{batch_index}.json'), 'w') as handle:
-            json.dump(kwargs_json, handle, indent=4, default=json_serializer)
-
         component_medians = evaluate_mcmc_component_medians(
             band['prob_model'], band_samples,
-        )
-        chi2 = float(np.sum(
-            ((component_medians['total'] - band['image_data']) / band['noise_map']) ** 2
-        ))
-        save_hmc_diagnostics(
-            band_samples, int(args.num_chains_hmc_numpyro), band_dir,
-            f'batch_{batch_index}', band['prob_model'],
-        )
-        generate_run_plots(
-            lens_image=band['lens_image'], kwargs_best=kwargs_best,
-            image_data=band['image_data'], noise_map=band['noise_map'],
-            psf_data=band['psf_data'], pixel_scale=args.pixel_scale,
-            save_path=band_dir, sampler='hmc', best_fit_model=component_medians['total'],
-            chi2=chi2, reduced_chi2=None, extra=None, mcmc_samples=None,
-            flat_samples=None, prob_model=band['prob_model'], init_params=None,
-            point_source_type_list=band['type_list']['point_source_type_list'],
-            point_source_params_list=band['param_list']['point_source_params_list'],
-            regul_model=None, param_list=band['param_list'],
-            residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
-            mcmc_component_medians=component_medians,
+            active_sites=band_samples.keys(),
+            kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
         )
         combined_results.append({
             'name': band['name'],
@@ -528,6 +500,10 @@ def _save_multiband_hmc_batch_diagnostics(
         combined_results, batch_root,
         residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
         output_filename=f'multiband_composite_batch_{batch_index}.png',
+    )
+    save_hmc_diagnostics(
+        samples, int(args.num_chains_hmc_numpyro), batch_root,
+        f'batch_{batch_index}', prob_model,
     )
     print(f'[hmc] Saved multi-band diagnostics for batch {batch_index + 1} to {batch_root}')
 
@@ -899,9 +875,8 @@ def build_and_run_multiband(config_path=None):
         elif sampler == 'hmc':
             batch_callback = lambda samples, batch_index: _save_multiband_hmc_batch_diagnostics(
                 samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
-                evaluate_mcmc_component_medians, evaluate_mcmc_source_pixels_summary,
-                _save_hmc_pixels_wn_summary,
-                plot_multiband_composite, generate_run_plots,
+                prob_model, evaluate_mcmc_component_medians,
+                evaluate_mcmc_source_pixels_summary, plot_multiband_composite,
             )
             mcmc_samples, best_params, extra = run_hmc(
                 prob_model, args, init_params, run_init_path,
@@ -997,6 +972,8 @@ def build_and_run_multiband(config_path=None):
                 try:
                     component_medians = evaluate_mcmc_component_medians(
                         band['prob_model'], band_samples,
+                        active_sites=band_samples.keys(),
+                        kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
                     )
                 except Exception as error:
                     print(f"[plots] HMC component medians for {band['name']} skipped: {error}")
