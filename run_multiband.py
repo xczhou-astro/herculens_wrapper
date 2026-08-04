@@ -140,7 +140,19 @@ def _load_joint_initialization(
     )
     for key, value in mass_params.items():
         if key in init_params:
-            init_params[key] = value
+            value_array = jnp.asarray(value)
+            expected_array = jnp.asarray(init_params[key])
+            if value_array.shape != expected_array.shape:
+                if value_array.size == expected_array.size == 1:
+                    value_array = jnp.reshape(value_array, expected_array.shape)
+                elif require_pixelated_svi:
+                    raise ValueError(
+                        f'Multiband HMC warm-start shape mismatch for {key}: '
+                        f'saved={value_array.shape}, expected={expected_array.shape}.'
+                    )
+                else:
+                    continue
+            init_params[key] = value_array
 
     for band, band_model in zip(bands, prob_model.band_models):
         run_dir = os.path.join(init_root, band['name'])
@@ -176,8 +188,22 @@ def _load_joint_initialization(
                 })
         prefix = f"{band['site_prefix']}/"
         for key, value in band_params.items():
-            if prefix + key in init_params:
-                init_params[prefix + key] = value
+            joint_key = prefix + key
+            if joint_key not in init_params:
+                continue
+            value_array = jnp.asarray(value)
+            expected_array = jnp.asarray(init_params[joint_key])
+            if value_array.shape != expected_array.shape:
+                if value_array.size == expected_array.size == 1:
+                    value_array = jnp.reshape(value_array, expected_array.shape)
+                elif require_pixelated_svi:
+                    raise ValueError(
+                        f'Multiband HMC warm-start shape mismatch for {band["name"]!r} '
+                        f'site {key}: saved={value_array.shape}, expected={expected_array.shape}.'
+                    )
+                else:
+                    continue
+            init_params[joint_key] = value_array
     print(f'[multiband] Warm-started joint model from {init_root}')
     return init_params
 
