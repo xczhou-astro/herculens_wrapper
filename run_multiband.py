@@ -526,11 +526,17 @@ def build_and_run_multiband(config_path=None):
     composite_log_file = None
     composite_log_stdout = None
     composite_log_stderr = None
-    if args.sampler == 'svi' and configured_n_runs > 1:
-        composite_log_file = open(os.path.join(save_path, 'log.txt'), 'w')
+    root_hmc_logging = args.sampler == 'hmc'
+    if (args.sampler == 'svi' and configured_n_runs > 1) or root_hmc_logging:
+        root_log_path = os.path.join(save_path, 'log.txt')
+        resume_root_log = root_hmc_logging and os.path.isfile(root_log_path)
+        composite_log_file = open(root_log_path, 'a' if resume_root_log else 'w')
         composite_log_stdout = sys.stdout
         composite_log_stderr = sys.stderr
-        composite_log_file.write(f"Start at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        root_log_marker = 'Resume' if resume_root_log else 'Start'
+        composite_log_file.write(
+            f"{root_log_marker} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        )
         composite_log_file.flush()
         sys.stdout = Tee(sys.stdout, composite_log_file)
         sys.stderr = Tee(sys.stderr, composite_log_file)
@@ -713,20 +719,34 @@ def build_and_run_multiband(config_path=None):
                     f'[hmc] Existing run is complete with {completed_draws} draws per chain '
                     f'(requested {requested_draws}); skipping it.'
                 )
+                if composite_log_file is not None:
+                    composite_log_file.write(
+                        f"End at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                    )
+                    composite_log_file.close()
+                    sys.stdout = composite_log_stdout
+                    sys.stderr = composite_log_stderr
                 return base_save_path
             print(
                 f'[hmc] Extending completed run from {completed_draws} to '
                 f'{requested_draws} draws per chain without repeating warm-up.'
             )
-        resume_run = sampler == 'hmc' and os.path.isfile(run_log_path)
-        run_log_file = open(run_log_path, 'a' if resume_run else 'w')
-        original_stdout = sys.stdout
-        original_stderr = sys.stderr
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        run_log_file.write(f"{'Resume' if resume_run else 'Start'} at {timestamp}\n")
-        run_log_file.flush()
-        sys.stdout = Tee(sys.stdout, run_log_file)
-        sys.stderr = Tee(sys.stderr, run_log_file)
+        if root_hmc_logging:
+            # HMC has one run at ``save_path``. Its root log is already
+            # active, so do not reopen the same file or nest a second Tee.
+            run_log_file = composite_log_file
+            original_stdout = None
+            original_stderr = None
+        else:
+            resume_run = sampler == 'hmc' and os.path.isfile(run_log_path)
+            run_log_file = open(run_log_path, 'a' if resume_run else 'w')
+            original_stdout = sys.stdout
+            original_stderr = sys.stderr
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            run_log_file.write(f"{'Resume' if resume_run else 'Start'} at {timestamp}\n")
+            run_log_file.flush()
+            sys.stdout = Tee(sys.stdout, run_log_file)
+            sys.stderr = Tee(sys.stderr, run_log_file)
 
         print(f'\n========================================')
         print(f'Starting multi-band run {run_index} (seed={run_seed}, sampler={sampler!r})')
@@ -1107,10 +1127,12 @@ def build_and_run_multiband(config_path=None):
             print(f'[plots] multiband_composite.png skipped: {error}')
         print(f'[multiband] Run {run_index} complete. Outputs in {run_path}')
         end_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        run_log_file.write(f'End at {end_timestamp}\n')
-        run_log_file.close()
-        sys.stdout = original_stdout
-        sys.stderr = original_stderr
+        if not root_hmc_logging:
+            run_log_file.write(f'End at {end_timestamp}\n')
+            run_log_file.flush()
+            run_log_file.close()
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
         print(f'[multiband] Run {run_index} logged complete at {end_timestamp}')
 
     with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
