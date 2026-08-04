@@ -438,8 +438,8 @@ def build_and_run_multiband(config_path=None):
     if not bool(getattr(args, 'use_multiband', False)):
         raise ValueError('run_multiband.py requires use_multiband=True.')
     band_names = list(getattr(args, 'band_names', []))
-    if len(band_names) < 2:
-        raise ValueError('band_names must contain at least two bands.')
+    if not band_names:
+        raise ValueError('band_names must contain at least one band.')
     save_path = resolve_project_path(args.save_path, config_dir=os.path.dirname(config_path))
     os.makedirs(save_path, exist_ok=True)
     configured_n_runs = int(getattr(args, 'n_runs', 1))
