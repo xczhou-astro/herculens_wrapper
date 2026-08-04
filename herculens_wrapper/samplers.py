@@ -670,7 +670,7 @@ def pixelated_stage_init_from_parametric(params):
     return {k: v for k, v in params.items() if k.startswith(allowed_prefixes)}
 
 
-def run_hmc(prob_model, args, init_params, init_params_path=None):
+def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
     if init_params_path is None:
         raise ValueError("HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
         
@@ -735,13 +735,30 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
     # plt.savefig('debug.png')
 
 
-    # Classify parameter names dynamically
-    vars_pixel = [k for k in init_params.keys() if 'pixels_wn_' in k]
-    vars_power = [k for k in init_params.keys() if k in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid')]
-    vars_lens_light_hmc = [k for k in init_params.keys() if k.startswith('lens_light_')]
-    vars_mass = [k for k in init_params.keys() if k.startswith('lens_') and not k.startswith('lens_light_')]
+    # Band-scoped sites are named ``band_0_F150W/site_name``.  Classify them
+    # from their local name while retaining the full name for NumPyro.
+    def local_site_name(name):
+        return name.rsplit('/', 1)[-1]
+
+    vars_pixel = [k for k in init_params if local_site_name(k).startswith('pixels_wn_')]
+    vars_power = [
+        k for k in init_params
+        if local_site_name(k) in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid')
+    ]
+    vars_lens_light_hmc = [
+        k for k in init_params if local_site_name(k).startswith('lens_light_')
+    ]
+    # Lens mass is deliberately unscoped in the joint multi-band model.
+    vars_mass = [
+        k for k in init_params
+        if '/' not in k and k.startswith('lens_') and not k.startswith('lens_light_')
+    ]
     vars_other = [k for k in init_params.keys() if k not in vars_pixel + vars_power + vars_lens_light_hmc + vars_mass]
     vars_other = [k for k in vars_other if k != 'pixels_source_grid']
+
+    def component_group(name):
+        scope, _, local_name = name.rpartition('/')
+        return scope, int(local_name.rsplit('_', 1)[-1])
     
     print(f"[hmc] Grouped parameters for Gibbs-within-HMC sampling:")
     print(f"  Pixelated source: {vars_pixel}")
@@ -778,8 +795,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         lens_light_by_idx = defaultdict(list)
         for k in vars_lens_light_hmc:
             try:
-                idx = int(k.split('_')[-1])
-                lens_light_by_idx[idx].append(k)
+                lens_light_by_idx[component_group(k)].append(k)
             except ValueError:
                 pass
         for idx, params_group in sorted(lens_light_by_idx.items()):
@@ -789,8 +805,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         lens_mass_by_idx = defaultdict(list)
         for k in vars_mass:
             try:
-                idx = int(k.split('_')[-1])
-                lens_mass_by_idx[idx].append(k)
+                lens_mass_by_idx[component_group(k)].append(k)
             except ValueError:
                 pass
         for idx, params_group in sorted(lens_mass_by_idx.items()):
@@ -815,8 +830,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         lens_light_by_idx = defaultdict(list)
         for k in vars_lens_light_hmc:
             try:
-                idx = int(k.split('_')[-1])
-                lens_light_by_idx[idx].append(k)
+                lens_light_by_idx[component_group(k)].append(k)
             except ValueError:
                 pass
         for idx, params_group in sorted(lens_light_by_idx.items()):
@@ -835,8 +849,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         lens_mass_by_idx = defaultdict(list)
         for k in vars_mass:
             try:
-                idx = int(k.split('_')[-1])
-                lens_mass_by_idx[idx].append(k)
+                lens_mass_by_idx[component_group(k)].append(k)
             except ValueError:
                 pass
         for idx, params_group in sorted(lens_mass_by_idx.items()):
@@ -983,6 +996,16 @@ def run_hmc(prob_model, args, init_params, init_params_path=None):
         except Exception as e:
             print(f"[warning] Failed to save checkpoint pkl: {e}")
             
+        if batch_diagnostics_callback is not None:
+            try:
+                batch_diagnostics_callback(_concatenate_batches(all_samples, num_chains), i)
+            except Exception as e:
+                print(f"[warning] Failed to generate multi-band batch diagnostics: {e}")
+            del mcmc
+            import gc
+            gc.collect()
+            continue
+
         # Generate intermediate diagnostics after each batch (image plane and source plane plots)
         try:
             # 1. Concatenate all samples collected so far

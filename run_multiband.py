@@ -28,6 +28,7 @@ from herculens_wrapper.utils import (
     log_jax_device_layout,
     normalize_run_args_paths,
     resolve_project_path,
+    resolve_init_run_dir,
     run_arguments_namespace,
     Tee,
 )
@@ -91,12 +92,40 @@ def _materialize_pixel_arrays(kwargs, run_dir):
     return result
 
 
+def _validate_pixelated_svi_initialization(init_root, bands):
+    """Require a completed pixelated-SVI run before starting joint HMC."""
+    config_path = os.path.join(init_root, 'config.json')
+    if not os.path.isfile(config_path):
+        raise FileNotFoundError(
+            f'Multiband HMC warm start is missing {config_path!r}; '
+            'select a completed pixelated-SVI run directory.'
+        )
+    with open(config_path) as handle:
+        init_config = json.load(handle)
+    if str(init_config.get('sampler', '')).lower() != 'svi':
+        raise ValueError(
+            'Joint multiband HMC must be initialized from a pixelated SVI run, '
+            f'but {config_path!r} records sampler={init_config.get("sampler")!r}.'
+        )
+    config_bands = init_config.get('bands', {})
+    for band in bands:
+        source_types = config_bands.get(band['name'], {}).get('type_list', {}).get(
+            'source_light_type_list'
+        )
+        if source_types != ['PIXELATED']:
+            raise ValueError(
+                f'Multiband HMC requires a pixelated-SVI warm start for {band["name"]!r}; '
+                f'found source_light_type_list={source_types!r}.'
+            )
+
+
 def _load_joint_initialization(prob_model, bands, init_path, random_seed):
     """Load a prior joint run into constrained multiband sampling sites."""
     from herculens_wrapper.models import kwargs2params
 
     init_params = prob_model.get_sample(jax.random.PRNGKey(random_seed))
     init_root = os.path.abspath(init_path)
+    _validate_pixelated_svi_initialization(init_root, bands)
     shared_path = os.path.join(init_root, 'kwargs_lens_shared.json')
     if not os.path.isfile(shared_path):
         raise FileNotFoundError(f'Multiband HMC warm start is missing {shared_path!r}.')
@@ -124,19 +153,33 @@ def _load_joint_initialization(prob_model, bands, init_path, random_seed):
         ):
             source = kwargs.get('kwargs_source', [{}])[0]
             required = ('pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid')
-            if all(key in source for key in required):
-                band_params.update({
-                    'pixels_wn_source_grid': jnp.asarray(source['pixels_wn']),
-                    'n_source_grid': jnp.asarray(source['n_source_grid']),
-                    'rho_source_grid': jnp.asarray(source['rho_source_grid']),
-                    'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
-                })
+            missing = [key for key in required if key not in source]
+            if missing:
+                raise ValueError(
+                    f'Pixelated SVI warm start for {band["name"]!r} is missing {missing}. '
+                    'Expected saved pixels_wn and Matérn parameters.'
+                )
+            band_params.update({
+                'pixels_wn_source_grid': jnp.asarray(source['pixels_wn']),
+                'n_source_grid': jnp.asarray(source['n_source_grid']),
+                'rho_source_grid': jnp.asarray(source['rho_source_grid']),
+                'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
+            })
         prefix = f"{band['site_prefix']}/"
         for key, value in band_params.items():
             if prefix + key in init_params:
                 init_params[prefix + key] = value
     print(f'[multiband] Warm-started joint model from {init_root}')
     return init_params
+
+
+def _hmc_run_finished(log_path):
+    """Whether a prior HMC invocation reached its normal completion marker."""
+    if not os.path.isfile(log_path):
+        return False
+    with open(log_path) as handle:
+        lines = [line.strip() for line in handle if line.strip()]
+    return bool(lines and lines[-1].lower().startswith('end at'))
 
 
 def _load_fixed_light_kwargs(init_path, bands):
@@ -247,6 +290,84 @@ def _joint_log_likelihood(prob_model, params):
     return float(sum(np.sum(np.asarray(term)) for term in terms_by_site.values()))
 
 
+def _save_multiband_hmc_batch_diagnostics(
+    samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
+    evaluate_mcmc_component_medians, evaluate_mcmc_source_pixels_summary,
+    save_hmc_pixels_wn_summary,
+    plot_multiband_composite, generate_run_plots,
+):
+    """Write checkpoint diagnostics by projecting joint samples into each band."""
+    batch_root = os.path.join(run_path, 'diagnostics', f'batch_{batch_index}')
+    os.makedirs(batch_root, exist_ok=True)
+    combined_results = []
+    for band in bands:
+        band_dir = os.path.join(batch_root, band['name'])
+        os.makedirs(band_dir, exist_ok=True)
+        band_samples = _band_hmc_samples(samples, band)
+        save_hmc_pixels_wn_summary(
+            band_samples, band_dir,
+            plot_filename=f'source_pixels_wn_median_uncertainties_batch_{batch_index}.png',
+        )
+        median_params = {
+            key: np.median(np.asarray(value), axis=0)
+            for key, value in band_samples.items()
+        }
+        kwargs_best = band['prob_model'].params2kwargs(median_params)
+        source_summary = evaluate_mcmc_source_pixels_summary(
+            band['prob_model'], band_samples, band_dir, save_npy=False,
+        )
+        if source_summary is not None and kwargs_best.get('kwargs_source'):
+            kwargs_best['kwargs_source'][0]['pixels'] = source_summary[0]
+
+        kwargs_json = kwargs_best_to_json_pixelated_npy(
+            kwargs_best, band_dir, band['type_list'], save_pixel_arrays=False,
+        )
+        with open(os.path.join(band_dir, f'kwargs_result_batch_{batch_index}.json'), 'w') as handle:
+            json.dump(kwargs_json, handle, indent=4, default=json_serializer)
+
+        component_medians = evaluate_mcmc_component_medians(
+            band['prob_model'], band_samples,
+        )
+        chi2 = float(np.sum(
+            ((component_medians['total'] - band['image_data']) / band['noise_map']) ** 2
+        ))
+        save_hmc_diagnostics(
+            band_samples, int(args.num_chains_hmc_numpyro), band_dir,
+            f'batch_{batch_index}', band['prob_model'],
+        )
+        generate_run_plots(
+            lens_image=band['lens_image'], kwargs_best=kwargs_best,
+            image_data=band['image_data'], noise_map=band['noise_map'],
+            psf_data=band['psf_data'], pixel_scale=args.pixel_scale,
+            save_path=band_dir, sampler='hmc', best_fit_model=component_medians['total'],
+            chi2=chi2, reduced_chi2=None, extra=None, mcmc_samples=None,
+            flat_samples=None, prob_model=band['prob_model'], init_params=None,
+            point_source_type_list=band['type_list']['point_source_type_list'],
+            point_source_params_list=band['param_list']['point_source_params_list'],
+            regul_model=None, param_list=band['param_list'],
+            residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+            mcmc_component_medians=component_medians,
+        )
+        combined_results.append({
+            'name': band['name'],
+            'lens_image': band['lens_image'],
+            'kwargs_result': kwargs_best,
+            'image_data': band['image_data'],
+            'noise_map': band['noise_map'],
+            'pixel_scale': args.pixel_scale,
+            'model_lens_light': component_medians['lens_light'],
+            'model_lensed_source': component_medians['source'],
+            'model_total': component_medians['total'],
+        })
+
+    plot_multiband_composite(
+        combined_results, batch_root,
+        residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+        output_filename=f'multiband_composite_batch_{batch_index}.png',
+    )
+    print(f'[hmc] Saved multi-band diagnostics for batch {batch_index + 1} to {batch_root}')
+
+
 def build_and_run_multiband(config_path=None):
     if config_path is None:
         config_path = _resolve_single_config_spec(sys.argv[1] if len(sys.argv) > 1 else 'config.py')
@@ -286,6 +407,7 @@ def build_and_run_multiband(config_path=None):
     from herculens_wrapper.samplers import (
         evaluate_mcmc_component_medians,
         evaluate_mcmc_source_pixels_summary,
+        _save_hmc_pixels_wn_summary,
         run_hmc,
         run_optax,
         run_svi,
@@ -410,6 +532,13 @@ def build_and_run_multiband(config_path=None):
         n_runs = 1
     base_random_seed = int(args.random_seed)
     init_root = getattr(args, 'init_params_path', None)
+    if sampler == 'hmc':
+        if not init_root:
+            raise ValueError('Joint multiband HMC requires init_params_path from a pixelated SVI run.')
+        init_root = resolve_init_run_dir(init_root, config_dir=os.path.dirname(config_path))
+        if not os.path.isdir(init_root):
+            raise FileNotFoundError(f'Multiband HMC initialization path does not exist: {init_root!r}')
+        print(f'[multiband] Selected pixelated-SVI warm start: {init_root}')
     comparison = {}
     if sampler == 'svi' and n_runs > 1:
         print(f'Starting joint SVI multi-run in: {base_save_path} (n_runs={n_runs})')
@@ -423,6 +552,9 @@ def build_and_run_multiband(config_path=None):
         run_seed = base_random_seed + run_index
         os.makedirs(run_path, exist_ok=True)
         run_log_path = os.path.join(run_path, 'log.txt')
+        if sampler == 'hmc' and _hmc_run_finished(run_log_path):
+            print(f'[hmc] Existing run is complete ({run_log_path}); skipping it.')
+            return base_save_path
         resume_run = sampler == 'hmc' and os.path.isfile(run_log_path)
         run_log_file = open(run_log_path, 'a' if resume_run else 'w')
         original_stdout = sys.stdout
@@ -553,9 +685,16 @@ def build_and_run_multiband(config_path=None):
         elif sampler == 'optax':
             best_params, extra = run_optax(prob_model, args, init_params)
         elif sampler == 'hmc':
-            if not run_init_path:
-                raise ValueError('Joint multiband HMC requires init_params_path from a joint SVI/Optax run.')
-            mcmc_samples, best_params, extra = run_hmc(prob_model, args, init_params, run_init_path)
+            batch_callback = lambda samples, batch_index: _save_multiband_hmc_batch_diagnostics(
+                samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
+                evaluate_mcmc_component_medians, evaluate_mcmc_source_pixels_summary,
+                _save_hmc_pixels_wn_summary,
+                plot_multiband_composite, generate_run_plots,
+            )
+            mcmc_samples, best_params, extra = run_hmc(
+                prob_model, args, init_params, run_init_path,
+                batch_diagnostics_callback=batch_callback,
+            )
             np.savez_compressed(os.path.join(run_path, 'hmc_samples.npz'), **{
                 key: np.asarray(value) for key, value in mcmc_samples.items()
             })
@@ -637,6 +776,7 @@ def build_and_run_multiband(config_path=None):
             band_samples = _band_hmc_samples(mcmc_samples, band) if mcmc_samples is not None else None
             component_medians = None
             if band_samples is not None:
+                _save_hmc_pixels_wn_summary(band_samples, band['save_path'])
                 source_summary = evaluate_mcmc_source_pixels_summary(
                     band['prob_model'], band_samples, band['save_path'], save_npy=True,
                 )
@@ -752,6 +892,8 @@ def build_and_run_multiband(config_path=None):
             'N_PARAMS_FITTED': int(num_params),
             'N_PARAMS_FREE': num_params_free,
             'LOG_LIKELIHOOD': total_log_likelihood,
+            'POSTERIOR_MEDIAN_PARAMETER_LOG_LIKELIHOOD': total_log_likelihood,
+            'POSTERIOR_MEDIAN_MODEL_CHI2': float(total_chi2),
         }
         with open(os.path.join(run_path, 'metrics.json'), 'w') as handle:
             json.dump(metrics, handle, indent=4, default=json_serializer)
@@ -763,7 +905,8 @@ def build_and_run_multiband(config_path=None):
         print(
             f"Joint reduced chi^2: {metrics['REDUCED_CHI2']:.4f} "
             f"(chi^2={metrics['CHI2']:.2f}, dof={metrics['CHI2_DOF']}); "
-            f"BIC: {metrics['BIC']:.2f}, log-likelihood: {total_log_likelihood:.2f}"
+            f"BIC: {metrics['BIC']:.2f}, "
+            f"parameter-median log-likelihood: {total_log_likelihood:.2f}"
         )
         try:
             plot_multiband_composite(
@@ -783,6 +926,25 @@ def build_and_run_multiband(config_path=None):
 
     with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
         json.dump(comparison, handle, indent=4, default=json_serializer)
+    if comparison:
+        comparison_path = os.path.join(base_save_path, 'comparison.json')
+        print('\n' + '=' * 40)
+        print('All runs completed.')
+        print(f'Comparison summary saved to {comparison_path}')
+        print('=' * 40)
+        for run_name, run_info in comparison.items():
+            metrics = run_info.get('metrics', {})
+            if not metrics:
+                continue
+            print(
+                f"{run_name} (seed={run_info.get('seed')}): "
+                f"log-likelihood={metrics.get('LOG_LIKELIHOOD', float('nan')):.2f}, "
+                f"chi2={metrics.get('CHI2', float('nan')):.2f}, "
+                f"chi2/N_pix^2={metrics.get('CHI2_NPIX2', float('nan')):.4f}, "
+                f"reduced_chi2={metrics.get('REDUCED_CHI2', float('nan')):.4f}, "
+                f"BIC={metrics.get('BIC', float('nan')):.2f}"
+            )
+        print('=' * 40)
     if composite_log_file is not None:
         composite_end = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         composite_log_file.write(f'End at {composite_end}\n')
