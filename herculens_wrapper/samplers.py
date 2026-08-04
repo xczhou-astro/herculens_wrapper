@@ -284,12 +284,24 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
 
         # Format the data for arviz: dict of shape (num_chains, samples_per_chain)
         arviz_data = {}
+        arviz_names = {}
         for k in ordered_keys:
+            # ArviZ/DataTree treats '/' as a path separator.  NumPyro scopes
+            # multi-band sites with '/', so use a reversible display-safe name
+            # only in the temporary InferenceData object.
+            arviz_key = k.replace('/', '__')
+            if arviz_key in arviz_data:
+                raise ValueError(
+                    f"ArviZ diagnostic name collision after sanitizing {k!r}."
+                )
             val = np.asarray(samples[k])
             total_samples = val.shape[0]
             samples_per_chain = total_samples // num_chains
             if samples_per_chain > 0:
-                arviz_data[k] = val.reshape((num_chains, samples_per_chain) + val.shape[1:])
+                arviz_data[arviz_key] = val.reshape(
+                    (num_chains, samples_per_chain) + val.shape[1:]
+                )
+                arviz_names[k] = arviz_key
 
         if not arviz_data:
             return
@@ -311,7 +323,7 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         try:
             axes = az.plot_trace_dist(
                 idata,
-                var_names=ordered_keys,
+                var_names=[arviz_names[k] for k in ordered_keys if k in arviz_names],
                 aes={'color': ['chain']},
                 visuals={'trace': {'linestyle': '-'}, 'dist': {'linestyle': '-'}},
             )
