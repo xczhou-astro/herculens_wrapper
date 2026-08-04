@@ -211,7 +211,7 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
     """Optimize joint source parameters with the prior mass and lens light fixed."""
     if (
         args.sampler != 'svi'
-        or getattr(args, 'pixelated_init_method', None) != 'svi_warmup'
+        or getattr(args, 'pixelated_init_match', 'image') != 'image'
         or not init_path
         or not any(band['type_list'].get('source_light_type_list') == ['PIXELATED'] for band in bands)
     ):
@@ -241,6 +241,57 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
     for key, value in best_warmup.items():
         if key in init_params:
             init_params[key] = value
+    return init_params
+
+
+def _initialize_pixelated_sources_from_previous_source(bands, args, init_params, init_path, seed):
+    """Fit each pixelated Matérn source initialization to a prior analytic source."""
+    from herculens_wrapper.models import PowerSpectrum, _project_analytic_kwargs_to_pixel_source
+
+    init_root = os.path.abspath(init_path)
+    max_iterations = int(getattr(args, 'num_iterations_warmup', 0))
+    if max_iterations <= 0:
+        print('[multiband:source-init] num_iterations_warmup <= 0; retaining prior pixelated draws.')
+        return init_params
+
+    for band in bands:
+        if (
+            band['type_list'].get('source_light_type_list') != ['PIXELATED']
+            or getattr(band['prob_model'], 'prior_type', 'matern') != 'matern'
+        ):
+            continue
+        result_path = os.path.join(init_root, band['name'], 'kwargs_result.json')
+        with open(result_path) as handle:
+            prior_kwargs = _materialize_pixel_arrays(
+                json.load(handle), os.path.dirname(result_path),
+            )
+        analytic_source = prior_kwargs.get('kwargs_source', [])
+        if not analytic_source or 'pixels' in analytic_source[0]:
+            raise ValueError(
+                f"pixelated_init_match='source' requires an analytic source in the prior "
+                f"run for {band['name']!r}. Use pixelated_init_match='image' otherwise."
+            )
+
+        ny, nx = band['lens_image'].SourceModel.pixel_grid.num_pixel_axes
+        k_values = PowerSpectrum.K_grid((ny, nx)).k
+        pixelated_prior = band['param_list']['source_light_params_list'][0].get(
+            'pixelated_prior', {}
+        )
+        source_image = _project_analytic_kwargs_to_pixel_source(
+            band['lens_image'], analytic_source,
+        )
+        print(
+            f"[multiband:source-init] Fitting {band['name']} Matérn source "
+            f"to the prior analytic source ({max_iterations} iterations)."
+        )
+        fitted = PowerSpectrum.fit_power_spectrum_init(
+            source_image, k_values, pixelated_prior,
+            seed=seed + 7919, max_iterations=max_iterations,
+        )
+        prefix = f"{band['site_prefix']}/"
+        for key, value in fitted.items():
+            if prefix + key in init_params:
+                init_params[prefix + key] = jnp.asarray(value)
     return init_params
 
 
@@ -624,9 +675,23 @@ def build_and_run_multiband(config_path=None):
             }, handle, indent=4, default=json_serializer)
         mcmc_samples = None
         if sampler == 'svi':
-            init_params = _run_pixelated_svi_warmup(
-                prob_model, bands, args, init_params, run_init_path,
-            )
+            pixelated_match = str(getattr(args, 'pixelated_init_match', 'image')).lower()
+            if pixelated_match not in ('image', 'source'):
+                raise ValueError("pixelated_init_match must be 'image' or 'source'.")
+            if pixelated_match == 'image':
+                init_params = _run_pixelated_svi_warmup(
+                    prob_model, bands, args, init_params, run_init_path,
+                )
+            elif (
+                run_init_path
+                and any(
+                    band['type_list'].get('source_light_type_list') == ['PIXELATED']
+                    for band in bands
+                )
+            ):
+                init_params = _initialize_pixelated_sources_from_previous_source(
+                    bands, args, init_params, run_init_path, run_seed,
+                )
 
         init_log_prob = float(np.sum(prob_model.log_prob(init_params, constrained=True)))
         init_log_likelihood = _joint_log_likelihood(prob_model, init_params)

@@ -601,21 +601,17 @@ def build_and_run(config_path=None):
             mcmc_samples = None
             flat_samples = None
 
-            # --- Pixelated Source Initialization Method ('power_init' | 'svi_warmup' | 'none') ---
-            init_method = getattr(run_args, 'pixelated_init_method', None)
-            if init_method is None:
-                if bool(getattr(run_args, 'run_power_init', False)):
-                    init_method = 'power_init'
-                elif int(getattr(run_args, 'num_iterations_warmup', 0)) > 0 and run_args.sampler == 'svi':
-                    init_method = 'svi_warmup'
-                else:
-                    init_method = 'none'
+            # ``source`` matches the prior analytic source; ``image`` fits the
+            # observed image while holding inherited mass and lens light fixed.
+            pixelated_match = str(getattr(run_args, 'pixelated_init_match', 'image')).lower()
+            if pixelated_match not in ('image', 'source'):
+                raise ValueError("pixelated_init_match must be 'image' or 'source'.")
 
             if source_light_type_list == ['PIXELATED'] and run_args.init_params_path and not fix_source_light:
-                if init_method == 'power_init':
+                if pixelated_match == 'source':
                     try:
                         max_power_it = int(getattr(run_args, 'num_iterations_warmup', 2000))
-                        print(f"\n[pixelated-init: power_init] Fitting Matérn power spectrum parameters ({max_power_it} iters) from parametric source...")
+                        print(f"\n[pixelated-init: source] Fitting Matérn parameters ({max_power_it} iters) from the prior analytic source...")
                         ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
                         k_grid = PowerSpectrum.K_grid((ny, nx))
                         pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
@@ -630,11 +626,11 @@ def build_and_run(config_path=None):
                         for param_name, param_value in power_init_values.items():
                             if param_name in init_params:
                                 init_params[param_name] = jnp.asarray(param_value)
-                        print("[pixelated-init: power_init] Power spectrum init complete. Updated init_params with fitted power_init parameters.")
+                        print("[pixelated-init: source] Source-matched initialization complete.")
                     except Exception as e:
-                        print(f"[pixelated-init: power_init] Warning: power_init failed: {e}")
+                        print(f"[pixelated-init: source] Warning: source matching failed: {e}")
 
-                elif init_method == 'svi_warmup' and run_args.sampler == 'svi':
+                elif pixelated_match == 'image' and run_args.sampler == 'svi':
                     max_warmup_it = int(getattr(run_args, 'num_iterations_warmup', 0))
                     if max_warmup_it > 0:
                         try:
@@ -705,10 +701,10 @@ def build_and_run(config_path=None):
                         json.dump(history, f, indent=4)
                     main_losses = history['loss_history']
                     if len(main_losses) > 0:
-                        if init_method != 'none':
-                            print(f"[svi] Initial main joint loss (after pixelated init '{init_method}'): {main_losses[0]:.4f}")
-                        else:
-                            print(f"[svi] Initial SVI loss (when begin): {main_losses[0]:.4f}")
+                        print(
+                            f"[svi] Initial main joint loss (after pixelated "
+                            f"init match '{pixelated_match}'): {main_losses[0]:.4f}"
+                        )
                         print(f"[svi] Final SVI loss (when finish): {main_losses[-1]:.4f}")
                 if 'guide' in extra and 'result' in extra:
                     try:
