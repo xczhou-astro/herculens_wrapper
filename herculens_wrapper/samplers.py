@@ -1082,235 +1082,45 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             gc.collect()
             continue
 
-        # Generate intermediate diagnostics after each batch (image plane and source plane plots)
+        # Generate the compact single-band diagnostic set for this batch.
         try:
-            # 1. Concatenate all samples collected so far
             temp_samples = _concatenate_batches(all_samples, num_chains)
-            
-            # 2. Compute current medians
             temp_medians = {
                 k: np.median(np.asarray(v), axis=0)
                 for k, v in temp_samples.items()
                 if k in active_sites
             }
-            temp_deterministics = median_deterministics_from_samples(temp_samples, active_sites=active_sites)
-            temp_kwargs, temp_deterministics = kwargs_with_deterministics(
-                prob_model,
-                temp_medians,
-                deterministics=temp_deterministics,
-                rng_seed=getattr(args, 'random_seed', 0),
-                active_sites=active_sites,
-            )
-            
-            # 3. Create diagnostics subfolder
+            temp_kwargs = prob_model.params2kwargs(temp_medians)
             diag_dir = os.path.join(save_path, 'diagnostics')
             os.makedirs(diag_dir, exist_ok=True)
-            
-            # Write intermediate kwargs_result JSON to diagnostics
-            try:
-                from herculens_wrapper.utils import kwargs_best_to_json_pixelated_npy, json_serializer
-                
-                type_list = getattr(prob_model, 'type_list', {})
-                temp_kwargs_json = kwargs_best_to_json_pixelated_npy(
-                    temp_kwargs, 
-                    diag_dir, 
-                    type_list, 
-                    save_pixel_arrays=False,
-                    # Uncomment to save diagnostic source-pixel arrays.
-                    # pixels_filename=f'kwargs_source_pixels_batch_{i}.npy',
-                    # pixels_wn_filename=f'kwargs_source_pixels_wn_batch_{i}.npy',
-                )
-                
-                kwargs_json_path = os.path.join(diag_dir, f'kwargs_result_batch_{i}.json')
-                with open(kwargs_json_path, 'w') as f:
-                    json.dump(temp_kwargs_json, f, indent=4, default=json_serializer)
-                print(f"[hmc] Saved intermediate kwargs_result JSON to {kwargs_json_path}")
 
-
-                _save_hmc_pixels_wn_summary(
-                    temp_samples,
-                    diag_dir,
-                    plot_filename=f'source_pixels_wn_median_uncertainties_batch_{i}.png',
-                    median_filename=None,
-                    lower_filename=None,
-                    upper_filename=None,
-                )
-                evaluate_mcmc_source_pixels_summary(prob_model, temp_samples, diag_dir, save_npy=False)
-            except Exception as ex_json:
-                print(f"[warning] Failed to save intermediate kwargs_result JSON: {ex_json}")
-            
-            # 4. Generate plots using current medians
-            from herculens_wrapper.visualizations import (
-                plot_image_plane,
-                plot_ring_model_comparison,
-                plot_source_plane,
-                plot_composite_2x3_panel,
-                display,
+            source_summary = evaluate_mcmc_source_pixels_summary(
+                prob_model, temp_samples, diag_dir, save_npy=False,
             )
-            
+            if source_summary is not None and temp_kwargs.get('kwargs_source'):
+                temp_kwargs['kwargs_source'][0]['pixels'] = source_summary[0]
+
+            from herculens_wrapper.visualizations import plot_composite_2x3_panel
             img_data = getattr(prob_model, 'image_data', None)
             ns_map = getattr(prob_model, 'noise_map', None)
             l_image = getattr(prob_model, 'lens_image', None)
             p_scale = getattr(prob_model, 'pixel_scale', 0.08)
-            
             if img_data is not None and l_image is not None:
-                # Evaluate component medians across all samples accumulated up to current batch
-                try:
-                    temp_comp_medians = evaluate_mcmc_component_medians(prob_model, temp_samples)
-                except Exception as ex_comp:
-                    print(f"[warning] Failed to compute component medians for batch {i}: {ex_comp}")
-                    temp_comp_medians = None
-
-                temp_best_fit = temp_comp_medians['total'] if temp_comp_medians else model_image_from_deterministics(
-                    prob_model, temp_kwargs, temp_deterministics
+                temp_comp_medians = evaluate_mcmc_component_medians(
+                    prob_model, temp_samples,
                 )
-                temp_src = temp_comp_medians['source'] if temp_comp_medians else None
-                temp_lens_light = temp_comp_medians['lens_light'] if temp_comp_medians else None
-                temp_no_lens = temp_comp_medians['no_lens_light'] if temp_comp_medians else None
-                temp_ps = temp_comp_medians.get('point_source') if temp_comp_medians else None
-
-                # Image plane plot
-                try:
-                    plot_image_plane(
-                        l_image,
-                        temp_kwargs,
-                        p_scale,
-                        img_data,
-                        ns_map,
-                        diag_dir,
-                        output_filename=f"image_plane_batch_{i}.png",
-                        model_extended_override=temp_src,
-                        model_lens_light_override=temp_lens_light,
-                        model_composite_override=temp_best_fit,
-                        model_point_sources_override=temp_ps,
-                    )
-                    print(f"[hmc] Saved intermediate image plane visualization to {diag_dir}/image_plane_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate image plane: {ex}")
-                
-                # Composite 2x3 panel plot
-                try:
-                    residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
-                    plot_composite_2x3_panel(
-                        l_image,
-                        temp_kwargs,
-                        p_scale,
-                        img_data,
-                        ns_map,
-                        diag_dir,
-                        residual_vis_max=residual_vis_max,
-                        output_filename=f"composite_batch_{i}.png",
-                        model_extended_override=temp_src,
-                        model_lens_light_override=temp_lens_light,
-                        model_composite_override=temp_best_fit,
-                    )
-                    print(f"[hmc] Saved intermediate composite 2x3 visualization to {diag_dir}/composite_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate composite 2x3 panel: {ex}")
-
-                # Best fit model plots (linear and log)
-                try:
-                    chi2 = float(np.sum(((temp_best_fit - img_data) / ns_map) ** 2))
-                    mask = getattr(l_image, 'source_arc_mask', None)
-                    if mask is not None:
-                        mask = np.asarray(mask)
-                    residual_vis_max = getattr(args, 'residual_vis_max', 0.0)
-                    
-                    display(
-                        [temp_best_fit, img_data, (temp_best_fit - img_data) / ns_map],
-                        titles=[
-                            'Best fit model',
-                            'Image data',
-                            f'Residuals (chi^2 = {chi2:.2f})',
-                        ],
-                        pixel_scale=p_scale,
-                        savefilename=os.path.join(diag_dir, f"best_fit_model_linear_batch_{i}.png"),
-                        plot_scale='linear',
-                        contour_mask=mask,
-                        residual_vis_max=residual_vis_max,
-                    )
-                    print(f"[hmc] Saved intermediate best fit model (linear) visualization to {diag_dir}/best_fit_model_linear_batch_{i}.png")
-                    
-                    display(
-                        [temp_best_fit, img_data, (temp_best_fit - img_data) / ns_map],
-                        titles=[
-                            'Best fit model',
-                            'Image data',
-                            f'Residuals (chi^2 = {chi2:.2f})',
-                        ],
-                        pixel_scale=p_scale,
-                        savefilename=os.path.join(diag_dir, f"best_fit_model_log_batch_{i}.png"),
-                        plot_scale='log',
-                        contour_mask=mask,
-                        residual_vis_max=residual_vis_max,
-                    )
-                    print(f"[hmc] Saved intermediate best fit model (log) visualization to {diag_dir}/best_fit_model_log_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate best fit model: {ex}")
-
-                # Ring-focused model/data comparison after lens-light subtraction
-                try:
-                    plot_ring_model_comparison(
-                        l_image,
-                        temp_kwargs,
-                        p_scale,
-                        img_data,
-                        ns_map,
-                        diag_dir,
-                        plot_scale='linear',
-                        residual_vis_max=residual_vis_max,
-                        output_filename=f"ring_model_comparison_linear_batch_{i}.png",
-                        model_no_lens_light_override=temp_no_lens,
-                        model_lens_light_override=temp_lens_light,
-                    )
-                    print(f"[hmc] Saved intermediate ring comparison (linear) visualization to {diag_dir}/ring_model_comparison_linear_batch_{i}.png")
-
-                    plot_ring_model_comparison(
-                        l_image,
-                        temp_kwargs,
-                        p_scale,
-                        img_data,
-                        ns_map,
-                        diag_dir,
-                        plot_scale='log',
-                        residual_vis_max=residual_vis_max,
-                        output_filename=f"ring_model_comparison_log_batch_{i}.png",
-                        model_no_lens_light_override=temp_no_lens,
-                        model_lens_light_override=temp_lens_light,
-                    )
-                    print(f"[hmc] Saved intermediate ring comparison (log) visualization to {diag_dir}/ring_model_comparison_log_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate ring comparison: {ex}")
-
-                
-                # Source plane plot (linear)
-                try:
-                    plot_source_plane(
-                        l_image,
-                        temp_kwargs,
-                        diag_dir,
-                        plot_scale='linear',
-                        output_filename=f"source_plane_linear_batch_{i}.png",
-                    )
-                    print(f"[hmc] Saved intermediate source plane (linear) visualization to {diag_dir}/source_plane_linear_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate source plane linear: {ex}")
-                    
-                # Source plane plot (log)
-                try:
-                    plot_source_plane(
-                        l_image,
-                        temp_kwargs,
-                        diag_dir,
-                        plot_scale='log',
-                        output_filename=f"source_plane_log_batch_{i}.png",
-                    )
-                    print(f"[hmc] Saved intermediate source plane (log) visualization to {diag_dir}/source_plane_log_batch_{i}.png")
-                except Exception as ex:
-                    print(f"[warning] Failed to plot intermediate source plane log: {ex}")
-                
-                # Save ArviZ diagnostics for this batch
-                save_hmc_diagnostics(temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model)
+                plot_composite_2x3_panel(
+                    l_image, temp_kwargs, p_scale, img_data, ns_map, diag_dir,
+                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                    output_filename=f"composite_batch_{i}.png",
+                    model_extended_override=temp_comp_medians['source'],
+                    model_lens_light_override=temp_comp_medians['lens_light'],
+                    model_composite_override=temp_comp_medians['total'],
+                )
+                print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
+            save_hmc_diagnostics(
+                temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
+            )
         except Exception as e:
             print(f"[warning] Failed to generate intermediate diagnostics: {e}")
             
