@@ -110,6 +110,8 @@ def plot_input_data(
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
+    psf_ny, psf_nx = psf_data.shape
+    psf_extent = _image_extent(psf_ny, psf_nx, pixel_scale)
 
     title_suffix = f" (bkg offset: {background_offset:.4f})" if background_offset != 0.0 else ""
 
@@ -151,10 +153,10 @@ def plot_input_data(
     axes[1].set_ylabel('arcsec')
     plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty')
 
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight')
+    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight', extent=psf_extent)
     axes[2].set_title('PSF kernel')
-    axes[2].set_xlabel('pixel')
-    axes[2].set_ylabel('pixel')
+    axes[2].set_xlabel('arcsec')
+    axes[2].set_ylabel('arcsec')
     plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value')
 
     plt.tight_layout()
@@ -201,10 +203,12 @@ def plot_input_data(
     plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty (log scale)')
 
     norm_psf, _ = _norm_from_plot_scale('log', psf_data)
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight', norm=norm_psf)
+    im2 = axes[2].imshow(
+        psf_data, origin='lower', cmap='twilight', extent=psf_extent, norm=norm_psf,
+    )
     axes[2].set_title('PSF kernel (log)')
-    axes[2].set_xlabel('pixel')
-    axes[2].set_ylabel('pixel')
+    axes[2].set_xlabel('arcsec')
+    axes[2].set_ylabel('arcsec')
     plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value (log scale)')
 
     plt.tight_layout()
