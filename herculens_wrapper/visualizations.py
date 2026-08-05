@@ -1194,7 +1194,15 @@ def _get_param_order(param_list):
     return order
 
 
-def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=None, filename='corner_traced_params.png', param_list=None):
+def plot_corner_traced_params(
+    samples,
+    save_path,
+    max_samples=15_000,
+    exclude=None,
+    filename='corner_traced_params.png',
+    param_list=None,
+    site_order=None,
+):
     if corner is None:
         print(f'[plots] corner package not installed; skipping {filename}')
         return
@@ -1205,7 +1213,7 @@ def plot_corner_traced_params(samples, save_path, max_samples=15_000, exclude=No
         print(f"[plots] MGE detected, excluding from corner plot: {sorted(list(mge_excludes))}")
         exclude.update(mge_excludes)
 
-    desired_order = _get_param_order(param_list)
+    desired_order = list(site_order) if site_order is not None else _get_param_order(param_list)
     order_map = {name: idx for idx, name in enumerate(desired_order)}
 
     def key_fn(name):

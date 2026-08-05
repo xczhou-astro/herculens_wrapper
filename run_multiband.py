@@ -566,6 +566,8 @@ def build_and_run_multiband(config_path=None):
         plot_multiband_composite,
         plot_multiband_source_reconstructions,
         plot_loss_curve,
+        plot_mass_and_convergence,
+        save_lens_mass_ellipticity_summary,
     )
 
     lens_mass_config = getattr(config_module, 'lens_mass_config', empty_config)
@@ -965,7 +967,7 @@ def build_and_run_multiband(config_path=None):
                     posterior_samples,
                     run_path,
                     filename='corner_multiband.png',
-                    param_list=None,
+                    site_order=prob_model.posterior_site_order(),
                 )
             except Exception as error:
                 print(f'[plots] corner_multiband.png skipped: {error}')
@@ -1125,6 +1127,21 @@ def build_and_run_multiband(config_path=None):
             )
         except Exception as error:
             print(f'[plots] multiband_composite.png skipped: {error}')
+        if sampler == 'hmc':
+            # Lens mass is shared, so save this final mass-only diagnostic once
+            # at the joint result root rather than duplicating it per band.
+            shared_mass_result = {'kwargs_lens': shared_lens}
+            try:
+                mass_summary = save_lens_mass_ellipticity_summary(
+                    bands[0]['lens_image'], shared_mass_result, run_path,
+                )
+                plot_mass_and_convergence(
+                    bands[0]['lens_image'], shared_mass_result,
+                    args.pixel_scale, run_path, mass_summary,
+                )
+                print('[plots] mass_profile_convergence.png')
+            except Exception as error:
+                print(f'[plots] joint mass-profile diagnostics skipped: {error}')
         print(f'[multiband] Run {run_index} complete. Outputs in {run_path}')
         end_timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         if not root_hmc_logging:

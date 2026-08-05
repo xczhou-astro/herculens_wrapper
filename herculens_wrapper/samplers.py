@@ -267,9 +267,15 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         if not target_keys:
             return
 
-        # Sort the target keys following the order defined in the mass configuration if available
+        # Joint multi-band models provide their complete configured order.
+        # Single-band models retain the existing mass-config ordering.
         ordered_keys = []
-        if prob_model is not None and hasattr(prob_model, 'param_list'):
+        if prob_model is not None and hasattr(prob_model, 'posterior_site_order'):
+            ordered_keys.extend(
+                key for key in prob_model.posterior_site_order()
+                if key in target_keys
+            )
+        elif prob_model is not None and hasattr(prob_model, 'param_list'):
             lens_mass_params_list = prob_model.param_list.get('lens_mass_params_list', [])
             for i, mass_profile in enumerate(lens_mass_params_list):
                 for param_name in mass_profile.keys():

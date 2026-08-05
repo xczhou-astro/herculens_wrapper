@@ -69,6 +69,43 @@ def create_multiband_prob_model(
             kwargs_lens.append(kwargs)
         return kwargs_lens
 
+    def posterior_site_order():
+        """Return joint latent sites in the configured component order."""
+        order = []
+
+        for index, mass_model in enumerate(lens_mass_params_list):
+            if isinstance(mass_model, dict):
+                order.extend(f'lens_{key}_{index}' for key in mass_model)
+
+        for band in bands:
+            prefix = f"{band['site_prefix']}/"
+            param_list = band['param_list']
+            for index, light_model in enumerate(param_list.get('lens_light_params_list', [])):
+                if isinstance(light_model, dict):
+                    order.extend(
+                        f'{prefix}lens_light_{key}_{index}' for key in light_model
+                    )
+
+            source_types = band['type_list'].get('source_light_type_list', [])
+            if source_types == ['PIXELATED']:
+                order.extend(
+                    f'{prefix}{key}' for key in (
+                        'n_source_grid', 'rho_source_grid',
+                        'sigma_source_grid', 'pixels_wn_source_grid',
+                    )
+                )
+            else:
+                for index, source_model in enumerate(param_list.get('source_light_params_list', [])):
+                    if isinstance(source_model, dict):
+                        order.extend(
+                            f'{prefix}source_{key}_{index}' for key in source_model
+                        )
+
+            for index, point_source_model in enumerate(param_list.get('point_source_params_list', [])):
+                if isinstance(point_source_model, dict):
+                    order.extend(f'{prefix}ps_{key}_{index}' for key in point_source_model)
+        return order
+
     class MultiBandProbModel(NumpyroModel):
         def model(self):
             kwargs_lens = (
@@ -115,6 +152,7 @@ def create_multiband_prob_model(
     model.band_models = band_models
     model.lens_mass_params_list = lens_mass_params_list
     model.lens_mass_type_list = lens_mass_type_list
+    model.posterior_site_order = posterior_site_order
     model.mass_kwargs_from_params = lambda params: mass_kwargs_from_params(
         params, sample=False,
     )
