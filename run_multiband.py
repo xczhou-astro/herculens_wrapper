@@ -458,6 +458,7 @@ def _save_multiband_hmc_batch_diagnostics(
     samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
     prob_model, evaluate_mcmc_component_medians,
     evaluate_mcmc_source_pixels_summary, plot_multiband_composite,
+    hmc_extra_fields=None,
 ):
     """Save the compact joint HMC diagnostic set for one checkpoint."""
     batch_root = os.path.join(run_path, 'diagnostics', f'batch_{batch_index}')
@@ -504,6 +505,7 @@ def _save_multiband_hmc_batch_diagnostics(
     save_hmc_diagnostics(
         samples, int(args.num_chains_hmc_numpyro), batch_root,
         f'batch_{batch_index}', prob_model,
+        hmc_extra_fields=hmc_extra_fields,
     )
     print(f'[hmc] Saved multi-band diagnostics for batch {batch_index + 1} to {batch_root}')
 
@@ -895,10 +897,11 @@ def build_and_run_multiband(config_path=None):
         elif sampler == 'optax':
             best_params, extra = run_optax(prob_model, args, init_params)
         elif sampler == 'hmc':
-            batch_callback = lambda samples, batch_index: _save_multiband_hmc_batch_diagnostics(
+            batch_callback = lambda samples, batch_index, hmc_extra_fields: _save_multiband_hmc_batch_diagnostics(
                 samples, batch_index, bands, args, run_path, save_hmc_diagnostics,
                 prob_model, evaluate_mcmc_component_medians,
                 evaluate_mcmc_source_pixels_summary, plot_multiband_composite,
+                hmc_extra_fields,
             )
             mcmc_samples, best_params, extra = run_hmc(
                 prob_model, args, init_params, run_init_path,
@@ -1022,6 +1025,7 @@ def build_and_run_multiband(config_path=None):
                 save_hmc_diagnostics(
                     band_samples, int(args.num_chains_hmc_numpyro), band['save_path'],
                     'final', band['prob_model'],
+                    hmc_extra_fields=extra.get('hmc_sampler_health'),
                 )
             best_fit_model = band['lens_image'].model(**kwargs_best)
             metrics_model = component_medians.get('total') if component_medians else best_fit_model

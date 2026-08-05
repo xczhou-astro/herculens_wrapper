@@ -9,11 +9,15 @@ from numpyro.infer.initialization import init_to_sample
 from numpyro.infer.mcmc import MCMCKernel
 from numpyro.util import is_prng_key
 
-MultiHMCGibbsState = namedtuple("MultiHMCGibbsState", "z, hmc_states, diverging, rng_key")
+MultiHMCGibbsState = namedtuple(
+    "MultiHMCGibbsState",
+    "z, hmc_states, diverging, accept_prob, num_steps, energy, rng_key",
+)
 """
  - **z** - a dict of the current latent values (all sites)
  - **hmc_states** - list of current :data:`~numpyro.infer.hmc.HMCState`
  - **diverging** - A list of boolean value to indicate whether the current trajectory is diverging.
+ - **accept_prob**, **num_steps**, **energy** - per-inner-kernel NUTS diagnostics.
 """
 
 
@@ -57,7 +61,7 @@ class MultiHMCGibbs(MCMCKernel):
 
     @property
     def default_fields(self):
-        return ("z", "diverging")
+        return ("z", "diverging", "accept_prob", "num_steps", "energy")
 
     def get_diagnostics_str(self, state):
         # show diagnostics for all inner kernels
@@ -98,7 +102,6 @@ class MultiHMCGibbs(MCMCKernel):
                     init_params,
                 )
                 
-            diverging = jnp.zeros(len(self.inner_kernels), dtype=bool)
             if self._prototype_trace is None:
                 self._prototype_trace = trace(
                     substitute(seed(self.model, key_zs[0]), substitute_fn=init_to_sample)
@@ -128,7 +131,15 @@ class MultiHMCGibbs(MCMCKernel):
                 hmc_states.append(hmc_state_kdx)
                 rng_keys.append(hmc_state_kdx.rng_key)
                 z = z | hmc_state_kdx.z
-            return MultiHMCGibbsState(z, hmc_states, diverging, jnp.stack(rng_keys))
+            return MultiHMCGibbsState(
+                z,
+                hmc_states,
+                jnp.stack([state.diverging for state in hmc_states]),
+                jnp.stack([state.accept_prob for state in hmc_states]),
+                jnp.stack([state.num_steps for state in hmc_states]),
+                jnp.stack([state.energy for state in hmc_states]),
+                jnp.stack(rng_keys),
+            )
 
         # not-vectorized
         if is_prng_key(rng_key):
@@ -154,6 +165,9 @@ class MultiHMCGibbs(MCMCKernel):
         z = state.z
         hmc_states = []
         diverging = []
+        accept_prob = []
+        num_steps = []
+        energy = []
         rng_keys = []
         for hmc_state, kernel in zip(state.hmc_states, self.inner_kernels):
             # convert z to constrained space for conditioning
@@ -183,10 +197,21 @@ class MultiHMCGibbs(MCMCKernel):
             )
             hmc_states.append(hmc_state)
             diverging.append(hmc_state.diverging)
+            accept_prob.append(hmc_state.accept_prob)
+            num_steps.append(hmc_state.num_steps)
+            energy.append(hmc_state.energy)
             rng_keys.append(hmc_state.rng_key)
             # update new z values (unconstrained space)
             z = z | hmc_state.z
-        return MultiHMCGibbsState(z, hmc_states, jnp.stack(diverging), jnp.stack(rng_keys))
+        return MultiHMCGibbsState(
+            z,
+            hmc_states,
+            jnp.stack(diverging),
+            jnp.stack(accept_prob),
+            jnp.stack(num_steps),
+            jnp.stack(energy),
+            jnp.stack(rng_keys),
+        )
 
     def sample(self, state, model_args, model_kwargs):
         return self._sample_fn(state, model_args, model_kwargs)

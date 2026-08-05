@@ -242,7 +242,106 @@ def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=500):
 
 
 
-def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=None):
+def _hmc_health_report(extra_fields, num_chains, max_tree_depth=10):
+    """Summarize NUTS health fields collected by NumPyro MCMC."""
+    if not extra_fields:
+        return (
+            'HMC sampler health\n'
+            'No sampler-health fields were collected for these draws.\n'
+        )
+
+    fields = {
+        key: np.asarray(value)
+        for key, value in extra_fields.items()
+        if key in ('diverging', 'accept_prob', 'num_steps', 'energy')
+    }
+    if not fields:
+        return (
+            'HMC sampler health\n'
+            'No divergence, acceptance, tree-depth, or energy fields are available.\n'
+        )
+
+    first = next(iter(fields.values()))
+    if first.shape[0] % num_chains:
+        return 'HMC sampler health\nInvalid chain layout; health metrics were skipped.\n'
+    draws_per_chain = first.shape[0] // num_chains
+    grouped = {
+        key: value.reshape((num_chains, draws_per_chain) + value.shape[1:])
+        for key, value in fields.items()
+    }
+    trailing_shape = first.shape[1:]
+    n_blocks = int(np.prod(trailing_shape)) if trailing_shape else 1
+    max_steps = 2 ** int(max_tree_depth) - 1
+    lines = [
+        'HMC sampler health',
+        f'draws_per_chain: {draws_per_chain}',
+        'Interpretation:',
+        '  divergences: require 0; any nonzero value needs investigation.',
+        '  acceptance probability: values near the configured target are normal; persistently <0.6 is concerning.',
+        f'  tree-depth saturation: require 0 at the configured max_tree_depth={max_tree_depth}.',
+        '  BFMI: prefer >0.3 per chain; lower values indicate poor energy exploration.',
+    ]
+
+    for block in range(n_blocks):
+        label = 'joint_nuts' if n_blocks == 1 else f'gibbs_block_{block}'
+        lines.append(f'[{label}]')
+        index = np.unravel_index(block, trailing_shape) if trailing_shape else ()
+
+        def select(name):
+            if name not in grouped:
+                return None
+            values = grouped[name]
+            return values[(slice(None), slice(None)) + index]
+
+        diverging = select('diverging')
+        if diverging is not None:
+            per_chain = np.sum(diverging.astype(bool), axis=1)
+            lines.append(
+                f'  divergences: total={int(np.sum(per_chain))}, '
+                f'per_chain={per_chain.astype(int).tolist()}'
+            )
+
+        accept_prob = select('accept_prob')
+        if accept_prob is not None:
+            per_chain = np.mean(accept_prob, axis=1)
+            lines.append(
+                f'  acceptance_probability: mean={float(np.mean(per_chain)):.3f}, '
+                f'per_chain={[round(float(value), 3) for value in per_chain]}'
+            )
+
+        num_steps = select('num_steps')
+        if num_steps is not None:
+            saturated = num_steps >= max_steps
+            per_chain = np.sum(saturated, axis=1)
+            max_depth_seen = int(np.ceil(np.log2(max(float(np.max(num_steps)), 1.0) + 1.0)))
+            lines.append(
+                f'  tree_depth: max_seen={max_depth_seen}, saturation_total={int(np.sum(per_chain))}, '
+                f'per_chain={per_chain.astype(int).tolist()}'
+            )
+
+        energy = select('energy')
+        if energy is not None:
+            bfmi = []
+            for values in energy:
+                variance = float(np.var(values))
+                numerator = float(np.mean(np.diff(values) ** 2)) if values.size > 1 else np.nan
+                bfmi.append(numerator / variance if variance > 0 else np.nan)
+            lines.append(
+                f'  BFMI: mean={float(np.nanmean(bfmi)):.3f}, '
+                f'per_chain={[round(float(value), 3) for value in bfmi]}'
+            )
+    return '\n'.join(lines) + '\n'
+
+
+def save_hmc_diagnostics(
+    samples,
+    num_chains,
+    target_dir,
+    suffix,
+    prob_model=None,
+    hmc_extra_fields=None,
+    max_tree_depth=10,
+):
     try:
         import arviz as az
         import matplotlib.pyplot as plt
@@ -315,15 +414,25 @@ def save_hmc_diagnostics(samples, num_chains, target_dir, suffix, prob_model=Non
         # Convert dictionary to InferenceData first to support new ArviZ 1.2+ API
         idata = az.from_dict({'posterior': arviz_data})
 
-        # 1. Generate convergence summary using arviz
+        health_report = _hmc_health_report(
+            hmc_extra_fields, num_chains, max_tree_depth=max_tree_depth,
+        )
+        print(health_report.rstrip())
+
+        # 1. Generate convergence summary and sampler-health report.
         try:
             summary_df = az.summary(idata)
             summary_path = os.path.join(target_dir, f"mcmc_summary_{suffix}.txt")
             with open(summary_path, 'w') as f:
                 f.write(summary_df.to_string())
+                f.write('\n\n')
+                f.write(health_report)
             print(f"[hmc] Saved arviz summary to {summary_path}")
         except Exception as es:
             print(f"[warning] Failed to compute arviz summary: {es}")
+            summary_path = os.path.join(target_dir, f"mcmc_summary_{suffix}.txt")
+            with open(summary_path, 'w') as f:
+                f.write(health_report)
 
         # 2. Generate trace and density plots using arviz
         try:
@@ -728,6 +837,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             samples[k] = concat_val.reshape((-1,) + concat_val.shape[2:])
         return samples
 
+    def _concatenate_hmc_extra_fields(all_fields, num_chains):
+        if not all_fields or not all_fields[0]:
+            return {}
+        return _concatenate_batches(all_fields, num_chains)
+
     from herculens_wrapper.custom_gibbs import MultiHMCGibbs
     from numpyro.handlers import trace, seed
     
@@ -930,6 +1044,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     rng_key, rng_key_ = jax.random.split(rng_key)
     
     all_samples = []
+    all_hmc_extra_fields = []
     save_path = getattr(args, 'save_path', '.')
     os.makedirs(save_path, exist_ok=True)
     
@@ -949,6 +1064,16 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 {k: np.asarray(v) for k, v in batch.items()}
                 for batch in all_samples
             ]
+            all_hmc_extra_fields = [
+                {k: np.asarray(v) for k, v in batch.items()}
+                for batch in ckpt.get('all_hmc_extra_fields', [])
+            ]
+            if not all_hmc_extra_fields:
+                # Old checkpoints did not persist sampler-health fields.
+                all_hmc_extra_fields = [{} for _ in all_samples]
+            elif len(all_hmc_extra_fields) != len(all_samples):
+                print('[hmc] Checkpoint sampler-health fields are incomplete; skipping health metrics on resume.')
+                all_hmc_extra_fields = [{} for _ in all_samples]
             for batch in all_samples:
                 if not batch:
                     continue
@@ -1025,6 +1150,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             mcmc.run(
                 rng_key_,
                 init_params=init_params_unconst_chain,
+                extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
             )
         else:
             # Re-instantiate MCMC for subsequent batches bypassing warmup
@@ -1043,6 +1169,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 rng_key_to_pass = last_state.rng_key[..., 0, :]
             mcmc.run(
                 rng_key_to_pass,
+                extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
             )
             
         last_state = mcmc.last_state
@@ -1052,6 +1179,12 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         # Convert to CPU NumPy arrays to prevent GPU OOM
         batch_samples = {k: np.asarray(v) for k, v in batch_samples.items()}
         all_samples.append(batch_samples)
+        batch_hmc_extra_fields = {
+            key: np.asarray(value)
+            for key, value in mcmc.get_extra_fields(group_by_chain=False).items()
+            if key in ('diverging', 'accept_prob', 'num_steps', 'energy')
+        }
+        all_hmc_extra_fields.append(batch_hmc_extra_fields)
         
         batch_path = os.path.join(save_path, f"hmc_samples_batch_{i}.npz")
         npz_dict = {k: np.asarray(v) for k, v in batch_samples.items()}
@@ -1064,6 +1197,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 pickle.dump({
                     'last_state': last_state,
                     'all_samples': all_samples,
+                    'all_hmc_extra_fields': all_hmc_extra_fields,
                     'completed_batches': i + 1,
                     'num_chains': num_chains,
                     'checkpoint_interval': checkpoint_interval,
@@ -1074,7 +1208,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             
         if batch_diagnostics_callback is not None:
             try:
-                batch_diagnostics_callback(_concatenate_batches(all_samples, num_chains), i)
+                batch_diagnostics_callback(
+                    _concatenate_batches(all_samples, num_chains),
+                    i,
+                    _concatenate_hmc_extra_fields(all_hmc_extra_fields, num_chains),
+                )
             except Exception as e:
                 print(f"[warning] Failed to generate multi-band batch diagnostics: {e}")
             del mcmc
@@ -1085,6 +1223,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         # Generate the compact single-band diagnostic set for this batch.
         try:
             temp_samples = _concatenate_batches(all_samples, num_chains)
+            temp_hmc_extra_fields = _concatenate_hmc_extra_fields(
+                all_hmc_extra_fields, num_chains,
+            )
             temp_medians = {
                 k: np.median(np.asarray(v), axis=0)
                 for k, v in temp_samples.items()
@@ -1120,6 +1261,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
             save_hmc_diagnostics(
                 temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
+                hmc_extra_fields=temp_hmc_extra_fields,
             )
         except Exception as e:
             print(f"[warning] Failed to generate intermediate diagnostics: {e}")
@@ -1132,6 +1274,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             
     # Concatenate all batches along the sample axis
     samples = _concatenate_batches(all_samples, num_chains)
+    hmc_extra_fields = _concatenate_hmc_extra_fields(all_hmc_extra_fields, num_chains)
         
     param_samples = {k: v for k, v in samples.items() if k in active_sites}
     map_params = tree_median(param_samples)
@@ -1157,10 +1300,14 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         flat_samples = None
         
     # Save final ArviZ diagnostics
-    save_hmc_diagnostics(samples, num_chains, save_path, "final", prob_model=prob_model)
+    save_hmc_diagnostics(
+        samples, num_chains, save_path, "final", prob_model=prob_model,
+        hmc_extra_fields=hmc_extra_fields,
+    )
         
     extra_fields = {
         'flat_samples': flat_samples,
+        'hmc_sampler_health': hmc_extra_fields,
     }
     if loglike_extra:
         extra_fields.update({
