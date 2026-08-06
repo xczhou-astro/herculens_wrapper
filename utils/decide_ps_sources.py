@@ -244,7 +244,7 @@ def plot_catalog_image_panel(
             y,
             lab,
             fontsize=14,
-            color="cyan",
+            color="red",
             fontweight="bold",
             ha="center",
             va="center",
@@ -348,7 +348,7 @@ def visualize_catalog_traced_sources(
                 y,
                 lab,
                 fontsize=14,
-                color="cyan",
+                color="red",
                 fontweight="bold",
                 ha="center",
                 va="center",
@@ -689,7 +689,7 @@ if __name__ == "__main__":
             extent=pixel_grid.plt_extent,
         )
 
-        ax.scatter(theta_x, theta_y, s=120, facecolors="none", edgecolors="cyan", linewidths=2, label="start image")
+        ax.scatter(theta_x, theta_y, s=120, facecolors="none", edgecolors="red", linewidths=2, label="start image")
 
         # For a peak-normalized 2D Gaussian I(r)/I(0) = exp(-r^2 / (2 sigma^2)),
         # the iso-level at n*sigma is exp(-n^2 / 2). Matplotlib sorts the levels
@@ -698,7 +698,7 @@ if __name__ == "__main__":
         sigma_levels = np.exp(-0.5 * sigma_n ** 2)
         sigma_linestyles = ["dotted", "dashed", "solid"]
         sigma_linewidths = [0.8, 1.0, 1.4]
-        sigma_color = "deepskyblue"
+        sigma_color = "red"
         ax.contour(
             gaussian_image_plane,
             levels=sigma_levels,
