@@ -37,6 +37,8 @@ from herculens_wrapper.utils import (
     empty_config,
     fit_dof_and_reduced_chi2,
     get_fits_data,
+    sanitize_image_data,
+    sanitize_noise_map,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
     normalize_run_args_paths,
@@ -243,6 +245,9 @@ def build_and_run(config_path=None):
     if args.crop_size is not None:
         image_data = center_crop(image_data, args.crop_size)
         noise_map = center_crop(noise_map, args.crop_size)
+
+    image_data = sanitize_image_data(image_data)
+    noise_map = sanitize_noise_map(noise_map)
 
     background_subtract_corner = int(getattr(args, 'background_subtract_corner', 0))
     background_subtract_which_corner = str(getattr(args, 'background_subtract_which_corner', 'bottom_left')).lower().strip()

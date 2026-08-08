@@ -73,6 +73,44 @@ def get_fits_data(file_path):
         return hdul[0].data.astype(np.float64)
 
 
+def sanitize_noise_map(noise_map, fill_value=None):
+    """
+    Ensures noise_map is finite and strictly positive (> 0), replacing invalid values
+    (NaN, Inf, <= 0) with a positive noise value (median of valid positive values, or fill_value).
+    """
+    noise_map = np.asarray(noise_map, dtype=np.float64)
+    invalid_mask = ~np.isfinite(noise_map) | (noise_map <= 0.0)
+    if np.any(invalid_mask):
+        valid_vals = noise_map[np.isfinite(noise_map) & (noise_map > 0.0)]
+        if fill_value is not None:
+            fallback = float(fill_value)
+        elif len(valid_vals) > 0:
+            fallback = float(np.median(valid_vals))
+        else:
+            fallback = 1.0
+        n_invalid = int(np.sum(invalid_mask))
+        print(f"[noise] Warning: Found {n_invalid} invalid/non-positive pixel(s) in noise map. "
+              f"Replacing them with positive noise value ({fallback:.6e}).")
+        noise_map = np.where(invalid_mask, fallback, noise_map)
+    return noise_map
+
+
+def sanitize_image_data(image_data):
+    """
+    Ensures image_data has no NaN or Inf values by replacing them with 0.0.
+    Negative values are left untouched as they are valid noisy sky pixels.
+    """
+    image_data = np.asarray(image_data, dtype=np.float64)
+    invalid_mask = ~np.isfinite(image_data)
+    if np.any(invalid_mask):
+        n_invalid = int(np.sum(invalid_mask))
+        print(f"[data] Warning: Found {n_invalid} NaN/Inf pixel(s) in image data. Replacing them with 0.0.")
+        image_data = np.nan_to_num(image_data, nan=0.0, posinf=0.0, neginf=0.0)
+    return image_data
+
+
+
+
 def fit_dof_and_reduced_chi2(chi2, image_data, num_params, mask_bool=None):
     if mask_bool is not None:
         n_data = int(np.sum(mask_bool))

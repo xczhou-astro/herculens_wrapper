@@ -23,6 +23,8 @@ from herculens_wrapper.utils import (
     configure_import_paths,
     empty_config,
     get_fits_data,
+    sanitize_image_data,
+    sanitize_noise_map,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
     log_jax_device_layout,
@@ -596,6 +598,8 @@ def build_and_run_multiband(config_path=None):
             image_data = center_crop(image_data, args.crop_size)
             noise_map = center_crop(noise_map, args.crop_size)
             source_arc_mask = center_crop(source_arc_mask, args.crop_size)
+        image_data = sanitize_image_data(image_data)
+        noise_map = sanitize_noise_map(noise_map)
         if image_data.shape != noise_map.shape or image_data.shape != source_arc_mask.shape:
             raise ValueError(f'Data, noise, and mask shapes must agree for {band_name!r}.')
 
