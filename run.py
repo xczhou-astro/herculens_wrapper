@@ -183,7 +183,7 @@ def build_and_run(config_path=None):
     args = run_arguments_namespace(config_module, config_path)
     config_dir = os.path.dirname(os.path.abspath(config_path))
     args = normalize_run_args_paths(args, config_dir=config_dir)
-    if bool(getattr(args, 'use_multiband', False)):
+    if bool(getattr(args, 'use_multiband', False)) or bool(getattr(args, 'use_multidata', False)):
         from run_multiband import build_and_run_multiband
         return build_and_run_multiband(config_path)
     

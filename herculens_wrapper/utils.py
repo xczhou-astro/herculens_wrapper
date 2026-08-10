@@ -410,11 +410,20 @@ def normalize_run_args_paths(args, config_dir=None):
     for key in path_keys:
         if hasattr(args, key):
             value = getattr(args, key)
-            if value is not None and isinstance(value, str):
-                if key == 'init_params_path':
-                    setattr(args, key, resolve_init_run_dir(value))
+            if value is None:
+                continue
+            values = value if isinstance(value, (list, tuple)) else [value]
+            normalized = []
+            for item in values:
+                if not isinstance(item, str):
+                    normalized.append(item)
+                elif key == 'init_params_path':
+                    normalized.append(resolve_init_run_dir(item))
                 else:
-                    setattr(args, key, resolve_project_path(value, config_dir=config_dir))
+                    normalized.append(resolve_project_path(item, config_dir=config_dir))
+            setattr(args, key, type(value)(normalized) if isinstance(value, tuple) else (
+                normalized if isinstance(value, list) else normalized[0]
+            ))
     return args
 
 

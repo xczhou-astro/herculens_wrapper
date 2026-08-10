@@ -1,4 +1,4 @@
-"""Run a joint strong-lensing fit across several imaging bands."""
+"""Run joint multi-band or same-band multi-data strong-lensing fits."""
 
 import importlib.util
 import json
@@ -8,6 +8,7 @@ import shutil
 import shlex
 import sys
 import copy
+import glob
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -78,6 +79,77 @@ def _band_paths(args, band_name):
     if missing:
         raise FileNotFoundError(f"Missing multiband files for {band_name!r}: {missing}")
     return paths
+
+
+def _indexed_config_value(value, index, n_data, label):
+    """Select one explicit path/name value or validate a per-observation list."""
+    if isinstance(value, (list, tuple)):
+        if len(value) != n_data:
+            raise ValueError(f'{label} must contain exactly n_data={n_data} entries.')
+        return value[index]
+    return value
+
+
+def _multidata_file_paths(args, path_key, name_key, default_name, n_data):
+    """Discover one file per same-band observation.
+
+    A filename may be supplied as a list, an indexed ``{i}`` template, a glob,
+    or a shared filename located in ``n_data`` subdirectories of its base path.
+    """
+    base_value = getattr(args, path_key)
+    name_value = getattr(args, name_key, default_name)
+    paths = []
+    for index in range(n_data):
+        base = _indexed_config_value(base_value, index, n_data, path_key)
+        name = _indexed_config_value(name_value, index, n_data, name_key)
+        if not isinstance(base, str) or not isinstance(name, str):
+            raise TypeError(f'{path_key} and {name_key} must be strings or n_data-length lists.')
+        if os.path.isfile(base):
+            paths.append(base)
+            continue
+        if '{' in name:
+            try:
+                name = name.format(i=index, index=index, data_index=index)
+            except (KeyError, ValueError) as error:
+                raise ValueError(
+                    f'{name_key} template must use only {{i}}, {{index}}, or {{data_index}}.'
+                ) from error
+        candidate = os.path.join(base, name)
+        if os.path.isfile(candidate):
+            paths.append(candidate)
+            continue
+        if glob.has_magic(name):
+            matches = sorted(glob.glob(candidate))
+            if len(matches) != n_data:
+                raise FileNotFoundError(
+                    f'{name_key} glob {candidate!r} found {len(matches)} files; expected n_data={n_data}.'
+                )
+            return matches
+        # Same filename in one folder per observation, e.g.
+        # data/exposure_0/Data_cutout.fits, data/exposure_1/Data_cutout.fits.
+        matches = sorted(
+            path for path in glob.glob(os.path.join(base, '**', name), recursive=True)
+            if os.path.isfile(path)
+        )
+        if len(matches) != n_data:
+            raise FileNotFoundError(
+                f'Could not find {n_data} files named {name!r} below {base!r}; found {len(matches)}. '
+                f'Use an n_data-length {name_key} list or an indexed filename template if needed.'
+            )
+        return matches
+    return paths
+
+
+def _multidata_paths(args, n_data):
+    """Resolve per-observation data, noise, PSF, and source-mask files."""
+    by_kind = {
+        path_key: _multidata_file_paths(args, path_key, name_key, default_name, n_data)
+        for path_key, (name_key, default_name) in _BAND_FILE_NAMES.items()
+    }
+    return [
+        {path_key: by_kind[path_key][index] for path_key in _BAND_FILE_NAMES}
+        for index in range(n_data)
+    ]
 
 
 def _materialize_pixel_arrays(kwargs, run_dir):
@@ -163,6 +235,59 @@ def _load_joint_initialization(
                     continue
             init_params[key] = value_array
 
+    if getattr(prob_model, 'shared_observation_model', False):
+        reference_band = bands[0]
+        run_dir = os.path.join(init_root, reference_band['name'])
+        result_path = os.path.join(run_dir, 'kwargs_result.json')
+        if not os.path.isfile(result_path):
+            raise FileNotFoundError(
+                f'Missing multi-data warm-start result for {reference_band["name"]!r}: {result_path!r}'
+            )
+        with open(result_path) as handle:
+            kwargs = _materialize_pixel_arrays(json.load(handle), run_dir)
+        shared_params = kwargs2params(
+            reference_band['param_list'], kwargs, type_list=reference_band['type_list'],
+        )
+        if (
+            reference_band['type_list'].get('source_light_type_list') == ['PIXELATED']
+            and getattr(prob_model, 'prior_type', 'matern') == 'matern'
+        ):
+            source = kwargs.get('kwargs_source', [{}])[0]
+            required = ('pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid')
+            missing = [key for key in required if key not in source]
+            if missing:
+                if require_pixelated_svi:
+                    raise ValueError(
+                        f'Multi-data pixelated-SVI warm start is missing {missing}. '
+                        'Expected saved pixels_wn and Matérn parameters.'
+                    )
+                print('[multidata:svi] No saved Matérn source; initializing it from its priors.')
+            else:
+                shared_params.update({
+                    'pixels_wn_source_grid': jnp.asarray(source['pixels_wn']),
+                    'n_source_grid': jnp.asarray(source['n_source_grid']),
+                    'rho_source_grid': jnp.asarray(source['rho_source_grid']),
+                    'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
+                })
+        for key, value in shared_params.items():
+            if key not in init_params:
+                continue
+            value_array = jnp.asarray(value)
+            expected_array = jnp.asarray(init_params[key])
+            if value_array.shape != expected_array.shape:
+                if value_array.size == expected_array.size == 1:
+                    value_array = jnp.reshape(value_array, expected_array.shape)
+                elif require_pixelated_svi:
+                    raise ValueError(
+                        f'Multi-data HMC warm-start shape mismatch for {key}: '
+                        f'saved={value_array.shape}, expected={expected_array.shape}.'
+                    )
+                else:
+                    continue
+            init_params[key] = value_array
+        print(f'[multidata] Warm-started shared model from {init_root}')
+        return init_params
+
     for band, band_model in zip(bands, prob_model.band_models):
         run_dir = os.path.join(init_root, band['name'])
         result_path = os.path.join(run_dir, 'kwargs_result.json')
@@ -195,7 +320,7 @@ def _load_joint_initialization(
                     'rho_source_grid': jnp.asarray(source['rho_source_grid']),
                     'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
                 })
-        prefix = f"{band['site_prefix']}/"
+        prefix = '' if getattr(band['prob_model'], 'shared_observation_model', False) else f"{band['site_prefix']}/"
         for key, value in band_params.items():
             joint_key = prefix + key
             if joint_key not in init_params:
@@ -326,18 +451,26 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
     if max_iterations <= 0:
         return init_params
 
-    from herculens_wrapper.multiband import create_multiband_prob_model
+    from herculens_wrapper.multiband import create_multiband_prob_model, create_multidata_prob_model
     from herculens_wrapper.samplers import get_active_sample_sites, run_svi
 
     kwargs_lens, kwargs_lens_light = _load_fixed_light_kwargs(init_path, bands)
-    warmup_model = create_multiband_prob_model(
-        bands,
-        prob_model.lens_mass_params_list,
-        prob_model.lens_mass_type_list,
-        args,
-        fixed_lens_mass=kwargs_lens,
-        fixed_lens_light_by_band=kwargs_lens_light,
-    )
+    if getattr(prob_model, 'shared_observation_model', False):
+        warmup_model = create_multidata_prob_model(
+            bands,
+            args,
+            fixed_lens_mass=kwargs_lens,
+            fixed_lens_light=kwargs_lens_light[bands[0]['name']],
+        )
+    else:
+        warmup_model = create_multiband_prob_model(
+            bands,
+            prob_model.lens_mass_params_list,
+            prob_model.lens_mass_type_list,
+            args,
+            fixed_lens_mass=kwargs_lens,
+            fixed_lens_light_by_band=kwargs_lens_light,
+        )
     active_sites = set(get_active_sample_sites(warmup_model, rng_seed=args.random_seed))
     warmup_init = {key: value for key, value in init_params.items() if key in active_sites}
     warmup_args = SimpleNamespace(**vars(args))
@@ -360,7 +493,8 @@ def _initialize_pixelated_sources_from_previous_source(bands, args, init_params,
         print('[multiband:source-init] num_iterations_warmup <= 0; retaining prior pixelated draws.')
         return init_params
 
-    for band in bands:
+    source_bands = bands[:1] if getattr(bands[0]['prob_model'], 'shared_observation_model', False) else bands
+    for band in source_bands:
         if (
             band['type_list'].get('source_light_type_list') != ['PIXELATED']
             or getattr(band['prob_model'], 'prior_type', 'matern') != 'matern'
@@ -403,6 +537,8 @@ def _initialize_pixelated_sources_from_previous_source(bands, args, init_params,
 
 def _band_hmc_samples(samples, band):
     """Expose shared mass and one band's sites under the usual single-band names."""
+    if getattr(band.get('prob_model'), 'shared_observation_model', False):
+        return samples
     prefix = f"{band['site_prefix']}/"
     result = {
         key: value for key, value in samples.items()
@@ -486,6 +622,7 @@ def _save_multiband_hmc_batch_diagnostics(
             band['prob_model'], band_samples,
             active_sites=band_samples.keys(),
             kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
+            lens_image_override=band['lens_image'],
         )
         combined_results.append({
             'name': band['name'],
@@ -519,11 +656,25 @@ def build_and_run_multiband(config_path=None):
     config_module, args = _load_config(config_path)
     _configure_cuda_from_args(args)
 
-    if not bool(getattr(args, 'use_multiband', False)):
-        raise ValueError('run_multiband.py requires use_multiband=True.')
-    band_names = list(getattr(args, 'band_names', []))
-    if not band_names:
-        raise ValueError('band_names must contain at least one band.')
+    use_multiband = bool(getattr(args, 'use_multiband', False))
+    use_multidata = bool(getattr(args, 'use_multidata', False))
+    if use_multiband == use_multidata:
+        raise ValueError('Enable exactly one of use_multiband or use_multidata.')
+    if use_multidata:
+        if getattr(args, 'band_names', None) is not None:
+            raise ValueError('band_names must be None when use_multidata=True.')
+        n_data = int(getattr(args, 'n_data', 0))
+        if n_data < 1:
+            raise ValueError('n_data must be a positive integer when use_multidata=True.')
+        band_names = [f'data_{index}' for index in range(n_data)]
+        observation_paths = _multidata_paths(args, n_data)
+        joint_mode = 'multidata'
+    else:
+        band_names = list(getattr(args, 'band_names', []))
+        if not band_names:
+            raise ValueError('band_names must contain at least one band.')
+        observation_paths = None
+        joint_mode = 'multiband'
     save_path = resolve_project_path(args.save_path, config_dir=os.path.dirname(config_path))
     os.makedirs(save_path, exist_ok=True)
     configured_n_runs = int(getattr(args, 'n_runs', 1))
@@ -549,11 +700,13 @@ def build_and_run_multiband(config_path=None):
         json.dump(vars(args), handle, indent=4, default=json_serializer)
 
     print(f'Invoked: {shlex.join([sys.executable, *sys.argv])}')
-    print(f'Starting multi-band run in: {save_path} (sampler={args.sampler!r})')
+    print(f'Starting {joint_mode} run in: {save_path} (sampler={args.sampler!r})')
     log_jax_device_layout(args)
 
     from herculens_wrapper.models import create_lens_image, validate_param_list
-    from herculens_wrapper.multiband import band_site_prefix, create_multiband_prob_model
+    from herculens_wrapper.multiband import (
+        band_site_prefix, create_multiband_prob_model, create_multidata_prob_model,
+    )
     from herculens_wrapper.samplers import (
         evaluate_mcmc_component_medians,
         evaluate_mcmc_source_pixels_summary,
@@ -588,8 +741,10 @@ def build_and_run_multiband(config_path=None):
     bands = []
     shared_mass_params = None
     shared_mass_types = None
+    reference_data_shape = None
+    reference_source_arc_mask = None
     for index, band_name in enumerate(band_names):
-        paths = _band_paths(args, band_name)
+        paths = observation_paths[index] if use_multidata else _band_paths(args, band_name)
         image_data = get_fits_data(paths['data_path'])
         noise_map = get_fits_data(paths['noise_path'])
         psf_data = get_fits_data(paths['psf_path'])
@@ -602,6 +757,20 @@ def build_and_run_multiband(config_path=None):
         noise_map = sanitize_noise_map(noise_map)
         if image_data.shape != noise_map.shape or image_data.shape != source_arc_mask.shape:
             raise ValueError(f'Data, noise, and mask shapes must agree for {band_name!r}.')
+        if use_multidata:
+            if reference_data_shape is None:
+                reference_data_shape = image_data.shape
+                reference_source_arc_mask = source_arc_mask
+            elif image_data.shape != reference_data_shape:
+                raise ValueError(
+                    'All multi-data observations must have the same cropped image shape so they '
+                    'share one intrinsic source grid.'
+                )
+            elif not np.array_equal(source_arc_mask, reference_source_arc_mask):
+                raise ValueError(
+                    'All multi-data observations must use the same source_arc_mask. It defines '
+                    'the shared adaptive source grid; it is not a per-observation likelihood mask.'
+                )
 
         background_offset = 0.0
         background_size = int(getattr(args, 'background_subtract_corner', 0))
@@ -683,7 +852,12 @@ def build_and_run_multiband(config_path=None):
             'save_path': None,
         })
 
-    prob_model = create_multiband_prob_model(bands, shared_mass_params, shared_mass_types, args)
+    if use_multidata:
+        prob_model = create_multidata_prob_model(bands, args)
+    else:
+        prob_model = create_multiband_prob_model(
+            bands, shared_mass_params, shared_mass_types, args,
+        )
     for band, band_model in zip(bands, prob_model.band_models):
         band['prob_model'] = band_model
     sampler = args.sampler
@@ -703,10 +877,10 @@ def build_and_run_multiband(config_path=None):
             raise ValueError('Joint multiband HMC requires init_params_path from a pixelated SVI run.')
     comparison = {}
     if sampler == 'svi' and n_runs > 1:
-        print(f'Starting joint SVI multi-run in: {base_save_path} (n_runs={n_runs})')
+        print(f'Starting joint {joint_mode} SVI multi-run in: {base_save_path} (n_runs={n_runs})')
     elif sampler == 'hmc':
         print(
-            f'Starting joint HMC in: {base_save_path} '
+            f'Starting joint {joint_mode} HMC in: {base_save_path} '
             f'(num_chains={int(args.num_chains_hmc_numpyro)})'
         )
     for run_index in range(n_runs):
@@ -757,7 +931,7 @@ def build_and_run_multiband(config_path=None):
             sys.stderr = Tee(sys.stderr, run_log_file)
 
         print(f'\n========================================')
-        print(f'Starting multi-band run {run_index} (seed={run_seed}, sampler={sampler!r})')
+        print(f'Starting {joint_mode} run {run_index} (seed={run_seed}, sampler={sampler!r})')
         print(f'========================================')
         args.save_path = run_path
         args.random_seed = run_seed
@@ -786,6 +960,11 @@ def build_and_run_multiband(config_path=None):
         num_params = prob_model.count_sampled_parameters()
         with open(os.path.join(run_path, 'config.json'), 'w') as handle:
             json.dump({
+                'joint_mode': joint_mode,
+                'shared_components': (
+                    ['lens_mass', 'lens_light', 'source_light', 'point_source']
+                    if use_multidata else ['lens_mass']
+                ),
                 'bands': {
                     band['name']: {
                         'type_list': band['type_list'],
@@ -1003,6 +1182,7 @@ def build_and_run_multiband(config_path=None):
                         band['prob_model'], band_samples,
                         active_sites=band_samples.keys(),
                         kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
+                        lens_image_override=band['lens_image'],
                     )
                 except Exception as error:
                     print(f"[plots] HMC component medians for {band['name']} skipped: {error}")
@@ -1089,9 +1269,14 @@ def build_and_run_multiband(config_path=None):
             json.dump({
                 'kwargs_lens': shared_lens,
                 'kwargs_by_band': combined_kwargs_by_band,
+                **({'kwargs_shared': combined_kwargs_by_band[band_names[0]]}
+                   if getattr(prob_model, 'shared_observation_model', False) else {}),
             }, handle, indent=4, default=json_serializer)
         num_params_free = num_params
-        for band in bands:
+        parameter_count_bands = (
+            bands[:1] if getattr(prob_model, 'shared_observation_model', False) else bands
+        )
+        for band in parameter_count_bands:
             if band['type_list'].get('source_light_type_list') != ['PIXELATED']:
                 continue
             ny, nx = band['lens_image'].SourceModel.pixel_grid.num_pixel_axes

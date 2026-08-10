@@ -553,6 +553,7 @@ def create_prob_model(
     sample_wavelets=False,
     init_params_path=None,
     args=None,
+    additional_observations=None,
 ):
     refine_prior_range = None
     refine_prior_min_frac = None
@@ -967,6 +968,23 @@ def create_prob_model(
                     dist.Normal(model_image, model_std).to_event(2),
                     obs=data,
                 )
+            # Same-band multi-data mode: one set of physical lens/source
+            # parameters, evaluated with each observation's own PSF and noise.
+            for observation_index, observation in enumerate(additional_observations or [], start=1):
+                observation_lens_image = observation['lens_image']
+                observation_model_image = observation_lens_image.model(**model_params)
+                numpyro.deterministic(
+                    f'model_image_data_{observation_index}', observation_model_image,
+                )
+                observation_std = jnp.sqrt(
+                    observation_lens_image.Noise.C_D_model(observation_model_image)
+                )
+                with numpyro.handlers.scale(scale=l_scale):
+                    numpyro.sample(
+                        f'obs_data_{observation_index}',
+                        dist.Normal(observation_model_image, observation_std).to_event(2),
+                        obs=jnp.asarray(observation['image_data']),
+                    )
             hyperparams = []
             if type_list.get('source_light_type_list') == ['PIXELATED']:
                 if prior_type == 'wavelet_penalty':

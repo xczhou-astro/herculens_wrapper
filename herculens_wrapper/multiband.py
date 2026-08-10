@@ -158,3 +158,78 @@ def create_multiband_prob_model(
     )
     model.type_list = {'lens_mass_type_list': lens_mass_type_list}
     return model
+
+
+def create_multidata_prob_model(bands, args, fixed_lens_mass=None, fixed_lens_light=None):
+    """Build one physical model observed through multiple data/PSF/noise realizations.
+
+    Unlike multi-band fitting, all lens mass, lens light, source light, and point
+    source parameters are shared. Each entry in ``bands`` contributes only an
+    additional image likelihood through its own ``LensImage`` instance.
+    """
+    if not bands:
+        raise ValueError('At least one observation is required for a multi-data model.')
+
+    reference = bands[0]
+    reference_param_list = reference['param_list']
+    reference_type_list = reference['type_list']
+    for band in bands[1:]:
+        if band['type_list'] != reference_type_list or band['param_list'] != reference_param_list:
+            raise ValueError(
+                'Multi-data observations must use identical model types and parameter priors.'
+            )
+
+    additional_observations = [
+        {
+            'lens_image': band['lens_image'],
+            'image_data': band['image_data'],
+        }
+        for band in bands[1:]
+    ]
+    model = create_prob_model(
+        reference_param_list,
+        reference_type_list,
+        reference['lens_image'],
+        reference['image_data'],
+        reference['noise_map'],
+        args=args,
+        fix_lens_mass=fixed_lens_mass is not None,
+        kwargs_lens_fixed=fixed_lens_mass,
+        fix_lens_light=fixed_lens_light is not None,
+        kwargs_lens_light_fixed=fixed_lens_light,
+        additional_observations=additional_observations,
+    )
+
+    def params2kwargs_by_band(params):
+        # Return distinct mappings because downstream result assembly adds
+        # derived pixel summaries to each observation's kwargs dictionary.
+        return {band['name']: model.params2kwargs(params) for band in bands}
+
+    def posterior_site_order():
+        order = []
+        for index, mass_model in enumerate(reference_param_list.get('lens_mass_params_list', [])):
+            if isinstance(mass_model, dict):
+                order.extend(f'lens_{key}_{index}' for key in mass_model)
+        for index, light_model in enumerate(reference_param_list.get('lens_light_params_list', [])):
+            if isinstance(light_model, dict):
+                order.extend(f'lens_light_{key}_{index}' for key in light_model)
+        if reference_type_list.get('source_light_type_list') == ['PIXELATED']:
+            order.extend(('n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'pixels_wn_source_grid'))
+        else:
+            for index, source_model in enumerate(reference_param_list.get('source_light_params_list', [])):
+                if isinstance(source_model, dict):
+                    order.extend(f'source_{key}_{index}' for key in source_model)
+        for index, point_source_model in enumerate(reference_param_list.get('point_source_params_list', [])):
+            if isinstance(point_source_model, dict):
+                order.extend(f'ps_{key}_{index}' for key in point_source_model)
+        return order
+
+    model.bands = bands
+    model.band_models = [model] * len(bands)
+    model.lens_mass_params_list = reference_param_list['lens_mass_params_list']
+    model.lens_mass_type_list = reference_type_list['lens_mass_type_list']
+    model.params2kwargs_by_band = params2kwargs_by_band
+    model.posterior_site_order = posterior_site_order
+    model.mass_kwargs_from_params = lambda params: model.params2kwargs(params)['kwargs_lens']
+    model.shared_observation_model = True
+    return model

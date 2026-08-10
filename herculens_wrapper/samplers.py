@@ -149,6 +149,7 @@ def evaluate_mcmc_component_medians(
     batch_size=500,
     active_sites=None,
     kwargs_lens_from_params=None,
+    lens_image_override=None,
 ):
     """
     Evaluates total, source-only, lens-light-only, and no-lens-light model images 
@@ -158,7 +159,7 @@ def evaluate_mcmc_component_medians(
     import jax.numpy as jnp
     import numpy as np
 
-    lens_image = getattr(prob_model, 'lens_image', None)
+    lens_image = lens_image_override or getattr(prob_model, 'lens_image', None)
     if lens_image is None:
         raise ValueError("prob_model does not expose lens_image for MCMC median evaluation.")
 
