@@ -160,7 +160,9 @@ def create_multiband_prob_model(
     return model
 
 
-def create_multidata_prob_model(bands, args, fixed_lens_mass=None, fixed_lens_light=None):
+def _create_fully_shared_multidata_prob_model(
+    bands, args, fixed_lens_mass=None, fixed_lens_light=None,
+):
     """Build one physical model observed through multiple data/PSF/noise realizations.
 
     Unlike multi-band fitting, all lens mass, lens light, source light, and point
@@ -232,4 +234,302 @@ def create_multidata_prob_model(bands, args, fixed_lens_mass=None, fixed_lens_li
     model.posterior_site_order = posterior_site_order
     model.mass_kwargs_from_params = lambda params: model.params2kwargs(params)['kwargs_lens']
     model.shared_observation_model = True
+    model.fully_shared_lens_mass = True
+    model.selective_shared_model = False
     return model
+
+
+_SHARED_COMPONENT_ALIASES = {
+    'lens_mass': 'lens_mass',
+    'lens mass': 'lens_mass',
+    'mass': 'lens_mass',
+    'lens_light': 'lens_light',
+    'lens light': 'lens_light',
+    'source_light': 'source_light',
+    'source light': 'source_light',
+    'source': 'source_light',
+    'point_source': 'point_source',
+    'point source': 'point_source',
+    'ps': 'point_source',
+}
+
+_SHARED_COMPONENT_CONFIG = {
+    'lens_mass': ('lens_mass_params_list', 'lens'),
+    'lens_light': ('lens_light_params_list', 'lens_light'),
+    'source_light': ('source_light_params_list', 'source'),
+    'point_source': ('point_source_params_list', 'ps'),
+}
+
+
+def _canonical_shared_component(value):
+    normalized = re.sub(r'[_\-\s]+', ' ', str(value).strip().lower())
+    return _SHARED_COMPONENT_ALIASES.get(normalized)
+
+
+def _shared_site_name(component, key, index):
+    return f'{_SHARED_COMPONENT_CONFIG[component][1]}_{key}_{index}'
+
+
+def _shareable_entries(param_list, type_list, component):
+    """Return ordinary NumPyro sites which can be tied across observations."""
+    list_key, _ = _SHARED_COMPONENT_CONFIG[component]
+    if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
+        return []
+    entries = []
+    for index, model in enumerate(param_list.get(list_key, [])):
+        if not isinstance(model, dict):
+            continue
+        for key, prior in model.items():
+            if component == 'point_source' and key in ('n_images', 'sigma_image', 'sigma_source'):
+                continue
+            if _normalize_link_spec(prior) is not None or not isinstance(prior, (list, tuple)):
+                continue
+            entries.append((component, index, key, prior, _shared_site_name(component, key, index)))
+    return entries
+
+
+def _local_site_order(param_list, type_list):
+    order = []
+    for component in _SHARED_COMPONENT_CONFIG:
+        if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
+            order.extend((
+                'n_source_grid', 'rho_source_grid', 'sigma_source_grid',
+                'pixels_wn_source_grid',
+            ))
+            continue
+        order.extend(entry[-1] for entry in _shareable_entries(param_list, type_list, component))
+    return order
+
+
+def _parse_shared_specs(shared_specs, param_list, type_list):
+    """Parse ``args.shared`` and return the selected local site names."""
+    if shared_specs is None:
+        shared_specs = []
+    if not isinstance(shared_specs, (list, tuple)) or not all(
+        isinstance(spec, str) for spec in shared_specs
+    ):
+        raise TypeError('shared must be a list of strings, for example ["lens_mass: theta_E"].')
+
+    entries_by_component = {
+        component: _shareable_entries(param_list, type_list, component)
+        for component in _SHARED_COMPONENT_CONFIG
+    }
+    selected = {}
+    requested_pixelated_source = False
+    for raw_spec in shared_specs:
+        component_text, separator, selector_text = raw_spec.partition(':')
+        component = _canonical_shared_component(component_text)
+        if component is None:
+            raise ValueError(
+                f'Unknown shared component {component_text!r}. Expected lens_mass, lens_light, '
+                'source_light, or point_source.'
+            )
+        selector = selector_text.strip() if separator else ''
+        if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
+            requested_pixelated_source = True
+            continue
+        requested_keys = None if not selector or selector.lower() == 'all' else {
+            value.strip() for value in selector.split(',') if value.strip()
+        }
+        matched = [
+            entry for entry in entries_by_component[component]
+            if requested_keys is None or entry[2] in requested_keys
+        ]
+        if requested_keys is not None:
+            found_keys = {entry[2] for entry in matched}
+            missing = requested_keys - found_keys
+            if missing:
+                raise ValueError(
+                    f"shared spec {raw_spec!r} does not match sampled {component} parameter(s): "
+                    f'{sorted(missing)}.'
+                )
+        for entry in matched:
+            selected[entry[-1]] = entry
+    return selected, requested_pixelated_source
+
+
+def _all_existing_components_requested(shared_specs, param_list, type_list):
+    """Whether explicit specs request every stochastic physical component."""
+    if shared_specs == 'all':
+        return True
+    parsed = _parse_shared_specs(shared_specs, param_list, type_list)
+    selected, pixelated_source = parsed
+    all_entries = [
+        entry
+        for component in _SHARED_COMPONENT_CONFIG
+        for entry in _shareable_entries(param_list, type_list, component)
+    ]
+    all_standard_sites = {entry[-1] for entry in all_entries}
+    source_is_pixelated = type_list.get('source_light_type_list') == ['PIXELATED']
+    return (
+        set(selected) == all_standard_sites
+        and (not source_is_pixelated or pixelated_source)
+    )
+
+
+def _create_selectively_shared_multidata_prob_model(bands, args, shared_entries):
+    """Joint multi-data model with selected unscoped sites and local remainder."""
+    reference = bands[0]
+    holders = []
+    band_models = []
+    for band in bands:
+        holder = {}
+        holders.append(holder)
+        child_model = create_prob_model(
+            band['param_list'],
+            band['type_list'],
+            band['lens_image'],
+            band['image_data'],
+            band['noise_map'],
+            args=args,
+            param_overrides=lambda holder=holder: holder['overrides'],
+        )
+        band_models.append(child_model)
+
+    shared_site_names = set(shared_entries)
+
+    def shared_overrides(params, sample=False):
+        overrides = {
+            component: [{} for _ in reference['param_list'].get(list_key, [])]
+            for component, (list_key, _) in _SHARED_COMPONENT_CONFIG.items()
+        }
+        for site_name, (component, index, key, prior, _) in shared_entries.items():
+            value = _sample_param_from_prior(site_name, key, prior) if sample else params[site_name]
+            overrides[component][index][key] = value
+        return overrides
+
+    def local_params_from_joint(params, band):
+        prefix = f"{band['site_prefix']}/"
+        local = {
+            key[len(prefix):]: value
+            for key, value in params.items()
+            if key.startswith(prefix)
+        }
+        for site_name in shared_site_names:
+            if site_name in params:
+                local[site_name] = params[site_name]
+        return local
+
+    def joint_site_name(band, local_site_name):
+        if local_site_name in shared_site_names:
+            return local_site_name
+        return f"{band['site_prefix']}/{local_site_name}"
+
+    def posterior_site_order():
+        order = list(shared_entries)
+        for band in bands:
+            for site_name in _local_site_order(band['param_list'], band['type_list']):
+                if site_name not in shared_site_names:
+                    order.append(joint_site_name(band, site_name))
+        return order
+
+    class SelectiveMultiDataProbModel(NumpyroModel):
+        def model(self):
+            overrides = shared_overrides({}, sample=True)
+            for holder in holders:
+                holder['overrides'] = overrides
+            for band, band_model in zip(bands, band_models):
+                numpyro.handlers.scope(band_model.model, prefix=band['site_prefix'])()
+
+        def params2kwargs_by_band(self, params):
+            return {
+                band['name']: band_model.params2kwargs(local_params_from_joint(params, band))
+                for band, band_model in zip(bands, band_models)
+            }
+
+        def params2kwargs(self, params):
+            return {'kwargs_by_band': self.params2kwargs_by_band(params)}
+
+    model = SelectiveMultiDataProbModel()
+    for band, band_model in zip(bands, band_models):
+        band_model.joint_params_to_local = lambda params, band=band: local_params_from_joint(params, band)
+        band_model.mass_kwargs_from_params = lambda params, band_model=band_model: (
+            band_model.params2kwargs(params)['kwargs_lens']
+        )
+    all_mass_sites = {
+        entry[-1] for entry in _shareable_entries(
+            reference['param_list'], reference['type_list'], 'lens_mass',
+        )
+    }
+    model.bands = bands
+    model.band_models = band_models
+    model.lens_mass_params_list = reference['param_list']['lens_mass_params_list']
+    model.lens_mass_type_list = reference['type_list']['lens_mass_type_list']
+    model.posterior_site_order = posterior_site_order
+    model.joint_site_name = joint_site_name
+    model.shared_site_names = shared_site_names
+    model.shared_entries = shared_entries
+    model.shared_observation_model = False
+    model.selective_shared_model = True
+    model.fully_shared_lens_mass = all_mass_sites.issubset(shared_site_names)
+    model.type_list = {'lens_mass_type_list': model.lens_mass_type_list}
+    return model
+
+
+def create_multidata_source_warmup_model(
+    bands, args, kwargs_lens_by_band, kwargs_lens_light_by_band,
+):
+    """Optimize independent pixelated sources with each observation's light fixed."""
+    band_models = []
+    for band in bands:
+        band_models.append(create_prob_model(
+            band['param_list'],
+            band['type_list'],
+            band['lens_image'],
+            band['image_data'],
+            band['noise_map'],
+            args=args,
+            fix_lens_mass=True,
+            kwargs_lens_fixed=kwargs_lens_by_band[band['name']],
+            fix_lens_light=True,
+            kwargs_lens_light_fixed=kwargs_lens_light_by_band[band['name']],
+        ))
+
+    class MultiDataSourceWarmupModel(NumpyroModel):
+        def model(self):
+            for band, band_model in zip(bands, band_models):
+                numpyro.handlers.scope(band_model.model, prefix=band['site_prefix'])()
+
+    model = MultiDataSourceWarmupModel()
+    model.band_models = band_models
+    return model
+
+
+def create_multidata_prob_model(bands, args, fixed_lens_mass=None, fixed_lens_light=None):
+    """Build a joint same-band model with user-selected shared parameters.
+
+    Omitting ``args.shared`` shares nothing. Use ``shared='all'`` to share
+    every physical component, or a list of component/parameter specifications
+    to tie only selected sites.
+    """
+    if not bands:
+        raise ValueError('At least one observation is required for a multi-data model.')
+    reference = bands[0]
+    for band in bands[1:]:
+        if band['type_list'] != reference['type_list'] or band['param_list'] != reference['param_list']:
+            raise ValueError(
+                'Multi-data observations must use identical model types and parameter priors.'
+            )
+
+    shared_specs = getattr(args, 'shared', [])
+    if _all_existing_components_requested(
+        shared_specs, reference['param_list'], reference['type_list'],
+    ):
+        return _create_fully_shared_multidata_prob_model(
+            bands, args, fixed_lens_mass=fixed_lens_mass, fixed_lens_light=fixed_lens_light,
+        )
+
+    if fixed_lens_mass is not None or fixed_lens_light is not None:
+        raise ValueError(
+            'Selective multi-data sharing does not support fixed lens components in this model. '
+            'Use the dedicated per-observation source warm-up model instead.'
+        )
+    shared_entries, requested_pixelated_source = _parse_shared_specs(
+        shared_specs, reference['param_list'], reference['type_list'],
+    )
+    if requested_pixelated_source:
+        raise ValueError(
+            'Selective sharing of a PIXELATED source is not supported. Share every physical '
+            'component (the default when shared is omitted), or leave source_light unshared.'
+        )
+    return _create_selectively_shared_multidata_prob_model(bands, args, shared_entries)

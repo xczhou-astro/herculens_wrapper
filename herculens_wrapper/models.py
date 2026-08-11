@@ -554,6 +554,7 @@ def create_prob_model(
     init_params_path=None,
     args=None,
     additional_observations=None,
+    param_overrides=None,
 ):
     refine_prior_range = None
     refine_prior_min_frac = None
@@ -740,10 +741,23 @@ def create_prob_model(
             return kwargs_lens_fixed()
         return kwargs_lens_fixed
 
+    def _get_param_overrides():
+        """Resolve values supplied by a joint model for selected shared sites."""
+        if callable(param_overrides):
+            return param_overrides()
+        return param_overrides or {}
+
+    def _param_override(overrides, component, index, key):
+        components = overrides.get(component, [])
+        if index >= len(components) or key not in components[index]:
+            return False, None
+        return True, components[index][key]
+
     class ProbModel(NumpyroModel):
 
         def model(self):
 
+            overrides = _get_param_overrides()
             prior_lens_mass = []
             if fix_lens_mass and kwargs_lens_fixed is not None:
                 prior_lens_mass = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
@@ -754,8 +768,13 @@ def create_prob_model(
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                     model = {}
                     for key, param in lens_mass_model.items():
+                        has_override, override_value = _param_override(
+                            overrides, 'lens_mass', i, key,
+                        )
                         link_spec = _normalize_link_spec(param)
-                        if link_spec is not None:
+                        if has_override:
+                            model[key] = override_value
+                        elif link_spec is not None:
                             model[key] = _resolve_link(bank, link_spec, context=f"lens_mass[{i}].{key}")
                         elif isinstance(param, (list, tuple)):
                             model[key] = _sample_param_from_prior(f'lens_{key}_{i}', key, param)
@@ -774,8 +793,13 @@ def create_prob_model(
                     for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
                         model = {}
                         for key, param in lens_light_model.items():
+                            has_override, override_value = _param_override(
+                                overrides, 'lens_light', i, key,
+                            )
                             link_spec = _normalize_link_spec(param)
-                            if link_spec is not None:
+                            if has_override:
+                                model[key] = override_value
+                            elif link_spec is not None:
                                 model[key] = _resolve_link(bank, link_spec, context=f"lens_light[{i}].{key}")
                             elif isinstance(param, (list, tuple)):
                                 model[key] = _sample_param_from_prior(f'lens_light_{key}_{i}', key, param)
@@ -859,8 +883,13 @@ def create_prob_model(
                     for i, source_light_model in enumerate(param_list['source_light_params_list']):
                         model = {}
                         for key, param in source_light_model.items():
+                            has_override, override_value = _param_override(
+                                overrides, 'source_light', i, key,
+                            )
                             link_spec = _normalize_link_spec(param)
-                            if link_spec is not None:
+                            if has_override:
+                                model[key] = override_value
+                            elif link_spec is not None:
                                 model[key] = _resolve_link(bank, link_spec, context=f"source_light[{i}].{key}")
                             elif isinstance(param, (list, tuple)):
                                 model[key] = _sample_param_from_prior(f'source_{key}_{i}', key, param)
@@ -887,8 +916,13 @@ def create_prob_model(
                     for key, param in point_source_model.items():
                         if key in ('n_images', 'sigma_image', 'sigma_source'):
                             continue
+                        has_override, override_value = _param_override(
+                            overrides, 'point_source', i, key,
+                        )
                         link_spec = _normalize_link_spec(param)
-                        if link_spec is not None:
+                        if has_override:
+                            model[key] = override_value
+                        elif link_spec is not None:
                             model[key] = _resolve_link(bank, link_spec, context=f"point_source[{i}].{key}")
                         elif ps_type == 'IMAGE_POSITIONS' and key in ('ra', 'dec'):
                             if isinstance(param, (list, tuple, np.ndarray)) and len(param) == n_img and all(

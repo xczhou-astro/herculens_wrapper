@@ -45,7 +45,6 @@ _BAND_FILE_NAMES = {
     'source_arc_mask_path': ('source_arc_mask_name', 'mask_1.fits'),
 }
 
-
 def _load_config(config_path):
     name = os.path.splitext(os.path.basename(config_path))[0]
     spec = importlib.util.spec_from_file_location(name, config_path)
@@ -210,30 +209,31 @@ def _load_joint_initialization(
     init_root = os.path.abspath(init_path)
     if require_pixelated_svi:
         _validate_pixelated_svi_initialization(init_root, bands)
-    shared_path = os.path.join(init_root, 'kwargs_lens_shared.json')
-    if not os.path.isfile(shared_path):
-        raise FileNotFoundError(f'Multiband HMC warm start is missing {shared_path!r}.')
-    with open(shared_path) as handle:
-        shared_kwargs = json.load(handle)
-    mass_params = kwargs2params(
-        {'lens_mass_params_list': prob_model.lens_mass_params_list}, shared_kwargs,
-        type_list={'lens_mass_type_list': prob_model.lens_mass_type_list},
-    )
-    for key, value in mass_params.items():
-        if key in init_params:
-            value_array = jnp.asarray(value)
-            expected_array = jnp.asarray(init_params[key])
-            if value_array.shape != expected_array.shape:
-                if value_array.size == expected_array.size == 1:
-                    value_array = jnp.reshape(value_array, expected_array.shape)
-                elif require_pixelated_svi:
-                    raise ValueError(
-                        f'Multiband HMC warm-start shape mismatch for {key}: '
-                        f'saved={value_array.shape}, expected={expected_array.shape}.'
-                    )
-                else:
-                    continue
-            init_params[key] = value_array
+    if getattr(prob_model, 'fully_shared_lens_mass', True):
+        shared_path = os.path.join(init_root, 'kwargs_lens_shared.json')
+        if not os.path.isfile(shared_path):
+            raise FileNotFoundError(f'Multiband HMC warm start is missing {shared_path!r}.')
+        with open(shared_path) as handle:
+            shared_kwargs = json.load(handle)
+        mass_params = kwargs2params(
+            {'lens_mass_params_list': prob_model.lens_mass_params_list}, shared_kwargs,
+            type_list={'lens_mass_type_list': prob_model.lens_mass_type_list},
+        )
+        for key, value in mass_params.items():
+            if key in init_params:
+                value_array = jnp.asarray(value)
+                expected_array = jnp.asarray(init_params[key])
+                if value_array.shape != expected_array.shape:
+                    if value_array.size == expected_array.size == 1:
+                        value_array = jnp.reshape(value_array, expected_array.shape)
+                    elif require_pixelated_svi:
+                        raise ValueError(
+                            f'Multiband HMC warm-start shape mismatch for {key}: '
+                            f'saved={value_array.shape}, expected={expected_array.shape}.'
+                        )
+                    else:
+                        continue
+                init_params[key] = value_array
 
     if getattr(prob_model, 'shared_observation_model', False):
         reference_band = bands[0]
@@ -320,9 +320,12 @@ def _load_joint_initialization(
                     'rho_source_grid': jnp.asarray(source['rho_source_grid']),
                     'sigma_source_grid': jnp.asarray(source['sigma_source_grid']),
                 })
-        prefix = '' if getattr(band['prob_model'], 'shared_observation_model', False) else f"{band['site_prefix']}/"
         for key, value in band_params.items():
-            joint_key = prefix + key
+            if hasattr(prob_model, 'joint_site_name'):
+                joint_key = prob_model.joint_site_name(band, key)
+            else:
+                prefix = '' if getattr(band['prob_model'], 'shared_observation_model', False) else f"{band['site_prefix']}/"
+                joint_key = prefix + key
             if joint_key not in init_params:
                 continue
             value_array = jnp.asarray(value)
@@ -423,10 +426,14 @@ def _report_hmc_warm_start_reproduction(init_root, bands, initial_kwargs_by_band
 
 
 def _load_fixed_light_kwargs(init_path, bands):
-    """Load the shared mass and each band's lens light for source-only warmup."""
+    """Load each observation's mass and lens light for source-only warmup."""
     init_root = os.path.abspath(init_path)
-    with open(os.path.join(init_root, 'kwargs_lens_shared.json')) as handle:
-        kwargs_lens = json.load(handle)['kwargs_lens']
+    shared_path = os.path.join(init_root, 'kwargs_lens_shared.json')
+    shared_lens = None
+    if os.path.isfile(shared_path):
+        with open(shared_path) as handle:
+            shared_lens = json.load(handle)['kwargs_lens']
+    kwargs_lens_by_band = {}
     kwargs_lens_light = {}
     for band in bands:
         run_dir = os.path.join(init_root, band['name'])
@@ -434,8 +441,11 @@ def _load_fixed_light_kwargs(init_path, bands):
             kwargs = _materialize_pixel_arrays(
                 json.load(handle), run_dir,
             )
+        kwargs_lens_by_band[band['name']] = kwargs.get('kwargs_lens', shared_lens)
         kwargs_lens_light[band['name']] = kwargs.get('kwargs_lens_light', [])
-    return kwargs_lens, kwargs_lens_light
+    if any(kwargs is None for kwargs in kwargs_lens_by_band.values()):
+        raise ValueError('Prior run has no lens-mass kwargs for source-only warmup.')
+    return kwargs_lens_by_band, kwargs_lens_light
 
 
 def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
@@ -451,16 +461,24 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
     if max_iterations <= 0:
         return init_params
 
-    from herculens_wrapper.multiband import create_multiband_prob_model, create_multidata_prob_model
+    from herculens_wrapper.multiband import (
+        create_multiband_prob_model,
+        create_multidata_prob_model,
+        create_multidata_source_warmup_model,
+    )
     from herculens_wrapper.samplers import get_active_sample_sites, run_svi
 
-    kwargs_lens, kwargs_lens_light = _load_fixed_light_kwargs(init_path, bands)
+    kwargs_lens_by_band, kwargs_lens_light = _load_fixed_light_kwargs(init_path, bands)
     if getattr(prob_model, 'shared_observation_model', False):
         warmup_model = create_multidata_prob_model(
             bands,
             args,
-            fixed_lens_mass=kwargs_lens,
+            fixed_lens_mass=kwargs_lens_by_band[bands[0]['name']],
             fixed_lens_light=kwargs_lens_light[bands[0]['name']],
+        )
+    elif getattr(prob_model, 'selective_shared_model', False):
+        warmup_model = create_multidata_source_warmup_model(
+            bands, args, kwargs_lens_by_band, kwargs_lens_light,
         )
     else:
         warmup_model = create_multiband_prob_model(
@@ -468,7 +486,7 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
             prob_model.lens_mass_params_list,
             prob_model.lens_mass_type_list,
             args,
-            fixed_lens_mass=kwargs_lens,
+            fixed_lens_mass=kwargs_lens_by_band[bands[0]['name']],
             fixed_lens_light_by_band=kwargs_lens_light,
         )
     active_sites = set(get_active_sample_sites(warmup_model, rng_seed=args.random_seed))
@@ -528,15 +546,22 @@ def _initialize_pixelated_sources_from_previous_source(bands, args, init_params,
             source_image, k_values, pixelated_prior,
             seed=seed + 7919, max_iterations=max_iterations,
         )
-        prefix = f"{band['site_prefix']}/"
         for key, value in fitted.items():
-            if prefix + key in init_params:
-                init_params[prefix + key] = jnp.asarray(value)
+            if hasattr(band['prob_model'], 'joint_site_name'):
+                joint_key = band['prob_model'].joint_site_name(band, key)
+            elif getattr(band['prob_model'], 'shared_observation_model', False):
+                joint_key = key
+            else:
+                joint_key = f"{band['site_prefix']}/{key}"
+            if joint_key in init_params:
+                init_params[joint_key] = jnp.asarray(value)
     return init_params
 
 
 def _band_hmc_samples(samples, band):
     """Expose shared mass and one band's sites under the usual single-band names."""
+    if hasattr(band.get('prob_model'), 'joint_params_to_local'):
+        return band['prob_model'].joint_params_to_local(samples)
     if getattr(band.get('prob_model'), 'shared_observation_model', False):
         return samples
     prefix = f"{band['site_prefix']}/"
@@ -548,6 +573,14 @@ def _band_hmc_samples(samples, band):
         key[len(prefix):]: value for key, value in samples.items() if key.startswith(prefix)
     })
     return result
+
+
+def _band_lens_kwargs_from_params(joint_model, band):
+    """Return a local-sample lens kwargs converter for component diagnostics."""
+    converter = getattr(band['prob_model'], 'mass_kwargs_from_params', None)
+    if converter is not None:
+        return converter
+    return joint_model.mass_kwargs_from_params
 
 
 def _zip_asymmetric_uncertainties(lower, upper):
@@ -608,9 +641,10 @@ def _save_multiband_hmc_batch_diagnostics(
             key: np.median(np.asarray(value), axis=0)
             for key, value in band_samples.items()
         }
+        lens_kwargs_from_params = _band_lens_kwargs_from_params(prob_model, band)
         kwargs_best = band['prob_model'].params2kwargs(
             median_params,
-            kwargs_lens_override=prob_model.mass_kwargs_from_params(median_params),
+            kwargs_lens_override=lens_kwargs_from_params(median_params),
         )
         source_summary = evaluate_mcmc_source_pixels_summary(
             band['prob_model'], band_samples, batch_root, save_npy=False,
@@ -621,7 +655,7 @@ def _save_multiband_hmc_batch_diagnostics(
         component_medians = evaluate_mcmc_component_medians(
             band['prob_model'], band_samples,
             active_sites=band_samples.keys(),
-            kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
+            kwargs_lens_from_params=lens_kwargs_from_params,
             lens_image_override=band['lens_image'],
         )
         combined_results.append({
@@ -860,6 +894,12 @@ def build_and_run_multiband(config_path=None):
         )
     for band, band_model in zip(bands, prob_model.band_models):
         band['prob_model'] = band_model
+    if use_multidata:
+        shared_metadata = getattr(args, 'shared', [])
+    else:
+        shared_metadata = ['lens_mass']
+    if use_multidata:
+        print(f'[multidata] Shared parameter specification: {shared_metadata}')
     sampler = args.sampler
     base_save_path = save_path
     n_runs = int(getattr(args, 'n_runs', 1))
@@ -961,10 +1001,7 @@ def build_and_run_multiband(config_path=None):
         with open(os.path.join(run_path, 'config.json'), 'w') as handle:
             json.dump({
                 'joint_mode': joint_mode,
-                'shared_components': (
-                    ['lens_mass', 'lens_light', 'source_light', 'point_source']
-                    if use_multidata else ['lens_mass']
-                ),
+                'shared_components': shared_metadata,
                 'bands': {
                     band['name']: {
                         'type_list': band['type_list'],
@@ -973,8 +1010,12 @@ def build_and_run_multiband(config_path=None):
                     }
                     for band in bands
                 },
-                'shared_lens_mass_type_list': shared_mass_types,
-                'shared_lens_mass_params_list': shared_mass_params,
+                'shared_lens_mass_type_list': (
+                    shared_mass_types if getattr(prob_model, 'fully_shared_lens_mass', True) else None
+                ),
+                'shared_lens_mass_params_list': (
+                    shared_mass_params if getattr(prob_model, 'fully_shared_lens_mass', True) else None
+                ),
                 'num_params': num_params,
                 'sampler': sampler,
                 'init_params_path': run_init_path,
@@ -1157,9 +1198,13 @@ def build_and_run_multiband(config_path=None):
                 )
             except Exception as error:
                 print(f'[plots] corner_multiband.png skipped: {error}')
-        shared_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
-        with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
-            json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
+        shared_lens = (
+            kwargs_by_band[band_names[0]]['kwargs_lens']
+            if getattr(prob_model, 'fully_shared_lens_mass', True) else None
+        )
+        if shared_lens is not None:
+            with open(os.path.join(run_path, 'kwargs_lens_shared.json'), 'w') as handle:
+                json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
         comparison[f'run_{run_index}'] = {'seed': run_seed, 'bands': {}}
         combined_band_results = []
         combined_kwargs_by_band = {}
@@ -1181,7 +1226,7 @@ def build_and_run_multiband(config_path=None):
                     component_medians = evaluate_mcmc_component_medians(
                         band['prob_model'], band_samples,
                         active_sites=band_samples.keys(),
-                        kwargs_lens_from_params=prob_model.mass_kwargs_from_params,
+                        kwargs_lens_from_params=_band_lens_kwargs_from_params(prob_model, band),
                         lens_image_override=band['lens_image'],
                     )
                 except Exception as error:
@@ -1192,8 +1237,9 @@ def build_and_run_multiband(config_path=None):
             combined_kwargs_by_band[band['name']] = _rebase_pixel_array_references(
                 kwargs_json, band['name'],
             )
-            with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
-                json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
+            if shared_lens is not None:
+                with open(os.path.join(band['save_path'], 'kwargs_lens_shared.json'), 'w') as handle:
+                    json.dump({'kwargs_lens': shared_lens}, handle, indent=4, default=json_serializer)
             if kwargs_sigma_by_band is not None:
                 try:
                     kwargs_sigma_json = kwargs_best_to_json_pixelated_npy(
@@ -1267,8 +1313,8 @@ def build_and_run_multiband(config_path=None):
         total_log_likelihood = _joint_log_likelihood(prob_model, best_params)
         with open(os.path.join(run_path, 'kwargs_result.json'), 'w') as handle:
             json.dump({
-                'kwargs_lens': shared_lens,
                 'kwargs_by_band': combined_kwargs_by_band,
+                **({'kwargs_lens': shared_lens} if shared_lens is not None else {}),
                 **({'kwargs_shared': combined_kwargs_by_band[band_names[0]]}
                    if getattr(prob_model, 'shared_observation_model', False) else {}),
             }, handle, indent=4, default=json_serializer)
@@ -1320,7 +1366,7 @@ def build_and_run_multiband(config_path=None):
             )
         except Exception as error:
             print(f'[plots] multiband_composite.png skipped: {error}')
-        if sampler == 'hmc':
+        if sampler == 'hmc' and shared_lens is not None:
             # Lens mass is shared, so save this final mass-only diagnostic once
             # at the joint result root rather than duplicating it per band.
             shared_mass_result = {'kwargs_lens': shared_lens}
