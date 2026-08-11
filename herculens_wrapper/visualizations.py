@@ -965,14 +965,20 @@ def plot_lens_light_subtracted_image(
 
     if noise_map is not None:
         res_data = subtracted / noise_map
-        vmax_res = float(np.max(np.abs(res_data)))
+        vmax_res = (
+            float(residual_vis_max)
+            if residual_vis_max > 0.0 else float(np.max(np.abs(res_data)))
+        )
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         ax[2].set_title('Data - Lens light (S/N)')
         plt.colorbar(im2, ax=ax[2], label='Signal-to-noise')
     else:
-        vmax_res = float(np.max(np.abs(subtracted)))
+        vmax_res = (
+            float(residual_vis_max)
+            if residual_vis_max > 0.0 else float(np.max(np.abs(subtracted)))
+        )
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
