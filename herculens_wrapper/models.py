@@ -26,6 +26,11 @@ from herculens.LightModel.light_model import LightModel
 from herculens.MassModel.mass_model import MassModel
 from herculens.PointSourceModel.point_source_model import PointSourceModel
 
+from herculens_wrapper.profiles import register_mass_profiles
+
+# Register wrapper-local mass profiles before any LensImage builds a MassModel.
+register_mass_profiles()
+
 # Monkey patch LightModel.surface_brightness to clean extra keys from kwargs_list (kwargs_source)
 _original_surface_brightness = LightModel.surface_brightness
 
@@ -1770,7 +1775,11 @@ class LensImageExtension(LensImage):
         k_lens=None,
     ):
         if len(self.SourceModel.profile_type_list) == 0:
-            return jnp.zeros(self.Grid.num_pixel_axes)
+            if de_lensed:
+                return jnp.zeros(self.SourceModel.pixel_grid.num_pixel_axes)
+            else:
+                x_grid_img, _ = self.ImageNumerics.coordinates_evaluate
+                return jnp.zeros_like(x_grid_img)
 
         x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
         if (self._src_adaptive_grid) or (not de_lensed):
@@ -2071,3 +2080,18 @@ def validate_param_list(type_list, param_list):
             )
         if has_t and len(type_list[type_key]) != len(param_list[param_key]):
             raise ValueError(f"Length mismatch for {type_key} / {param_key}.")
+
+    for index, (profile_type, params) in enumerate(zip(
+        type_list.get("lens_mass_type_list", []),
+        param_list.get("lens_mass_params_list", []),
+    )):
+        if profile_type != "MPPL":
+            continue
+        if "m" not in params:
+            raise ValueError(f"MPPL mass component {index} requires a fixed integer 'm' >= 2.")
+        multipole_order = params["m"]
+        if isinstance(multipole_order, (list, tuple)) or int(multipole_order) != multipole_order or multipole_order < 2:
+            raise ValueError(
+                f"MPPL mass component {index} requires 'm' to be a fixed integer >= 2; "
+                "multipole order cannot be sampled continuously."
+            )
