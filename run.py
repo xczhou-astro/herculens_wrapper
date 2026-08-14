@@ -640,15 +640,21 @@ def build_and_run(config_path=None):
                     if max_warmup_it > 0:
                         try:
                             print(f"\n[svi-warmup] Starting {max_warmup_it} iteration warmup for pixelated source parameters...")
-                            kwargs_lens_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
-                            kwargs_lens_light_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
+                            
+                            kwargs_lens_fixed_warmup = None
+                            if type_list.get('lens_mass_type_list'):
+                                kwargs_lens_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_mass')
+                                
+                            kwargs_lens_light_fixed_warmup = None
+                            if type_list.get('lens_light_type_list'):
+                                kwargs_lens_light_fixed_warmup = resolve_fixed_kwargs(run_args.init_params_path, 'lens_light')
                             
                             warmup_prob_model = create_prob_model(
                                 param_list, type_list, lens_image, image_data, noise_map,
                                 regul_model=None,
-                                fix_lens_light=True,
+                                fix_lens_light=(kwargs_lens_light_fixed_warmup is not None),
                                 kwargs_lens_light_fixed=kwargs_lens_light_fixed_warmup,
-                                fix_lens_mass=True,
+                                fix_lens_mass=(kwargs_lens_fixed_warmup is not None),
                                 kwargs_lens_fixed=kwargs_lens_fixed_warmup,
                                 fix_source_light=False,
                                 init_params_path=run_args.init_params_path,
@@ -668,10 +674,21 @@ def build_and_run(config_path=None):
                                 if len(warmup_losses) > 0:
                                     print(f"[svi-warmup] Initial warmup loss (when begin): {warmup_losses[0]:.4f}")
                                     print(f"[svi-warmup] Final warmup loss (after warm up): {warmup_losses[-1]:.4f}")
-                            print("[svi-warmup] Warmup complete. Updating init_params with optimized source parameters.")
+                            
+                            has_nan = False
                             for param_name, param_value in warmup_best_params.items():
                                 if 'source' in param_name or 'pixels_wn' in param_name:
-                                    init_params[param_name] = param_value
+                                    if np.any(np.isnan(np.array(param_value))):
+                                        has_nan = True
+                                        break
+                                        
+                            if has_nan:
+                                print("[svi-warmup] Warning: Warmup parameters contain NaNs due to divergence. Skipping warmup parameter update and proceeding with standard initialization.")
+                            else:
+                                print("[svi-warmup] Warmup complete. Updating init_params with optimized source parameters.")
+                                for param_name, param_value in warmup_best_params.items():
+                                    if 'source' in param_name or 'pixels_wn' in param_name:
+                                        init_params[param_name] = param_value
                         except Exception as e:
                             print(f"[svi-warmup] Warning: SVI source warmup failed, proceeding with standard initialization. Error: {e}")
 
