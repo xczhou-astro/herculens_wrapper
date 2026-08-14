@@ -47,6 +47,22 @@ def _norm_from_plot_scale(plot_scale, arr):
     return None, 'linear'
 
 
+def _filter_caustics(caustics):
+    if caustics is None or len(caustics) <= 1:
+        return caustics
+    sizes = []
+    for cx, cy in caustics:
+        cx, cy = np.asarray(cx), np.asarray(cy)
+        if len(cx) == 0:
+            rms = 0.0
+        else:
+            dx = cx - np.mean(cx)
+            dy = cy - np.mean(cy)
+            rms = np.sqrt(np.mean(dx**2 + dy**2))
+        sizes.append(rms)
+    return [caustics[np.argmin(sizes)]]
+
+
 def _image_extent(ny, nx, pixel_scale):
     x_center = nx // 2
     y_center = ny // 2
@@ -417,6 +433,7 @@ def plot_source_plane(
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
             )
+            caustics = _filter_caustics(caustics)
         except Exception as e:
             print(f'[plot_source_plane] Could not compute caustics: {e}')
 
@@ -605,6 +622,7 @@ def plot_composite_2x3_panel(
         _, caustics = model_util.critical_lines_caustics(
             lens_image, kwargs_result['kwargs_lens'], supersampling=5,
         )
+        caustics = _filter_caustics(caustics)
     except Exception:
         pass
 
@@ -814,6 +832,7 @@ def plot_multiband_composite(
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
             )
+            caustics = _filter_caustics(caustics)
             for caustic_x, caustic_y in caustics:
                 source_axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
         except Exception:
@@ -872,6 +891,7 @@ def plot_multiband_source_reconstructions(band_results, save_path, output_filena
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
             )
+            caustics = _filter_caustics(caustics)
             for caustic_x, caustic_y in caustics:
                 axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
         except Exception:
