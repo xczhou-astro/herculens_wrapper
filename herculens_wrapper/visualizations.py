@@ -664,6 +664,34 @@ def plot_composite_2x3_panel(
         except Exception:
             pass
 
+    # Set the pixels outside the yellow dashed line (mapped_ring_contours) to be 0 (only for visualization)
+    if mapped_ring_contours:
+        try:
+            from matplotlib.path import Path
+            inside_mask = np.zeros(source_for_plot.shape, dtype=bool)
+            
+            # Construct coordinate grid xx_src, yy_src if not already computed
+            if is_pixelated:
+                ny_src, nx_src = source_for_plot.shape
+                dx = (extent_src[1] - extent_src[0]) / nx_src
+                dy = (extent_src[3] - extent_src[2]) / ny_src
+                x_centers = np.linspace(extent_src[0] + dx/2.0, extent_src[1] - dx/2.0, nx_src)
+                y_centers = np.linspace(extent_src[2] + dy/2.0, extent_src[3] - dy/2.0, ny_src)
+                xx_src_grid, yy_src_grid = np.meshgrid(x_centers, y_centers)
+            else:
+                xx_src_grid, yy_src_grid = xx_src, yy_src
+                
+            points = np.column_stack((xx_src_grid.ravel(), yy_src_grid.ravel()))
+            for beta_x_b, beta_y_b in mapped_ring_contours:
+                polygon_vertices = np.column_stack((beta_x_b, beta_y_b))
+                if len(polygon_vertices) >= 3:
+                    path = Path(polygon_vertices)
+                    inside_mask |= path.contains_points(points).reshape(source_for_plot.shape)
+            
+            source_for_plot = np.where(inside_mask, source_for_plot, 0.0)
+        except Exception as e:
+            print(f'[plot_composite_2x3_panel] Warning: could not apply ring contour mask to source plane: {e}')
+
     # Render 2x3 panel plot with mixed scales: Data & Model in log scale; rest in linear scale. Colorbar ONLY on Residual.
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
@@ -710,11 +738,15 @@ def plot_composite_2x3_panel(
 
     # Panel (1, 2): Source (Source Plane, Linear scale, no colorbar)
     axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
+    axes[1, 2].axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
+    axes[1, 2].axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     for caust_x, caust_y in caustics:
         axes[1, 2].plot(caust_x, caust_y, color='lime', lw=1.0)
     if mapped_ring_contours:
         for beta_x_b, beta_y_b in mapped_ring_contours:
             axes[1, 2].plot(beta_x_b, beta_y_b, color='orange', lw=1.5, ls='--', alpha=0.95)
+    axes[1, 2].set_xlim(extent_src[0], extent_src[1])
+    axes[1, 2].set_ylim(extent_src[2], extent_src[3])
     axes[1, 2].set_title('Source')
 
     for a in axes.ravel():
@@ -1297,6 +1329,7 @@ def display_init(
     save_path,
     num_params,
     type_list=None,
+    residual_vis_max=0.0,
 ):
     """Plot the initial guess model before inference."""
     kwargs_init = prob_model.params2kwargs(init_params)
@@ -1330,6 +1363,7 @@ def display_init(
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'initial_guess_model.png'),
         contour_mask=mask,
+        residual_vis_max=residual_vis_max,
     )
 
     is_pixelated = (

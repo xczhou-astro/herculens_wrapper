@@ -710,6 +710,7 @@ def build_and_run(config_path=None):
                     save_path=run_save_path,
                     num_params=num_params,
                     type_list=type_list,
+                    residual_vis_max=getattr(run_args, 'residual_vis_max', 0.0),
                 )
             except Exception as e:
                 print(f'[plots] initial_guess_model.png skipped: {e}')
@@ -1163,6 +1164,7 @@ def build_and_run(config_path=None):
                 save_path=save_path,
                 num_params=num_params,
                 type_list=type_list,
+                residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
             )
         except Exception as e:
             print(f'[plots] initial_guess_model.png skipped: {e}')
