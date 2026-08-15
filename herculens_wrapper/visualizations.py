@@ -410,33 +410,6 @@ def plot_source_plane(
             lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
         ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
 
-    # Initialize adaptive limits defaulting to the full grid extent
-    xmin_sq, xmax_sq = extent[0], extent[1]
-    ymin_sq, ymax_sq = extent[2], extent[3]
-
-    norm, cbar_label = _norm_from_plot_scale(plot_scale, source_for_plot)
-
-    ra_source_list = []
-    dec_source_list = []
-    if 'kwargs_point_source' in kwargs_result:
-        beta_x, beta_y = lens_image.PointSourceModel.get_source_plane_points(
-            kwargs_result['kwargs_point_source'],
-            kwargs_lens=kwargs_result['kwargs_lens'],
-            with_amplitude=False,
-        )
-        ra_source_list = [np.atleast_1d(np.asarray(b)) for b in beta_x]
-        dec_source_list = [np.atleast_1d(np.asarray(d)) for d in beta_y]
-
-    caustics = []
-    if plot_caustics:
-        try:
-            _, caustics = model_util.critical_lines_caustics(
-                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
-            )
-            caustics = _filter_caustics(caustics)
-        except Exception as e:
-            print(f'[plot_source_plane] Could not compute caustics: {e}')
-
     # Map lensed ring / source_arc_mask boundary back to source plane
     ring_mask = source_arc_mask
     if ring_mask is None:
@@ -479,10 +452,60 @@ def plot_source_plane(
         except Exception as e:
             print(f'[plot_source_plane] Could not compute mapped ring boundary: {e}')
 
+    # Mask the pixels outside the yellow dashed line (mapped_ring_contours) to be 0 (only for visualization)
+    inside_mask = None
+    if mapped_ring_contours:
+        try:
+            from matplotlib.path import Path
+            inside_mask = np.zeros(source_for_plot.shape, dtype=bool)
+            xx_grid, yy_grid = xx, yy
+            if xx_grid.ndim == 1 and yy_grid.ndim == 1:
+                xx_grid, yy_grid = np.meshgrid(xx_grid, yy_grid)
+            points = np.column_stack((xx_grid.ravel(), yy_grid.ravel()))
+            for beta_x_b, beta_y_b in mapped_ring_contours:
+                polygon_vertices = np.column_stack((beta_x_b, beta_y_b))
+                if len(polygon_vertices) >= 3:
+                    path = Path(polygon_vertices)
+                    inside_mask |= path.contains_points(points).reshape(source_for_plot.shape)
+            source_for_plot = np.where(inside_mask, source_for_plot, 0.0)
+        except Exception as e:
+            print(f'[plot_source_plane] Warning: could not apply ring contour mask to source plane: {e}')
+
+    # Initialize adaptive limits defaulting to the full grid extent
+    xmin_sq, xmax_sq = extent[0], extent[1]
+    ymin_sq, ymax_sq = extent[2], extent[3]
+
+    norm, cbar_label = _norm_from_plot_scale(plot_scale, source_for_plot)
+
+    ra_source_list = []
+    dec_source_list = []
+    if 'kwargs_point_source' in kwargs_result:
+        beta_x, beta_y = lens_image.PointSourceModel.get_source_plane_points(
+            kwargs_result['kwargs_point_source'],
+            kwargs_lens=kwargs_result['kwargs_lens'],
+            with_amplitude=False,
+        )
+        ra_source_list = [np.atleast_1d(np.asarray(b)) for b in beta_x]
+        dec_source_list = [np.atleast_1d(np.asarray(d)) for d in beta_y]
+
+    caustics = []
+    if plot_caustics:
+        try:
+            _, caustics = model_util.critical_lines_caustics(
+                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+            )
+            caustics = _filter_caustics(caustics)
+        except Exception as e:
+            print(f'[plot_source_plane] Could not compute caustics: {e}')
+
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     scale_suffix = f" ({adapted_pixel_scale:.5f}\"/pix)" if is_pixelated else ""
+
+    for ax in axes:
+        ax.axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
+        ax.axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
 
     im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title(f'Extended Source{scale_suffix}')
@@ -498,6 +521,20 @@ def plot_source_plane(
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
     plt.colorbar(im1, ax=axes[1], label=source_flux_label)
+
+    if mapped_ring_contours and inside_mask is not None:
+        for ax in axes:
+            try:
+                xx_grid, yy_grid = xx, yy
+                if xx_grid.ndim == 1 and yy_grid.ndim == 1:
+                    xx_grid, yy_grid = np.meshgrid(xx_grid, yy_grid)
+                ax.contourf(
+                    xx_grid, yy_grid, inside_mask.astype(float),
+                    levels=[-0.5, 0.5], hatches=['//'], colors=['white'],
+                    edgecolors='gray', alpha=1.0
+                )
+            except Exception as e:
+                print(f'[plot_source_plane] Warning: could not draw hatches: {e}')
 
     if mapped_ring_contours:
         for ax in axes:
@@ -665,6 +702,9 @@ def plot_composite_2x3_panel(
             pass
 
     # Set the pixels outside the yellow dashed line (mapped_ring_contours) to be 0 (only for visualization)
+    inside_mask = None
+    xx_src_grid = None
+    yy_src_grid = None
     if mapped_ring_contours:
         try:
             from matplotlib.path import Path
@@ -740,6 +780,18 @@ def plot_composite_2x3_panel(
     axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
     axes[1, 2].axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     axes[1, 2].axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
+    
+    # Draw diagonal stripes (hatching) in the outside region
+    if mapped_ring_contours and inside_mask is not None:
+        try:
+            axes[1, 2].contourf(
+                xx_src_grid, yy_src_grid, inside_mask.astype(float),
+                levels=[-0.5, 0.5], hatches=['//'], colors=['white'],
+                edgecolors='gray', alpha=1.0
+            )
+        except Exception as e:
+            print(f'[plot_composite_2x3_panel] Warning: could not draw hatches: {e}')
+
     for caust_x, caust_y in caustics:
         axes[1, 2].plot(caust_x, caust_y, color='lime', lw=1.0)
     if mapped_ring_contours:
