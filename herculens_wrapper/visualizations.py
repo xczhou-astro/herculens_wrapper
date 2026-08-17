@@ -5,7 +5,7 @@ import os
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.colors import LogNorm
+from matplotlib.colors import LogNorm, SymLogNorm
 
 try:
     import corner
@@ -123,30 +123,30 @@ def plot_input_data(
     # background_subtract_corner=0,
     # background_subtract_which_corner='bottom_left',
     background_offset=0.0,
+    bad_pixel_mask=None,
+    output_basename='input_data',
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
     psf_ny, psf_nx = psf_data.shape
     psf_extent = _image_extent(psf_ny, psf_nx, pixel_scale)
+    image_data = np.asarray(image_data)
+    noise_map = np.asarray(noise_map)
+    psf_data = np.asarray(psf_data)
+    snr = np.divide(
+        image_data,
+        noise_map,
+        out=np.zeros_like(image_data, dtype=float),
+        where=np.isfinite(noise_map) & (noise_map > 0),
+    )
+    finite_snr = np.abs(snr[np.isfinite(snr)])
+    snr_limit = float(np.percentile(finite_snr, 99.5)) if finite_snr.size else 1.0
+    snr_limit = max(snr_limit, 1.0)
 
     title_suffix = f" (bkg offset: {background_offset:.4f})" if background_offset != 0.0 else ""
 
-    # 1. Linear Scale Plot
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
-    if source_arc_mask is not None:
-        axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    axes[0].set_title(f'Image data{title_suffix}')
-    axes[0].set_xlabel('arcsec')
-    axes[0].set_ylabel('arcsec')
-    plt.colorbar(im0, ax=axes[0], label='Pixel flux')
-
-    if (
-        point_source_type_list is not None
-        and point_source_params_list is not None
-        and any(t == 'IMAGE_POSITIONS' for t in point_source_type_list)
-    ):
+    point_sources = []
+    if point_source_type_list is not None and point_source_params_list is not None:
         n_ps = sum(1 for t in point_source_type_list if t == 'IMAGE_POSITIONS')
         colors = _point_source_colors(n_ps)
         k = 0
@@ -156,81 +156,88 @@ def plot_input_data(
             ras = np.atleast_1d(np.asarray(ps.get('ra', []), dtype=float))
             decs = np.atleast_1d(np.asarray(ps.get('dec', []), dtype=float))
             if ras.size and decs.size:
-                axes[0].scatter(
-                    ras, decs, s=40, marker='o', facecolors='none',
-                    edgecolors=colors[k], linewidths=1.5, label=f'PS {k + 1}',
-                )
+                point_sources.append((ras, decs, colors[k], f'PS {k + 1}'))
                 k += 1
-        axes[0].legend(loc='best', fontsize=8)
 
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='twilight', extent=extent)
-    axes[1].set_title('Noise map')
-    axes[1].set_xlabel('arcsec')
-    axes[1].set_ylabel('arcsec')
-    plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty')
+    def _annotate_image_axis(axis):
+        if source_arc_mask is not None:
+            axis.contour(
+                np.asarray(source_arc_mask), levels=[0.5], colors='lime',
+                extent=extent, linewidths=1.0,
+            )
+        if bad_pixel_mask is not None:
+            axis.contour(
+                np.asarray(bad_pixel_mask), levels=[0.5], colors='red',
+                extent=extent, linewidths=1.0,
+            )
+        for ras, decs, color, label in point_sources:
+            axis.scatter(
+                ras, decs, s=40, marker='o', facecolors='none',
+                edgecolors=color, linewidths=1.5, label=label,
+            )
+        if point_sources:
+            axis.legend(loc='best', fontsize=8)
 
-    im2 = axes[2].imshow(psf_data, origin='lower', cmap='twilight', extent=psf_extent)
-    axes[2].set_title('PSF kernel')
-    axes[2].set_xlabel('arcsec')
-    axes[2].set_ylabel('arcsec')
-    plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value')
+    def _save_input_figure(filename, log_scale):
+        fig, axes = plt.subplots(2, 2, figsize=(12, 10))
 
-    plt.tight_layout()
-    if save_path is not None:
-        plt.savefig(os.path.join(save_path, 'input_data_linear.png'), dpi=200, bbox_inches='tight')
-    plt.close()
+        image_norm, _ = _norm_from_plot_scale('log', image_data) if log_scale else (None, 'linear')
+        image = axes[0, 0].imshow(
+            image_data, origin='lower', cmap='twilight', extent=extent, norm=image_norm,
+        )
+        _annotate_image_axis(axes[0, 0])
+        axes[0, 0].set_title(f"Image data{' (log)' if log_scale else ''}{title_suffix}")
+        fig.colorbar(image, ax=axes[0, 0], label=f"Pixel flux{' (log scale)' if log_scale else ''}")
 
-    # 2. Log Scale Plot
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+        noise_norm, _ = _norm_from_plot_scale('log', noise_map) if log_scale else (None, 'linear')
+        noise = axes[0, 1].imshow(
+            noise_map, origin='lower', cmap='twilight', extent=extent, norm=noise_norm,
+        )
+        axes[0, 1].set_title(f"Noise map{' (log)' if log_scale else ''}")
+        fig.colorbar(noise, ax=axes[0, 1], label=f"Pixel-flux uncertainty{' (log scale)' if log_scale else ''}")
 
-    norm_img, _ = _norm_from_plot_scale('log', image_data)
-    im0 = axes[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_img)
-    if source_arc_mask is not None:
-        axes[0].contour(np.asarray(source_arc_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    axes[0].set_title(f'Image data (log){title_suffix}')
-    axes[0].set_xlabel('arcsec')
-    axes[0].set_ylabel('arcsec')
-    plt.colorbar(im0, ax=axes[0], label='Pixel flux (log scale)')
+        snr_norm = (
+            SymLogNorm(linthresh=1.0, linscale=1.0, vmin=-snr_limit, vmax=snr_limit, base=10)
+            if log_scale else None
+        )
+        snr_image = axes[1, 0].imshow(
+            snr, origin='lower', cmap='bwr', extent=extent, norm=snr_norm,
+            vmin=None if log_scale else -snr_limit,
+            vmax=None if log_scale else snr_limit,
+        )
+        if source_arc_mask is not None:
+            axes[1, 0].contour(
+                np.asarray(source_arc_mask), levels=[0.5], colors='lime',
+                extent=extent, linewidths=1.0,
+            )
+        if bad_pixel_mask is not None:
+            axes[1, 0].contour(
+                np.asarray(bad_pixel_mask), levels=[0.5], colors='red',
+                extent=extent, linewidths=1.0,
+            )
+        axes[1, 0].set_title(f"Signal-to-noise{' (symlog)' if log_scale else ''}")
+        fig.colorbar(
+            snr_image, ax=axes[1, 0],
+            label='Signal-to-noise (symmetric log scale)' if log_scale else 'Signal-to-noise',
+        )
 
-    if (
-        point_source_type_list is not None
-        and point_source_params_list is not None
-        and any(t == 'IMAGE_POSITIONS' for t in point_source_type_list)
-    ):
-        k = 0
-        for t, ps in zip(point_source_type_list, point_source_params_list):
-            if t != 'IMAGE_POSITIONS':
-                continue
-            ras = np.atleast_1d(np.asarray(ps.get('ra', []), dtype=float))
-            decs = np.atleast_1d(np.asarray(ps.get('dec', []), dtype=float))
-            if ras.size and decs.size:
-                axes[0].scatter(
-                    ras, decs, s=40, marker='o', facecolors='none',
-                    edgecolors=colors[k], linewidths=1.5, label=f'PS {k + 1}',
-                )
-                k += 1
-        axes[0].legend(loc='best', fontsize=8)
+        psf_norm, _ = _norm_from_plot_scale('log', psf_data) if log_scale else (None, 'linear')
+        psf = axes[1, 1].imshow(
+            psf_data, origin='lower', cmap='twilight', extent=psf_extent, norm=psf_norm,
+        )
+        axes[1, 1].set_title(f"PSF kernel{' (log)' if log_scale else ''}")
+        fig.colorbar(psf, ax=axes[1, 1], label=f"Normalized PSF pixel value{' (log scale)' if log_scale else ''}")
 
-    norm_noise, _ = _norm_from_plot_scale('log', noise_map)
-    im1 = axes[1].imshow(noise_map, origin='lower', cmap='twilight', extent=extent, norm=norm_noise)
-    axes[1].set_title('Noise map (log)')
-    axes[1].set_xlabel('arcsec')
-    axes[1].set_ylabel('arcsec')
-    plt.colorbar(im1, ax=axes[1], label='Pixel-flux uncertainty (log scale)')
+        for axis in axes.ravel():
+            axis.set_xlabel('arcsec')
+            axis.set_ylabel('arcsec')
+        fig.tight_layout()
+        if save_path is not None:
+            fig.savefig(os.path.join(save_path, filename), dpi=200, bbox_inches='tight')
+        plt.close(fig)
 
-    norm_psf, _ = _norm_from_plot_scale('log', psf_data)
-    im2 = axes[2].imshow(
-        psf_data, origin='lower', cmap='twilight', extent=psf_extent, norm=norm_psf,
-    )
-    axes[2].set_title('PSF kernel (log)')
-    axes[2].set_xlabel('arcsec')
-    axes[2].set_ylabel('arcsec')
-    plt.colorbar(im2, ax=axes[2], label='Normalized PSF pixel value (log scale)')
-
-    plt.tight_layout()
-    if save_path is not None:
-        plt.savefig(os.path.join(save_path, 'input_data_log.png'), dpi=200, bbox_inches='tight')
-    plt.close()
+    _save_input_figure(f'{output_basename}_linear.png', log_scale=False)
+    _save_input_figure(f'{output_basename}_log.png', log_scale=True)
 
 
 def plot_image_plane(
@@ -531,7 +538,7 @@ def plot_source_plane(
                 ax.contourf(
                     xx_grid, yy_grid, inside_mask.astype(float),
                     levels=[-0.5, 0.5], hatches=['//'], colors=['white'],
-                    edgecolors='gray', alpha=1.0
+                    alpha=1.0
                 )
             except Exception as e:
                 print(f'[plot_source_plane] Warning: could not draw hatches: {e}')
@@ -787,7 +794,7 @@ def plot_composite_2x3_panel(
             axes[1, 2].contourf(
                 xx_src_grid, yy_src_grid, inside_mask.astype(float),
                 levels=[-0.5, 0.5], hatches=['//'], colors=['white'],
-                edgecolors='gray', alpha=1.0
+                alpha=1.0
             )
         except Exception as e:
             print(f'[plot_composite_2x3_panel] Warning: could not draw hatches: {e}')

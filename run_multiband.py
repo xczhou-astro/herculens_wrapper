@@ -23,9 +23,8 @@ from herculens_wrapper.utils import (
     center_crop,
     configure_import_paths,
     empty_config,
+    exclude_bad_pixels,
     get_fits_data,
-    sanitize_image_data,
-    sanitize_noise_map,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
     log_jax_device_layout,
@@ -369,6 +368,10 @@ def _hmc_checkpoint_samples_per_chain(run_path, args):
                 f'checkpoint uses num_chains={saved_chains}, but configuration requests '
                 f'num_chains_hmc_numpyro={configured_chains}'
             )
+        if 'completed_samples_per_chain' in checkpoint:
+            return int(checkpoint['completed_samples_per_chain'])
+
+        # Backward compatibility with checkpoints that embedded every sample batch.
         completed = 0
         for batch in checkpoint.get('all_samples', []):
             if not batch:
@@ -787,8 +790,9 @@ def build_and_run_multiband(config_path=None):
             image_data = center_crop(image_data, args.crop_size)
             noise_map = center_crop(noise_map, args.crop_size)
             source_arc_mask = center_crop(source_arc_mask, args.crop_size)
-        image_data = sanitize_image_data(image_data)
-        noise_map = sanitize_noise_map(noise_map)
+        image_data_before_bad_pixel_mask = np.array(image_data, copy=True)
+        noise_map_before_bad_pixel_mask = np.array(noise_map, copy=True)
+        image_data, noise_map, bad_pixel_mask = exclude_bad_pixels(image_data, noise_map)
         if image_data.shape != noise_map.shape or image_data.shape != source_arc_mask.shape:
             raise ValueError(f'Data, noise, and mask shapes must agree for {band_name!r}.')
         if use_multidata:
@@ -835,6 +839,12 @@ def build_and_run_multiband(config_path=None):
                 f'from {background_corner} corner ({background_size}x{background_size} pixels) '
                 'and subtracted it.'
             )
+
+        image_data_before_bad_pixel_mask = np.where(
+            np.isfinite(image_data_before_bad_pixel_mask),
+            image_data_before_bad_pixel_mask - background_offset,
+            image_data_before_bad_pixel_mask,
+        )
 
         image_size = image_data.shape[0]
         mass_types, mass_params = _call_config(lens_mass_config, image_size, args.pixel_scale, args, band_name)
@@ -883,6 +893,10 @@ def build_and_run_multiband(config_path=None):
             'type_list': type_list,
             'param_list': param_list,
             'background_offset': background_offset,
+            'image_data_before_bad_pixel_mask': image_data_before_bad_pixel_mask,
+            'noise_map_before_bad_pixel_mask': noise_map_before_bad_pixel_mask,
+            'bad_pixel_mask': bad_pixel_mask,
+            'fit_mask_bool': ~bad_pixel_mask,
             'save_path': None,
         })
 
@@ -982,6 +996,16 @@ def build_and_run_multiband(config_path=None):
         for band in bands:
             band['save_path'] = os.path.join(run_path, band['name'])
             os.makedirs(band['save_path'], exist_ok=True)
+            plot_input_data(
+                band['image_data_before_bad_pixel_mask'],
+                band['noise_map_before_bad_pixel_mask'], band['psf_data'], args.pixel_scale,
+                band['save_path'], band['type_list']['point_source_type_list'],
+                band['param_list']['point_source_params_list'],
+                getattr(band['lens_image'], 'source_arc_mask', None),
+                background_offset=band['background_offset'],
+                bad_pixel_mask=band['bad_pixel_mask'],
+                output_basename='input_data_before_mask',
+            )
             plot_input_data(
                 band['image_data'], band['noise_map'], band['psf_data'], args.pixel_scale,
                 band['save_path'], band['type_list']['point_source_type_list'],
@@ -1131,9 +1155,7 @@ def build_and_run_multiband(config_path=None):
                 prob_model, args, init_params, run_init_path,
                 batch_diagnostics_callback=batch_callback,
             )
-            np.savez_compressed(os.path.join(run_path, 'hmc_samples.npz'), **{
-                key: np.asarray(value) for key, value in mcmc_samples.items()
-            })
+            print(f"[hmc] Posterior samples are stored in {os.path.join(run_path, 'hmc_samples.h5')}")
         else:
             raise ValueError(f'Unsupported multiband sampler {sampler!r}.')
 
@@ -1259,9 +1281,12 @@ def build_and_run_multiband(config_path=None):
                 )
             best_fit_model = band['lens_image'].model(**kwargs_best)
             metrics_model = component_medians.get('total') if component_medians else best_fit_model
-            chi2 = float(np.sum(((metrics_model - band['image_data']) / band['noise_map']) ** 2))
+            standardized_residual = (
+                (metrics_model - band['image_data']) / band['noise_map']
+            )
+            chi2 = float(np.sum(standardized_residual[band['fit_mask_bool']] ** 2))
             total_chi2 += chi2
-            total_data_pixels += int(band['image_data'].size)
+            total_data_pixels += int(np.sum(band['fit_mask_bool']))
             comparison[f'run_{run_index}']['bands'][band['name']] = {
                 'chi2': chi2,
             }

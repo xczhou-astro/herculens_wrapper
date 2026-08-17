@@ -35,10 +35,9 @@ from herculens_wrapper.utils import (
     configure_import_paths,
     create_source_arc_mask_from_radius,
     empty_config,
+    exclude_bad_pixels,
     fit_dof_and_reduced_chi2,
     get_fits_data,
-    sanitize_image_data,
-    sanitize_noise_map,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
     normalize_run_args_paths,
@@ -246,8 +245,9 @@ def build_and_run(config_path=None):
         image_data = center_crop(image_data, args.crop_size)
         noise_map = center_crop(noise_map, args.crop_size)
 
-    image_data = sanitize_image_data(image_data)
-    noise_map = sanitize_noise_map(noise_map)
+    image_data_before_bad_pixel_mask = np.array(image_data, copy=True)
+    noise_map_before_bad_pixel_mask = np.array(noise_map, copy=True)
+    image_data, noise_map, bad_pixel_mask = exclude_bad_pixels(image_data, noise_map)
 
     background_subtract_corner = int(getattr(args, 'background_subtract_corner', 0))
     background_subtract_which_corner = str(getattr(args, 'background_subtract_which_corner', 'bottom_left')).lower().strip()
@@ -280,6 +280,12 @@ def build_and_run(config_path=None):
             f"[bkg] Derived global background offset of {background_offset:.6f} "
             f"from {background_subtract_which_corner} corner ({c}x{c} pixels) and subtracted it."
         )
+
+    image_data_before_bad_pixel_mask = np.where(
+        np.isfinite(image_data_before_bad_pixel_mask),
+        image_data_before_bad_pixel_mask - background_offset,
+        image_data_before_bad_pixel_mask,
+    )
 
     args.background_offset = background_offset
     with open(os.path.join(save_path, 'args.json'), 'w') as f:
@@ -319,8 +325,6 @@ def build_and_run(config_path=None):
                 mask_comp = np.where(mask_comp > 0.5, 0.0, 1.0)
                 all_mask = all_mask + mask_comp
         mask_bool = all_mask > 0.5
-        image_data = image_data * mask_bool
-        noise_map = np.where(mask_bool, noise_map, 1e10)
 
     lens_mass_type_list, lens_mass_params_list = lens_mass_config(
         image_size=image_size, pixel_scale=args.pixel_scale, args=args,
@@ -338,6 +342,30 @@ def build_and_run(config_path=None):
         )
     else:
         point_source_type_list, point_source_params_list = [], []
+
+    try:
+        plot_input_data(
+            image_data=image_data_before_bad_pixel_mask,
+            noise_map=noise_map_before_bad_pixel_mask,
+            psf_data=psf_data,
+            pixel_scale=args.pixel_scale,
+            save_path=save_path,
+            point_source_type_list=point_source_type_list,
+            point_source_params_list=point_source_params_list,
+            source_arc_mask=source_arc_mask,
+            background_offset=background_offset,
+            bad_pixel_mask=bad_pixel_mask,
+            output_basename='input_data_before_mask',
+        )
+    except Exception as e:
+        print(f'[plots] input_data_before_mask.png skipped: {e}')
+
+    if mask_bool is not None:
+        image_data = image_data * mask_bool
+        noise_map = np.where(mask_bool, noise_map, 1e10)
+        mask_bool = mask_bool & ~bad_pixel_mask
+    else:
+        mask_bool = ~bad_pixel_mask
 
     try:
         plot_input_data(
@@ -765,11 +793,7 @@ def build_and_run(config_path=None):
                 mcmc_samples, best_params, extra = run_hmc(run_prob_model, run_args, init_params, init_params_path=run_args.init_params_path)
                 flat_samples = extra.get('flat_samples', None)
 
-                # Save MCMC samples
-                samples_npz_path = os.path.join(run_save_path, f'{run_args.sampler}_samples.npz')
-                npz_dict = {k: np.asarray(v) for k, v in mcmc_samples.items()}
-                np.savez_compressed(samples_npz_path, **npz_dict)
-                print(f"Saved MCMC samples to {samples_npz_path}")
+                print(f"[hmc] Posterior samples are stored in {os.path.join(run_save_path, 'hmc_samples.h5')}")
 
                 # Save parameter uncertainties (kwargs_sigma)
                 try:
@@ -1266,11 +1290,7 @@ def build_and_run(config_path=None):
                 json.dump(kwargs_json, f, indent=4, default=json_serializer)
             write_parameter_comparison(save_path, args.init_params_path, kwargs_json, type_list)
 
-            # Save MCMC samples
-            samples_npz_path = os.path.join(save_path, f'{sampler}_samples.npz')
-            npz_dict = {k: np.asarray(v) for k, v in mcmc_samples.items()}
-            np.savez_compressed(samples_npz_path, **npz_dict)
-            print(f"Saved MCMC samples to {samples_npz_path}")
+            print(f"[hmc] Posterior samples are stored in {os.path.join(save_path, 'hmc_samples.h5')}")
 
             # Save parameter uncertainties (kwargs_sigma)
             try:

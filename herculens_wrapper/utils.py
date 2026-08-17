@@ -109,6 +109,37 @@ def sanitize_image_data(image_data):
     return image_data
 
 
+def exclude_bad_pixels(image_data, noise_map, excluded_noise=1e10):
+    """Exclude invalid image/noise locations from the likelihood.
+
+    A bad location has a non-finite image value or a non-finite/non-positive
+    noise value. Its data value is set to zero and its noise is made large,
+    giving it negligible likelihood weight without introducing NaNs.
+    """
+    image_data = np.asarray(image_data, dtype=np.float64)
+    noise_map = np.asarray(noise_map, dtype=np.float64)
+    if image_data.shape != noise_map.shape:
+        raise ValueError(
+            f"image_data and noise_map must have the same shape; got "
+            f"{image_data.shape} and {noise_map.shape}."
+        )
+
+    bad_pixel_mask = (
+        ~np.isfinite(image_data)
+        | ~np.isfinite(noise_map)
+        | (noise_map <= 0.0)
+    )
+    if np.any(bad_pixel_mask):
+        count = int(np.sum(bad_pixel_mask))
+        print(
+            f"[bad_pixels] Excluding {count} invalid image/noise pixel(s) "
+            f"from the likelihood (noise={float(excluded_noise):.1e})."
+        )
+        image_data = np.where(bad_pixel_mask, 0.0, image_data)
+        noise_map = np.where(bad_pixel_mask, float(excluded_noise), noise_map)
+    return image_data, noise_map, bad_pixel_mask
+
+
 
 
 def fit_dof_and_reduced_chi2(chi2, image_data, num_params, mask_bool=None):

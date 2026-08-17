@@ -4,7 +4,10 @@ from numpyro.distributions import biject_to
 import json
 import os
 import pickle
+from glob import glob
+from urllib.parse import quote, unquote
 
+import h5py
 import numpy as np
 import optax
 import jax
@@ -821,6 +824,131 @@ def pixelated_stage_init_from_parametric(params):
     return {k: v for k, v in params.items() if k.startswith(allowed_prefixes)}
 
 
+HMC_SAMPLES_HDF5_FILENAME = 'hmc_samples.h5'
+
+
+def _hmc_hdf5_path(save_path):
+    return os.path.join(save_path, HMC_SAMPLES_HDF5_FILENAME)
+
+
+def _hdf5_site_name(name):
+    """Encode NumPyro site names, which may contain '/' in joint models."""
+    return quote(name, safe='')
+
+
+def _hdf5_group_arrays(group):
+    return {
+        unquote(name): np.asarray(dataset)
+        for name, dataset in group.items()
+        if isinstance(dataset, h5py.Dataset)
+    }
+
+
+def _append_hmc_samples_hdf5(path, samples, extra_fields, num_chains):
+    """Append one flattened MCMC batch to the single on-disk posterior store."""
+    if not samples:
+        return
+    batch_size = int(np.asarray(next(iter(samples.values()))).shape[0])
+    if batch_size % num_chains:
+        raise ValueError('HMC batch sample count is incompatible with num_chains.')
+
+    with h5py.File(path, 'a') as handle:
+        saved_chains = handle.attrs.get('num_chains')
+        if saved_chains is not None and int(saved_chains) != int(num_chains):
+            raise ValueError(
+                f'HDF5 samples use num_chains={saved_chains}, but the current '
+                f'configuration requests {num_chains}.'
+            )
+        handle.attrs['num_chains'] = int(num_chains)
+        handle.attrs['format_version'] = 1
+
+        for group_name, values in (('samples', samples), ('sampler_health', extra_fields)):
+            if not values:
+                continue
+            group = handle.require_group(group_name)
+            for name, value in values.items():
+                array = np.asarray(value)
+                if array.shape[0] != batch_size:
+                    raise ValueError(
+                        f'HMC {group_name} field {name!r} has an incompatible batch length.'
+                    )
+                dataset_name = _hdf5_site_name(name)
+                if dataset_name not in group:
+                    chunk_rows = max(1, min(batch_size, 128))
+                    group.create_dataset(
+                        dataset_name,
+                        data=array,
+                        maxshape=(None,) + array.shape[1:],
+                        chunks=(chunk_rows,) + array.shape[1:],
+                        compression='gzip',
+                        compression_opts=4,
+                        shuffle=True,
+                    )
+                else:
+                    dataset = group[dataset_name]
+                    if dataset.shape[1:] != array.shape[1:]:
+                        raise ValueError(
+                            f'HMC {group_name} field {name!r} changed shape from '
+                            f'{dataset.shape[1:]} to {array.shape[1:]}.'
+                        )
+                    old_rows = dataset.shape[0]
+                    dataset.resize(old_rows + batch_size, axis=0)
+                    dataset[old_rows:] = array
+        handle.flush()
+
+
+def _load_hmc_samples_hdf5(path):
+    """Load flattened posterior and sampler-health arrays from HDF5."""
+    with h5py.File(path, 'r') as handle:
+        if 'samples' not in handle:
+            raise ValueError(f'HMC samples file {path!r} does not contain a samples group.')
+        samples = _hdf5_group_arrays(handle['samples'])
+        extra_fields = (
+            _hdf5_group_arrays(handle['sampler_health'])
+            if 'sampler_health' in handle else {}
+        )
+    return samples, extra_fields
+
+
+def _hmc_hdf5_sample_rows(path):
+    with h5py.File(path, 'r') as handle:
+        if 'samples' not in handle or not handle['samples']:
+            return 0
+        lengths = {dataset.shape[0] for dataset in handle['samples'].values()}
+        if len(lengths) != 1:
+            raise ValueError(f'HMC samples file {path!r} has inconsistent dataset lengths.')
+        return lengths.pop()
+
+
+def _truncate_hmc_hdf5(path, rows):
+    """Discard an uncheckpointed HDF5 tail left by an interrupted batch write."""
+    with h5py.File(path, 'r+') as handle:
+        for group_name in ('samples', 'sampler_health'):
+            if group_name not in handle:
+                continue
+            for dataset in handle[group_name].values():
+                if dataset.shape[0] > rows:
+                    dataset.resize(rows, axis=0)
+        handle.flush()
+
+
+def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches,
+                          num_chains, checkpoint_interval):
+    """Persist only the state and metadata required to resume NumPyro MCMC."""
+    payload = {
+        'format_version': 2,
+        'last_state': last_state,
+        'completed_samples_per_chain': int(completed_samples),
+        'completed_batches': int(completed_batches),
+        'num_chains': int(num_chains),
+        'checkpoint_interval': int(checkpoint_interval),
+    }
+    temporary_path = f'{path}.tmp'
+    with open(temporary_path, 'wb') as handle:
+        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    os.replace(temporary_path, path)
+
+
 def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
     if init_params_path is None:
         raise ValueError("HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
@@ -1050,43 +1178,17 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     os.makedirs(save_path, exist_ok=True)
     
     checkpoint_path = os.path.join(save_path, "hmc_checkpoint.pkl")
+    samples_hdf5_path = _hmc_hdf5_path(save_path)
     start_batch_idx = 0
     last_state = None
     completed_samples = 0
+    record_hmc_health = True
     
     if os.path.exists(checkpoint_path):
         print(f"[hmc] Found existing checkpoint at {checkpoint_path}. Attempting to resume...")
         try:
             with open(checkpoint_path, 'rb') as f:
                 ckpt = pickle.load(f)
-            all_samples = ckpt['all_samples']
-            # Convert loaded samples to CPU NumPy arrays to prevent GPU OOM if checkpoint is old
-            all_samples = [
-                {k: np.asarray(v) for k, v in batch.items()}
-                for batch in all_samples
-            ]
-            all_hmc_extra_fields = [
-                {k: np.asarray(v) for k, v in batch.items()}
-                for batch in ckpt.get('all_hmc_extra_fields', [])
-            ]
-            if not all_hmc_extra_fields:
-                # Old checkpoints did not persist sampler-health fields.
-                all_hmc_extra_fields = [{} for _ in all_samples]
-            elif len(all_hmc_extra_fields) != len(all_samples):
-                print('[hmc] Checkpoint sampler-health fields are incomplete; skipping health metrics on resume.')
-                all_hmc_extra_fields = [{} for _ in all_samples]
-            for batch in all_samples:
-                if not batch:
-                    continue
-                first_value = next(iter(batch.values()))
-                batch_total = int(np.asarray(first_value).shape[0])
-                if batch_total % num_chains:
-                    raise ValueError(
-                        'Checkpoint sample count is incompatible with the configured number of chains.'
-                    )
-                completed_samples += batch_total // num_chains
-            last_state = ckpt['last_state']
-            start_batch_idx = ckpt['completed_batches']
             saved_num_chains = ckpt.get('num_chains')
             saved_interval = ckpt.get('checkpoint_interval')
             if saved_num_chains is not None and int(saved_num_chains) != num_chains:
@@ -1100,6 +1202,88 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     f'the current configuration requests {checkpoint_interval}. Keep the '
                     'checkpoint interval unchanged when extending HMC sampling.'
                 )
+
+            # Checkpoints created before HDF5 embedded all draws. Migrate them once,
+            # then rewrite the checkpoint in the compact v2 format below.
+            if 'all_samples' in ckpt:
+                legacy_samples = [
+                    {k: np.asarray(v) for k, v in batch.items()}
+                    for batch in ckpt.get('all_samples', [])
+                    if batch
+                ]
+                legacy_health = [
+                    {k: np.asarray(v) for k, v in batch.items()}
+                    for batch in ckpt.get('all_hmc_extra_fields', [])
+                ]
+                health_is_complete = (
+                    len(legacy_health) == len(legacy_samples)
+                    and all(bool(fields) for fields in legacy_health)
+                )
+                if not health_is_complete:
+                    legacy_health = [{} for _ in legacy_samples]
+                    record_hmc_health = False
+                    print('[hmc] Legacy checkpoint has no complete sampler-health history; '
+                          'health diagnostics will cover only a fresh HMC run.')
+
+                with h5py.File(samples_hdf5_path, 'w'):
+                    pass
+                for batch_index, batch in enumerate(legacy_samples):
+                    _append_hmc_samples_hdf5(
+                        samples_hdf5_path,
+                        batch,
+                        legacy_health[batch_index] if record_hmc_health else {},
+                        num_chains,
+                    )
+                all_samples = legacy_samples
+                all_hmc_extra_fields = legacy_health
+                for batch in legacy_samples:
+                    first_value = next(iter(batch.values()))
+                    batch_total = int(np.asarray(first_value).shape[0])
+                    if batch_total % num_chains:
+                        raise ValueError(
+                            'Checkpoint sample count is incompatible with the configured number of chains.'
+                        )
+                    completed_samples += batch_total // num_chains
+                print(f'[hmc] Migrated existing samples to {samples_hdf5_path}.')
+                for legacy_batch_path in glob(os.path.join(save_path, 'hmc_samples_batch_*.npz')):
+                    os.remove(legacy_batch_path)
+                if legacy_samples:
+                    print('[hmc] Removed legacy per-batch NPZ archives after HDF5 migration.')
+            else:
+                completed_samples = int(ckpt.get('completed_samples_per_chain', 0))
+                if completed_samples and not os.path.isfile(samples_hdf5_path):
+                    raise ValueError(
+                        'Checkpoint records completed HMC draws but hmc_samples.h5 is missing. '
+                        'Cannot resume without the saved posterior samples.'
+                    )
+                expected_rows = completed_samples * num_chains
+                if expected_rows:
+                    actual_rows = _hmc_hdf5_sample_rows(samples_hdf5_path)
+                    if actual_rows < expected_rows:
+                        raise ValueError(
+                            f'HDF5 samples contain {actual_rows} rows, but the checkpoint '
+                            f'requires {expected_rows} rows.'
+                        )
+                    if actual_rows > expected_rows:
+                        _truncate_hmc_hdf5(samples_hdf5_path, expected_rows)
+                        print('[hmc] Discarded an uncheckpointed HDF5 sample tail from an interrupted write.')
+                    saved_samples, saved_health = _load_hmc_samples_hdf5(samples_hdf5_path)
+                    all_samples = [saved_samples]
+                    all_hmc_extra_fields = [saved_health] if saved_health else [{}]
+                    if not saved_health:
+                        record_hmc_health = False
+                elif os.path.isfile(samples_hdf5_path):
+                    # A checkpoint with zero draws is a fresh start; stale samples must not leak in.
+                    with h5py.File(samples_hdf5_path, 'w'):
+                        pass
+            last_state = ckpt['last_state']
+            start_batch_idx = ckpt['completed_batches']
+            if 'all_samples' in ckpt:
+                _write_hmc_checkpoint(
+                    checkpoint_path, last_state, completed_samples, start_batch_idx,
+                    num_chains, checkpoint_interval,
+                )
+                print('[hmc] Rewrote checkpoint in compact format (posterior draws are in HDF5).')
             print(
                 f"[hmc] Resuming after {completed_samples} draws per chain "
                 f"({start_batch_idx} completed batches)."
@@ -1109,8 +1293,15 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         except Exception as e:
             print(f"[hmc] Failed to load checkpoint: {e}. Starting from scratch.")
             all_samples = []
+            all_hmc_extra_fields = []
             last_state = None
             start_batch_idx = 0
+
+    elif os.path.isfile(samples_hdf5_path):
+        # No checkpoint means this is intentionally a new chain, not a continuation.
+        with h5py.File(samples_hdf5_path, 'w'):
+            pass
+        print(f'[hmc] Replaced stale HDF5 samples at {samples_hdf5_path} for a new run.')
 
     if completed_samples > num_samples_total:
         raise ValueError(
@@ -1186,23 +1377,25 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             if key in ('diverging', 'accept_prob', 'num_steps', 'energy')
         }
         all_hmc_extra_fields.append(batch_hmc_extra_fields)
+
+        _append_hmc_samples_hdf5(
+            samples_hdf5_path,
+            batch_samples,
+            batch_hmc_extra_fields if record_hmc_health else {},
+            num_chains,
+        )
+        print(f"[hmc] Updated HDF5 posterior after batch {i + 1}: {samples_hdf5_path}")
         
-        batch_path = os.path.join(save_path, f"hmc_samples_batch_{i}.npz")
-        npz_dict = {k: np.asarray(v) for k, v in batch_samples.items()}
-        np.savez_compressed(batch_path, **npz_dict)
-        print(f"[hmc] Saved MCMC batch {i+1} to: {batch_path}")
-        
-        # Save checkpoint pkl for resumption
+        # Save only the sampler state and progress; posterior draws live in HDF5.
         try:
-            with open(checkpoint_path, 'wb') as f:
-                pickle.dump({
-                    'last_state': last_state,
-                    'all_samples': all_samples,
-                    'all_hmc_extra_fields': all_hmc_extra_fields,
-                    'completed_batches': i + 1,
-                    'num_chains': num_chains,
-                    'checkpoint_interval': checkpoint_interval,
-                }, f)
+            _write_hmc_checkpoint(
+                checkpoint_path,
+                last_state,
+                completed_samples + sum(batch_sizes[:batch_offset + 1]),
+                i + 1,
+                num_chains,
+                checkpoint_interval,
+            )
             print(f"[hmc] Saved checkpoint to: {checkpoint_path}")
         except Exception as e:
             print(f"[warning] Failed to save checkpoint pkl: {e}")
