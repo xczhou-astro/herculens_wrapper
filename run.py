@@ -227,6 +227,7 @@ def build_and_run(config_path=None):
         display_init,
         generate_run_plots,
         plot_input_data,
+        plot_multiband_composite,
     )
 
     from herculens.RegulModel.regul_model import RegularizationModel
@@ -510,6 +511,7 @@ def build_and_run(config_path=None):
     regul_model = None
     n_runs = int(getattr(args, 'n_runs', 1))
     sampler = args.sampler
+    svi_run_visual_results = {}
 
     # HMC explores one posterior with ``num_chains_hmc_numpyro`` chains. It is
     # initialized from one selected pixelated-SVI run, rather than repeating
@@ -937,6 +939,15 @@ def build_and_run(config_path=None):
                 image_unit=np.asarray('pixel_flux'),
                 noise_unit=np.asarray('pixel_flux'),
             )
+            if run_args.sampler == 'svi':
+                svi_run_visual_results[f'run_{n}'] = {
+                    'name': f'Run {n}',
+                    'lens_image': lens_image,
+                    'kwargs_result': kwargs_best,
+                    'image_data': image_data,
+                    'noise_map': noise_map,
+                    'pixel_scale': run_args.pixel_scale,
+                }
             print(f'Run {n} complete. Outputs in {run_save_path}')
             run_successful = True
             return metrics
@@ -1106,6 +1117,22 @@ def build_and_run(config_path=None):
         comparison_file_path = os.path.join(save_path, 'comparison.json')
         with open(comparison_file_path, 'w') as f:
             json.dump(comparison_results, f, indent=4)
+
+        if sampler == 'svi' and svi_run_visual_results:
+            try:
+                ordered_run_results = [
+                    svi_run_visual_results[f'run_{n}']
+                    for n in range(n_runs)
+                    if f'run_{n}' in svi_run_visual_results
+                ]
+                plot_multiband_composite(
+                    ordered_run_results,
+                    save_path,
+                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                    output_filename='svi_run_comparison.png',
+                )
+            except Exception as error:
+                print(f'[plots] svi_run_comparison.png skipped: {error}')
 
         print("\n========================================")
         print("All runs completed.")

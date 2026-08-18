@@ -949,6 +949,7 @@ def build_and_run_multiband(config_path=None):
         if not init_root:
             raise ValueError('Joint multiband HMC requires init_params_path from a pixelated SVI run.')
     comparison = {}
+    svi_band_run_visuals = {band['name']: [] for band in bands}
     if sampler == 'svi' and n_runs > 1:
         print(f'Starting joint {joint_mode} SVI multi-run in: {base_save_path} (n_runs={n_runs})')
     elif sampler == 'hmc':
@@ -1413,6 +1414,11 @@ def build_and_run_multiband(config_path=None):
             )
         except Exception as error:
             print(f'[plots] multiband_composite.png skipped: {error}')
+        if sampler == 'svi':
+            for band_result in combined_band_results:
+                run_result = dict(band_result)
+                run_result['name'] = f'Run {run_index}'
+                svi_band_run_visuals[band_result['name']].append(run_result)
         if sampler == 'hmc' and shared_lens is not None:
             # Lens mass is shared, so save this final mass-only diagnostic once
             # at the joint result root rather than duplicating it per band.
@@ -1440,6 +1446,19 @@ def build_and_run_multiband(config_path=None):
 
     with open(os.path.join(base_save_path, 'comparison.json'), 'w') as handle:
         json.dump(comparison, handle, indent=4, default=json_serializer)
+    if sampler == 'svi':
+        for band_name, run_results in svi_band_run_visuals.items():
+            if not run_results:
+                continue
+            try:
+                plot_multiband_composite(
+                    run_results,
+                    base_save_path,
+                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                    output_filename=f'svi_run_comparison_{band_name}.png',
+                )
+            except Exception as error:
+                print(f'[plots] svi_run_comparison_{band_name}.png skipped: {error}')
     if comparison:
         comparison_path = os.path.join(base_save_path, 'comparison.json')
         print('\n' + '=' * 40)
