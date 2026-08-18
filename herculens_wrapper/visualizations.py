@@ -1039,7 +1039,6 @@ def plot_hmc_chain_comparison(
     from herculens_wrapper.samplers import (
         evaluate_mcmc_component_medians,
         evaluate_mcmc_source_pixels_summary,
-        get_active_sample_sites,
     )
 
     num_chains = int(num_chains)
@@ -1058,7 +1057,11 @@ def plot_hmc_chain_comparison(
     lens_image = lens_image_override or getattr(prob_model, 'lens_image', None)
     if lens_image is None:
         raise ValueError('HMC chain comparison requires a lens image.')
-    active_sites = set(get_active_sample_sites(prob_model))
+    # ``samples`` is the HMC posterior and therefore already contains only
+    # latent sites.  Re-tracing a local band model here is unsafe: in joint
+    # multi-band mode its fixed-mass callback closes over state created while
+    # tracing the parent model, which can be a JAX tracer.
+    active_sites = set(samples)
     chain_results = []
 
     for chain_index in range(num_chains):

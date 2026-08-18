@@ -708,8 +708,6 @@ def _save_multiband_hmc_batch_diagnostics(
         })
         try:
             from herculens_wrapper.visualizations import plot_hmc_chain_comparison
-            band_diagnostic_path = os.path.join(batch_root, band['name'])
-            os.makedirs(band_diagnostic_path, exist_ok=True)
             plot_hmc_chain_comparison(
                 band['prob_model'],
                 band_samples,
@@ -717,9 +715,11 @@ def _save_multiband_hmc_batch_diagnostics(
                 band['pixel_scale'],
                 band['image_data'],
                 band['noise_map'],
-                band_diagnostic_path,
+                batch_root,
                 residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
-                output_filename=f'hmc_chain_comparison_batch_{batch_index}.png',
+                output_filename=(
+                    f"hmc_chain_comparison_{band['name']}_batch_{batch_index}.png"
+                ),
                 lens_image_override=band['lens_image'],
                 kwargs_lens_from_params=lens_kwargs_from_params,
             )
