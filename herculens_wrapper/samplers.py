@@ -836,12 +836,65 @@ def _hdf5_site_name(name):
     return quote(name, safe='')
 
 
+def _is_pixel_wn_site(name):
+    """Whether a site is the high-dimensional Fourier white-noise latent."""
+    return name.rsplit('/', 1)[-1].startswith('pixels_wn_')
+
+
 def _hdf5_group_arrays(group):
     return {
         unquote(name): np.asarray(dataset)
         for name, dataset in group.items()
         if isinstance(dataset, h5py.Dataset)
     }
+
+
+def _convert_hmc_pixel_latents_hdf5_to_float32(path):
+    """Shrink existing float64 pixel-latent datasets without touching sampler state."""
+    with h5py.File(path, 'r') as source:
+        samples_group = source.get('samples')
+        requires_conversion = samples_group is not None and any(
+            _is_pixel_wn_site(unquote(name))
+            and np.issubdtype(dataset.dtype, np.floating)
+            and dataset.dtype.itemsize > np.dtype(np.float32).itemsize
+            for name, dataset in samples_group.items()
+        )
+    if not requires_conversion:
+        return False
+
+    temporary_path = f'{path}.float32.tmp'
+    try:
+        with h5py.File(path, 'r') as source, h5py.File(temporary_path, 'w') as target:
+            for key, value in source.attrs.items():
+                target.attrs[key] = value
+            for group_name, source_group in source.items():
+                target_group = target.create_group(group_name)
+                for key, value in source_group.attrs.items():
+                    target_group.attrs[key] = value
+                for name, dataset in source_group.items():
+                    is_pixel_latent = group_name == 'samples' and _is_pixel_wn_site(unquote(name))
+                    dtype = np.float32 if is_pixel_latent and np.issubdtype(dataset.dtype, np.floating) else dataset.dtype
+                    chunk_rows = max(1, min(int(dataset.shape[0]), 128))
+                    target_dataset = target_group.create_dataset(
+                        name,
+                        shape=dataset.shape,
+                        dtype=dtype,
+                        maxshape=dataset.maxshape,
+                        chunks=(chunk_rows,) + dataset.shape[1:],
+                        compression='gzip',
+                        compression_opts=4,
+                        shuffle=True,
+                    )
+                    for key, value in dataset.attrs.items():
+                        target_dataset.attrs[key] = value
+                    for start in range(0, dataset.shape[0], chunk_rows):
+                        end = min(start + chunk_rows, dataset.shape[0])
+                        target_dataset[start:end] = dataset[start:end]
+        os.replace(temporary_path, path)
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+    return True
 
 
 def _append_hmc_samples_hdf5(path, samples, extra_fields, num_chains):
@@ -868,6 +921,9 @@ def _append_hmc_samples_hdf5(path, samples, extra_fields, num_chains):
             group = handle.require_group(group_name)
             for name, value in values.items():
                 array = np.asarray(value)
+                if group_name == 'samples' and _is_pixel_wn_site(name):
+                    # Archive-only downcast: HMC itself and its checkpoint remain float64.
+                    array = array.astype(np.float32, copy=False)
                 if array.shape[0] != batch_size:
                     raise ValueError(
                         f'HMC {group_name} field {name!r} has an incompatible batch length.'
@@ -1267,6 +1323,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     if actual_rows > expected_rows:
                         _truncate_hmc_hdf5(samples_hdf5_path, expected_rows)
                         print('[hmc] Discarded an uncheckpointed HDF5 sample tail from an interrupted write.')
+                    if _convert_hmc_pixel_latents_hdf5_to_float32(samples_hdf5_path):
+                        print('[hmc] Converted archived pixels_wn samples to float32 in HDF5.')
                     saved_samples, saved_health = _load_hmc_samples_hdf5(samples_hdf5_path)
                     all_samples = [saved_samples]
                     all_hmc_extra_fields = [saved_health] if saved_health else [{}]
