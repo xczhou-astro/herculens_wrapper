@@ -925,6 +925,7 @@ def build_and_run(config_path=None):
                 param_list=param_list,
                 residual_vis_max=getattr(run_args, 'residual_vis_max', 0.0),
                 mcmc_component_medians=mcmc_comp_medians,
+                num_chains_hmc=getattr(run_args, 'num_chains_hmc_numpyro', None),
             )
 
             np.savez_compressed(
@@ -1354,6 +1355,7 @@ def build_and_run(config_path=None):
             regul_model=regul_model,
             param_list=param_list,
             residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+            num_chains_hmc=getattr(args, 'num_chains_hmc_numpyro', None),
         )
 
         np.savez_compressed(

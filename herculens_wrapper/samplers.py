@@ -1435,7 +1435,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             if source_summary is not None and temp_kwargs.get('kwargs_source'):
                 temp_kwargs['kwargs_source'][0]['pixels'] = source_summary[0]
 
-            from herculens_wrapper.visualizations import plot_composite_2x3_panel
+            from herculens_wrapper.visualizations import (
+                plot_composite_2x3_panel,
+                plot_hmc_chain_comparison,
+            )
             img_data = getattr(prob_model, 'image_data', None)
             ns_map = getattr(prob_model, 'noise_map', None)
             l_image = getattr(prob_model, 'lens_image', None)
@@ -1453,6 +1456,18 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     model_composite_override=temp_comp_medians['total'],
                 )
                 print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
+                plot_hmc_chain_comparison(
+                    prob_model,
+                    temp_samples,
+                    num_chains,
+                    p_scale,
+                    img_data,
+                    ns_map,
+                    diag_dir,
+                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                    output_filename=f'hmc_chain_comparison_batch_{i}.png',
+                )
+                print(f"[hmc] Saved chain comparison diagnostic for batch {i + 1}.")
             save_hmc_diagnostics(
                 temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
                 hmc_extra_fields=temp_hmc_extra_fields,

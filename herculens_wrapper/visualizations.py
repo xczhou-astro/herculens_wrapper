@@ -952,6 +952,103 @@ def plot_multiband_composite(
     print(f'[plots] {output_path}')
 
 
+def plot_hmc_chain_comparison(
+    prob_model,
+    samples,
+    num_chains,
+    pixel_scale,
+    image_data,
+    noise_map,
+    save_path,
+    residual_vis_max=0.0,
+    output_filename='hmc_chain_comparison.png',
+    lens_image_override=None,
+    kwargs_lens_from_params=None,
+):
+    """Plot one six-panel posterior-median reconstruction row per HMC chain."""
+    from herculens_wrapper.samplers import (
+        evaluate_mcmc_component_medians,
+        evaluate_mcmc_source_pixels_summary,
+        get_active_sample_sites,
+    )
+
+    num_chains = int(num_chains)
+    if num_chains < 1 or not samples:
+        return
+    sample_key = next(iter(samples))
+    total_draws = int(np.asarray(samples[sample_key]).shape[0])
+    if total_draws % num_chains:
+        raise ValueError(
+            f'HMC samples have {total_draws} draws, incompatible with {num_chains} chains.'
+        )
+    draws_per_chain = total_draws // num_chains
+    if draws_per_chain == 0:
+        return
+
+    lens_image = lens_image_override or getattr(prob_model, 'lens_image', None)
+    if lens_image is None:
+        raise ValueError('HMC chain comparison requires a lens image.')
+    active_sites = set(get_active_sample_sites(prob_model))
+    chain_results = []
+
+    for chain_index in range(num_chains):
+        start = chain_index * draws_per_chain
+        end = start + draws_per_chain
+        chain_samples = {
+            name: np.asarray(value)[start:end]
+            for name, value in samples.items()
+        }
+        median_params = {
+            name: np.median(values, axis=0)
+            for name, values in chain_samples.items()
+            if name in active_sites
+        }
+        if not median_params:
+            median_params = {
+                name: np.median(values, axis=0)
+                for name, values in chain_samples.items()
+            }
+        kwargs_lens = (
+            kwargs_lens_from_params(median_params)
+            if kwargs_lens_from_params is not None else None
+        )
+        kwargs_result = prob_model.params2kwargs(
+            median_params,
+            kwargs_lens_override=kwargs_lens,
+        )
+        source_summary = evaluate_mcmc_source_pixels_summary(
+            prob_model, chain_samples, save_path=None, save_npy=False,
+        )
+        if source_summary is not None and kwargs_result.get('kwargs_source'):
+            kwargs_result['kwargs_source'][0]['pixels'] = source_summary[0]
+
+        component_medians = evaluate_mcmc_component_medians(
+            prob_model,
+            chain_samples,
+            active_sites=chain_samples.keys(),
+            kwargs_lens_from_params=kwargs_lens_from_params,
+            lens_image_override=lens_image,
+        )
+        chain_results.append({
+            'name': f'Chain {chain_index + 1}',
+            'lens_image': lens_image,
+            'kwargs_result': kwargs_result,
+            'image_data': image_data,
+            'noise_map': noise_map,
+            'pixel_scale': pixel_scale,
+            'model_lens_light': component_medians['lens_light'],
+            'model_lensed_source': component_medians['source'],
+            'model_total': component_medians['total'],
+        })
+
+    plot_multiband_composite(
+        chain_results,
+        save_path,
+        residual_vis_max=residual_vis_max,
+        output_filename=output_filename,
+    )
+
+
 def plot_multiband_source_reconstructions(band_results, save_path, output_filename):
     """Plot one initial or final pixelated source reconstruction per band."""
     def has_pixels(band):
@@ -1744,6 +1841,9 @@ def generate_run_plots(
     param_list=None,
     residual_vis_max=0.0,
     mcmc_component_medians=None,
+    num_chains_hmc=None,
+    chain_kwargs_lens_from_params=None,
+    chain_lens_image_override=None,
 ):
     lens_mass_summary = save_lens_mass_ellipticity_summary(
         lens_image, kwargs_best, save_path,
@@ -1815,6 +1915,20 @@ def generate_run_plots(
         model_lens_light_override=comp_lens_light,
         model_composite_override=comp_total,
     ))
+
+    if sampler == 'hmc' and mcmc_samples is not None and prob_model is not None:
+        _try('hmc_chain_comparison.png', lambda: plot_hmc_chain_comparison(
+            prob_model,
+            mcmc_samples,
+            num_chains_hmc or 1,
+            pixel_scale,
+            image_data,
+            noise_map,
+            save_path,
+            residual_vis_max=residual_vis_max,
+            lens_image_override=chain_lens_image_override,
+            kwargs_lens_from_params=chain_kwargs_lens_from_params,
+        ))
 
     _try('image_plane.png', lambda: plot_image_plane(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,

@@ -672,6 +672,25 @@ def _save_multiband_hmc_batch_diagnostics(
             'model_lensed_source': component_medians['source'],
             'model_total': component_medians['total'],
         })
+        try:
+            from herculens_wrapper.visualizations import plot_hmc_chain_comparison
+            band_diagnostic_path = os.path.join(batch_root, band['name'])
+            os.makedirs(band_diagnostic_path, exist_ok=True)
+            plot_hmc_chain_comparison(
+                band['prob_model'],
+                band_samples,
+                int(args.num_chains_hmc_numpyro),
+                args.pixel_scale,
+                band['image_data'],
+                band['noise_map'],
+                band_diagnostic_path,
+                residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                output_filename=f'hmc_chain_comparison_batch_{batch_index}.png',
+                lens_image_override=band['lens_image'],
+                kwargs_lens_from_params=lens_kwargs_from_params,
+            )
+        except Exception as error:
+            print(f"[hmc] {band['name']} chain comparison diagnostic skipped: {error}")
 
     plot_multiband_composite(
         combined_results, batch_root,
@@ -1302,6 +1321,9 @@ def build_and_run_multiband(config_path=None):
                 regul_model=None, param_list=band['param_list'],
                 residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
                 mcmc_component_medians=component_medians,
+                num_chains_hmc=getattr(args, 'num_chains_hmc_numpyro', None),
+                chain_kwargs_lens_from_params=_band_lens_kwargs_from_params(prob_model, band),
+                chain_lens_image_override=band['lens_image'],
             )
             if sampler == 'svi' and posterior_samples is not None:
                 try:
