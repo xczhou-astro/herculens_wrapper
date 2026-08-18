@@ -897,6 +897,65 @@ def plot_multiband_composite(
                 )
             ) * float(getattr(lens_image.Grid, 'pixel_area', pixel_scale**2))
 
+        # The source-arc mask defines the source-plane display support.  Use
+        # only its largest image-plane contour, i.e. the outer boundary.
+        mapped_ring_contours = []
+        if image_mask is not None:
+            try:
+                mask_arr = np.asarray(image_mask).astype(bool)
+                if np.any(mask_arr) and not np.all(mask_arr):
+                    img_x, img_y = lens_image.Grid.pixel_coordinates
+                    img_x = np.asarray(img_x)
+                    img_y = np.asarray(img_y)
+                    if img_x.ndim == 1 and img_y.ndim == 1:
+                        img_x, img_y = np.meshgrid(img_x, img_y)
+                    figure_dummy, axis_dummy = plt.subplots()
+                    contour_set = axis_dummy.contour(
+                        img_x, img_y, mask_arr.astype(float), levels=[0.5],
+                    )
+                    contours = contour_set.allsegs[0] if contour_set.allsegs else []
+                    plt.close(figure_dummy)
+                    if contours:
+                        def contour_area(contour):
+                            if len(contour) < 3:
+                                return 0.0
+                            x_values, y_values = contour[:, 0], contour[:, 1]
+                            return 0.5 * abs(
+                                np.dot(x_values, np.roll(y_values, 1))
+                                - np.dot(y_values, np.roll(x_values, 1))
+                            )
+
+                        outer_contour = max(contours, key=contour_area)
+                        beta_x, beta_y = lens_image.MassModel.ray_shooting(
+                            outer_contour[:, 0], outer_contour[:, 1],
+                            kwargs_result.get('kwargs_lens'),
+                        )
+                        mapped_ring_contours.append((np.asarray(beta_x), np.asarray(beta_y)))
+            except Exception as error:
+                print(f'[plot_multiband_composite] Could not map source-arc boundary: {error}')
+
+        inside_mask = None
+        xx_grid = yy_grid = None
+        if mapped_ring_contours:
+            try:
+                from matplotlib.path import Path
+
+                ny_src, nx_src = source_pixels.shape
+                dx = (extent_src[1] - extent_src[0]) / nx_src
+                dy = (extent_src[3] - extent_src[2]) / ny_src
+                x_centers = np.linspace(extent_src[0] + dx / 2, extent_src[1] - dx / 2, nx_src)
+                y_centers = np.linspace(extent_src[2] + dy / 2, extent_src[3] - dy / 2, ny_src)
+                xx_grid, yy_grid = np.meshgrid(x_centers, y_centers)
+                source_points = np.column_stack((xx_grid.ravel(), yy_grid.ravel()))
+                inside_mask = np.zeros(source_pixels.shape, dtype=bool)
+                for beta_x, beta_y in mapped_ring_contours:
+                    polygon = np.column_stack((beta_x, beta_y))
+                    if len(polygon) >= 3:
+                        inside_mask |= Path(polygon).contains_points(source_points).reshape(source_pixels.shape)
+                source_pixels = np.where(inside_mask, source_pixels, 0.0)
+            except Exception as error:
+                print(f'[plot_multiband_composite] Could not apply source-arc support: {error}')
+
         image_panels = (image_data, model_total, residual, data_minus_lens, model_lensed_source)
         for column, values in enumerate(image_panels):
             axis = axes[row, column]
@@ -919,6 +978,15 @@ def plot_multiband_composite(
 
         source_axis = axes[row, 5]
         source_axis.imshow(source_pixels, origin='lower', extent=extent_src, cmap='twilight')
+        if inside_mask is not None:
+            try:
+                source_axis.contourf(
+                    xx_grid, yy_grid, inside_mask.astype(float),
+                    levels=[-0.5, 0.5], hatches=['//'], colors=['white'],
+                    alpha=1.0,
+                )
+            except Exception as error:
+                print(f'[plot_multiband_composite] Could not draw source-support hatches: {error}')
         try:
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
@@ -928,6 +996,8 @@ def plot_multiband_composite(
                 source_axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
         except Exception:
             pass
+        for beta_x, beta_y in mapped_ring_contours:
+            source_axis.plot(beta_x, beta_y, color='orange', lw=1.5, ls='--', alpha=0.95)
         support_bounds = getattr(lens_image, 'source_support_bounds', None)
         if support_bounds is not None:
             xmin, xmax, ymin, ymax = [float(value) for value in support_bounds]
