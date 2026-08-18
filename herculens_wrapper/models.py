@@ -561,96 +561,6 @@ def create_prob_model(
     additional_observations=None,
     param_overrides=None,
 ):
-    refine_prior_range = None
-    refine_prior_min_frac = None
-    if args is not None:
-        refine_prior_range = getattr(args, 'refine_prior_range', None)
-        refine_prior_min_frac = getattr(args, 'refine_prior_min_frac', None)
-    
-    if refine_prior_range is not None and init_params_path is None:
-        print("[create_prob_model] Warning: refine_prior_range is set, but init_params_path is None. Prior range refinement is skipped.")
-    
-    if init_params_path is not None and refine_prior_range is not None:
-        import json
-        import copy
-        from herculens_wrapper.utils import resolve_init_run_dir
-        
-        refine_prior_range = float(refine_prior_range)
-        if refine_prior_min_frac is not None:
-            refine_prior_min_frac = float(refine_prior_min_frac)
-            
-        init_run = resolve_init_run_dir(init_params_path)
-        res_path = os.path.join(init_run, 'kwargs_result.json')
-        sig_path = os.path.join(init_run, 'kwargs_sigma.json')
-        
-        if os.path.exists(res_path) and os.path.exists(sig_path):
-            try:
-                with open(res_path, 'r') as f:
-                    kwargs_result = json.load(f)
-                with open(sig_path, 'r') as f:
-                    kwargs_sigma = json.load(f)
-                
-                msg = f"[create_prob_model] Refining parameter prior ranges using {refine_prior_range}-sigma limits"
-                if refine_prior_min_frac is not None:
-                    msg += f" (with min threshold fraction {refine_prior_min_frac})"
-                msg += f" from {init_params_path}"
-                print(msg)
-                
-                param_list = copy.deepcopy(param_list)
-                
-                mapping = [
-                    ('lens_mass_params_list', 'kwargs_lens'),
-                    ('lens_light_params_list', 'kwargs_lens_light'),
-                    ('source_light_params_list', 'kwargs_source'),
-                    ('point_source_params_list', 'kwargs_point_source'),
-                ]
-                
-                for list_key, kw_key in mapping:
-                    if list_key in param_list and kw_key in kwargs_result and kw_key in kwargs_sigma:
-                        res_list = kwargs_result[kw_key]
-                        sig_list = kwargs_sigma[kw_key]
-                        for i, comp_model in enumerate(param_list[list_key]):
-                            if i < len(res_list) and i < len(sig_list):
-                                res_comp = res_list[i]
-                                sig_comp = sig_list[i]
-                                for p_key, p_val in comp_model.items():
-                                    if isinstance(p_val, list) and len(p_val) == 4:
-                                        if p_key in res_comp and p_key in sig_comp:
-                                            median_val = res_comp[p_key]
-                                            sigma_val = sig_comp[p_key]
-                                            if isinstance(median_val, (int, float)) and isinstance(sigma_val, (int, float)):
-                                                half_width = refine_prior_range * sigma_val
-                                                if refine_prior_min_frac is not None:
-                                                    min_half_width = refine_prior_min_frac * abs(median_val)
-                                                    if half_width < min_half_width:
-                                                        half_width = min_half_width
-                                                
-                                                half_width = max(half_width, 1e-6)
-                                                effective_sigma = half_width / refine_prior_range
-                                                
-                                                low_lim = median_val - half_width
-                                                high_lim = median_val + half_width
-                                                original_low = p_val[2]
-                                                original_high = p_val[3]
-                                                
-                                                low_lim = max(original_low, low_lim)
-                                                high_lim = min(original_high, high_lim)
-                                                
-                                                if low_lim >= high_lim:
-                                                    low_lim = max(original_low, median_val - 0.1 * effective_sigma)
-                                                    high_lim = min(original_high, median_val + 0.1 * effective_sigma)
-                                                
-                                                p_val[2] = float(low_lim)
-                                                p_val[3] = float(high_lim)
-                                                p_val[0] = float(median_val)
-                                                p_val[1] = float(effective_sigma)
-                                                
-                                                print(f"  {kw_key}[{i}].{p_key}: refined prior to [{p_val[0]:.4f}, {p_val[1]:.4f}, {p_val[2]:.4f}, {p_val[3]:.4f}]")
-            except Exception as e:
-                print(f"[create_prob_model] Error applying refined prior ranges: {e}")
-        else:
-            print(f"[create_prob_model] Prior refinement skipped. Result or sigma json file missing in {init_params_path}.")
-
     noise = Noise(nx=image_data.shape[0], ny=image_data.shape[0], noise_map=noise_map)
 
     # For wavelet_sparsity prior, we need to initialize the RegularizationModel
@@ -1018,7 +928,8 @@ def create_prob_model(
                 observation_std = jnp.sqrt(
                     observation_lens_image.Noise.C_D_model(observation_model_image)
                 )
-                with numpyro.handlers.scale(scale=l_scale):
+                observation_scale = float(observation.get('likelihood_scale', l_scale))
+                with numpyro.handlers.scale(scale=observation_scale):
                     numpyro.sample(
                         f'obs_data_{observation_index}',
                         dist.Normal(observation_model_image, observation_std).to_event(2),
@@ -1413,7 +1324,6 @@ def get_init_params(
     fix_lens_mass=False,
     fix_source_light=False,
     lens_image=None,
-    pixel_init_jitter=0.0,
     sample_wavelets=False,
     regul_model=None,
     require_pixelated_svi=False,
@@ -1424,8 +1334,6 @@ def get_init_params(
     Pass through ``to_unconstrained()`` before optax/jaxopt/HMC/emcee.
     For PIXELATED sources, pass ``lens_image`` so analytic kwargs_result.json
     files can be projected onto the source pixel grid.
-    ``pixel_init_jitter`` adds relative Gaussian noise to ``source_pixels`` after
-    loading/projection (helps NUTS escape a overly sharp local mode).
     When ``require_pixelated_svi`` is true, initialization must come from a
     recorded SVI run with a pixelated source, and every active Matérn source
     latent must be restored with its exact expected shape.
@@ -1626,15 +1534,6 @@ def get_init_params(
             continue
         arr = jnp.asarray(v)
         init_params[k] = jnp.where(arr == 0.0, 1e-8, arr)
-
-    jitter = float(pixel_init_jitter)
-    if jitter > 0.0:
-        if 'pixels_wn_source_grid' in init_params:
-            key_pix = jax.random.PRNGKey(int(random_seed) + 99)
-            wn = init_params['pixels_wn_source_grid']
-            noise = jitter * jax.random.normal(key_pix, wn.shape)
-            init_params['pixels_wn_source_grid'] = wn + noise
-            print(f'[Init] Applied pixel_init_jitter={jitter} to pixels_wn_source_grid')
 
     if fix_lens_light:
         init_params = {

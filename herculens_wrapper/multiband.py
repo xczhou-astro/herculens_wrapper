@@ -42,7 +42,7 @@ def create_multiband_prob_model(
             band['lens_image'],
             band['image_data'],
             band['noise_map'],
-            args=args,
+            args=band.get('args', args),
             fix_lens_mass=True,
             kwargs_lens_fixed=lambda holder=holder: holder['kwargs_lens'],
             fix_lens_light=fixed_lens_light_by_band is not None,
@@ -185,6 +185,7 @@ def _create_fully_shared_multidata_prob_model(
         {
             'lens_image': band['lens_image'],
             'image_data': band['image_data'],
+            'likelihood_scale': getattr(band.get('args', args), 'likelihood_scale', 1.0),
         }
         for band in bands[1:]
     ]
@@ -194,7 +195,7 @@ def _create_fully_shared_multidata_prob_model(
         reference['lens_image'],
         reference['image_data'],
         reference['noise_map'],
-        args=args,
+        args=reference.get('args', args),
         fix_lens_mass=fixed_lens_mass is not None,
         kwargs_lens_fixed=fixed_lens_mass,
         fix_lens_light=fixed_lens_light is not None,
@@ -381,7 +382,7 @@ def _create_selectively_shared_multidata_prob_model(bands, args, shared_entries)
             band['lens_image'],
             band['image_data'],
             band['noise_map'],
-            args=args,
+            args=band.get('args', args),
             param_overrides=lambda holder=holder: holder['overrides'],
         )
         band_models.append(child_model)
@@ -478,7 +479,7 @@ def create_multidata_source_warmup_model(
             band['lens_image'],
             band['image_data'],
             band['noise_map'],
-            args=args,
+            args=band.get('args', args),
             fix_lens_mass=True,
             kwargs_lens_fixed=kwargs_lens_by_band[band['name']],
             fix_lens_light=True,

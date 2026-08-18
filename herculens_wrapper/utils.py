@@ -201,6 +201,13 @@ def run_arguments_namespace(config_module, config_path):
     cfg = config_module.arguments()
     if not isinstance(cfg, dict):
         raise TypeError("config.arguments() must return a dict.")
+    # Retired controls are accepted in old config files but intentionally ignored.
+    for retired_key in (
+        'refine_prior_range',
+        'refine_prior_min_frac',
+        'pixel_init_jitter',
+    ):
+        cfg.pop(retired_key, None)
     sampler_val = cfg.get('sampler')
     if isinstance(sampler_val, list):
         for s in sampler_val:

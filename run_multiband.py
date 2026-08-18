@@ -63,6 +63,40 @@ def _call_config(function, image_size, pixel_scale, args, band_name):
         return function(image_size=image_size, pixel_scale=pixel_scale, args=args)
 
 
+_PER_BAND_SETTING_NAMES = (
+    'pixel_scale',
+    'crop_size',
+    'supersampling_factor',
+    'likelihood_scale',
+    'source_grid_scale',
+)
+_PER_BAND_SETTING_DEFAULTS = {
+    'pixel_scale': 0.08,
+    'crop_size': None,
+    'supersampling_factor': 1,
+    'likelihood_scale': 1.0,
+    'source_grid_scale': 1.0,
+}
+
+
+def _resolve_per_band_settings(args, band_names):
+    """Expand scalar settings or validate lists aligned with observation order."""
+    resolved = {}
+    n_bands = len(band_names)
+    for name in _PER_BAND_SETTING_NAMES:
+        value = getattr(args, name, _PER_BAND_SETTING_DEFAULTS[name])
+        if isinstance(value, list):
+            if len(value) != n_bands:
+                raise ValueError(
+                    f'{name} must be a scalar or a list with {n_bands} values aligned '
+                    f'with {list(band_names)}; received {len(value)} values.'
+                )
+            resolved[name] = list(value)
+        else:
+            resolved[name] = [value] * n_bands
+    return resolved
+
+
 def _band_paths(args, band_name):
     """Resolve ``{base_path}/{band}/{filename}`` inputs for one band."""
     paths = {
@@ -667,7 +701,7 @@ def _save_multiband_hmc_batch_diagnostics(
             'kwargs_result': kwargs_best,
             'image_data': band['image_data'],
             'noise_map': band['noise_map'],
-            'pixel_scale': args.pixel_scale,
+            'pixel_scale': band['pixel_scale'],
             'model_lens_light': component_medians['lens_light'],
             'model_lensed_source': component_medians['source'],
             'model_total': component_medians['total'],
@@ -680,7 +714,7 @@ def _save_multiband_hmc_batch_diagnostics(
                 band['prob_model'],
                 band_samples,
                 int(args.num_chains_hmc_numpyro),
-                args.pixel_scale,
+                band['pixel_scale'],
                 band['image_data'],
                 band['noise_map'],
                 band_diagnostic_path,
@@ -795,20 +829,28 @@ def build_and_run_multiband(config_path=None):
     }
 
     bands = []
+    per_band_settings = _resolve_per_band_settings(args, band_names)
     shared_mass_params = None
     shared_mass_types = None
     reference_data_shape = None
     reference_source_arc_mask = None
     for index, band_name in enumerate(band_names):
+        band_args = SimpleNamespace(**vars(args))
+        band_settings = {
+            name: per_band_settings[name][index]
+            for name in _PER_BAND_SETTING_NAMES
+        }
+        for name, value in band_settings.items():
+            setattr(band_args, name, value)
         paths = observation_paths[index] if use_multidata else _band_paths(args, band_name)
         image_data = get_fits_data(paths['data_path'])
         noise_map = get_fits_data(paths['noise_path'])
         psf_data = get_fits_data(paths['psf_path'])
         source_arc_mask = get_fits_data(paths['source_arc_mask_path']).astype(bool)
-        if args.crop_size is not None:
-            image_data = center_crop(image_data, args.crop_size)
-            noise_map = center_crop(noise_map, args.crop_size)
-            source_arc_mask = center_crop(source_arc_mask, args.crop_size)
+        if band_args.crop_size is not None:
+            image_data = center_crop(image_data, band_args.crop_size)
+            noise_map = center_crop(noise_map, band_args.crop_size)
+            source_arc_mask = center_crop(source_arc_mask, band_args.crop_size)
         image_data_before_bad_pixel_mask = np.array(image_data, copy=True)
         noise_map_before_bad_pixel_mask = np.array(noise_map, copy=True)
         image_data, noise_map, bad_pixel_mask = exclude_bad_pixels(image_data, noise_map)
@@ -866,15 +908,15 @@ def build_and_run_multiband(config_path=None):
         )
 
         image_size = image_data.shape[0]
-        mass_types, mass_params = _call_config(lens_mass_config, image_size, args.pixel_scale, args, band_name)
+        mass_types, mass_params = _call_config(lens_mass_config, image_size, band_args.pixel_scale, band_args, band_name)
         if shared_mass_params is None:
             shared_mass_params, shared_mass_types = mass_params, mass_types
         elif mass_types != shared_mass_types or mass_params != shared_mass_params:
             raise ValueError('lens_mass_config must return identical types and priors for every band.')
-        lens_light_types, lens_light_params = _call_config(lens_light_config, image_size, args.pixel_scale, args, band_name)
-        source_types, source_params = _call_config(source_light_config, image_size, args.pixel_scale, args, band_name)
+        lens_light_types, lens_light_params = _call_config(lens_light_config, image_size, band_args.pixel_scale, band_args, band_name)
+        source_types, source_params = _call_config(source_light_config, image_size, band_args.pixel_scale, band_args, band_name)
         point_types, point_params = ([], []) if getattr(args, 'exclude_ps', True) else _call_config(
-            point_source_config, image_size, args.pixel_scale, args, band_name
+            point_source_config, image_size, band_args.pixel_scale, band_args, band_name
         )
         type_list = {
             'lens_mass_type_list': mass_types,
@@ -889,21 +931,29 @@ def build_and_run_multiband(config_path=None):
             'point_source_params_list': point_params,
         }
         validate_param_list(type_list, param_list)
-        print(f'[{band_name}] Data shape: {image_data.shape}; active source-mask pixels: {int(source_arc_mask.sum())}')
+        print(
+            f'[{band_name}] Data shape: {image_data.shape}; active source-mask pixels: '
+            f'{int(source_arc_mask.sum())}; pixel_scale={band_args.pixel_scale}; '
+            f'crop_size={band_args.crop_size}; supersampling_factor={band_args.supersampling_factor}; '
+            f'likelihood_scale={band_args.likelihood_scale}; '
+            f'source_grid_scale={band_args.source_grid_scale}'
+        )
         print(f'[{band_name}] Lens mass type list: {mass_types}')
         print(f'[{band_name}] Lens light type list: {lens_light_types}')
         print(f'[{band_name}] Source light type list: {source_types}')
         print(f'[{band_name}] Point source type list: {point_types}')
         lens_image = create_lens_image(
-            param_list, type_list, image_data, noise_map, psf_data, args.pixel_scale,
-            kwargs_numerics={'supersampling_factor': args.supersampling_factor},
+            param_list, type_list, image_data, noise_map, psf_data, band_args.pixel_scale,
+            kwargs_numerics={'supersampling_factor': band_args.supersampling_factor},
             kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
             source_arc_mask=source_arc_mask,
-            source_grid_scale=float(getattr(args, 'source_grid_scale', 1.0)),
+            source_grid_scale=float(getattr(band_args, 'source_grid_scale', 1.0)),
             conjugate_points=getattr(args, 'conjugate_points', None),
         )
         bands.append({
             'name': band_name,
+            'args': band_args,
+            **band_settings,
             'site_prefix': band_site_prefix(index, band_name),
             'lens_image': lens_image,
             'image_data': image_data,
@@ -1018,7 +1068,7 @@ def build_and_run_multiband(config_path=None):
             os.makedirs(band['save_path'], exist_ok=True)
             plot_input_data(
                 band['image_data_before_bad_pixel_mask'],
-                band['noise_map_before_bad_pixel_mask'], band['psf_data'], args.pixel_scale,
+                band['noise_map_before_bad_pixel_mask'], band['psf_data'], band['pixel_scale'],
                 band['save_path'], band['type_list']['point_source_type_list'],
                 band['param_list']['point_source_params_list'],
                 getattr(band['lens_image'], 'source_arc_mask', None),
@@ -1027,7 +1077,7 @@ def build_and_run_multiband(config_path=None):
                 output_basename='input_data_before_mask',
             )
             plot_input_data(
-                band['image_data'], band['noise_map'], band['psf_data'], args.pixel_scale,
+                band['image_data'], band['noise_map'], band['psf_data'], band['pixel_scale'],
                 band['save_path'], band['type_list']['point_source_type_list'],
                 band['param_list']['point_source_params_list'],
                 getattr(band['lens_image'], 'source_arc_mask', None),
@@ -1051,6 +1101,9 @@ def build_and_run_multiband(config_path=None):
                         'type_list': band['type_list'],
                         'param_list': band['param_list'],
                         'background_offset': band['background_offset'],
+                        'settings': {
+                            name: band[name] for name in _PER_BAND_SETTING_NAMES
+                        },
                     }
                     for band in bands
                 },
@@ -1063,8 +1116,11 @@ def build_and_run_multiband(config_path=None):
                 'num_params': num_params,
                 'sampler': sampler,
                 'init_params_path': run_init_path,
-                'kwargs_numerics_fit': {
-                    'supersampling_factor': args.supersampling_factor,
+                'kwargs_numerics_fit_by_band': {
+                    band['name']: {
+                        'supersampling_factor': band['supersampling_factor'],
+                    }
+                    for band in bands
                 },
                 'kwargs_lens_equation_solver_model': kwargs_lens_equation_solver_model,
             }, handle, indent=4, default=json_serializer)
@@ -1125,7 +1181,7 @@ def build_and_run_multiband(config_path=None):
                     'kwargs_result': initial_kwargs_by_band[band['name']],
                     'image_data': band['image_data'],
                     'noise_map': band['noise_map'],
-                    'pixel_scale': args.pixel_scale,
+                    'pixel_scale': band['pixel_scale'],
                 })
             with open(os.path.join(run_path, 'kwargs_init.json'), 'w') as handle:
                 json.dump({
@@ -1313,7 +1369,7 @@ def build_and_run_multiband(config_path=None):
             generate_run_plots(
                 lens_image=band['lens_image'], kwargs_best=kwargs_best,
                 image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
-                pixel_scale=args.pixel_scale, save_path=band['save_path'], sampler=sampler,
+                pixel_scale=band['pixel_scale'], save_path=band['save_path'], sampler=sampler,
                 best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=None,
                 extra=None,
                 mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
@@ -1342,7 +1398,7 @@ def build_and_run_multiband(config_path=None):
                 'kwargs_result': kwargs_best,
                 'image_data': band['image_data'],
                 'noise_map': band['noise_map'],
-                'pixel_scale': args.pixel_scale,
+                'pixel_scale': band['pixel_scale'],
                 'model_lens_light': (
                     component_medians.get('lens_light') if component_medians else None
                 ),
@@ -1429,7 +1485,7 @@ def build_and_run_multiband(config_path=None):
                 )
                 plot_mass_and_convergence(
                     bands[0]['lens_image'], shared_mass_result,
-                    args.pixel_scale, run_path, mass_summary,
+                    bands[0]['pixel_scale'], run_path, mass_summary,
                 )
                 print('[plots] mass_profile_convergence.png')
             except Exception as error:
