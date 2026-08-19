@@ -13,6 +13,9 @@ from herculens_wrapper.models import (
 )
 
 
+_BAND_SPECIFIC_LENS_MASS_KEYS = frozenset({'center_x', 'center_y'})
+
+
 def band_site_prefix(index, band_name):
     """Return a stable NumPyro-safe namespace for a band."""
     label = re.sub(r'[^0-9A-Za-z_]+', '_', str(band_name)).strip('_') or 'band'
@@ -25,9 +28,10 @@ def create_multiband_prob_model(
     lens_mass_type_list,
     args,
     fixed_lens_mass=None,
+    fixed_lens_mass_by_band=None,
     fixed_lens_light_by_band=None,
 ):
-    """Build a joint likelihood with shared mass and band-specific light models."""
+    """Build a joint likelihood with shared mass shape and per-band mass centres."""
     if not bands:
         raise ValueError('At least one band is required for a multiband model.')
 
@@ -52,22 +56,58 @@ def create_multiband_prob_model(
             ),
         ))
 
-    def mass_kwargs_from_params(params, sample=False):
+    def _site_value(params, band, site):
+        joint_site = f"{band['site_prefix']}/{site}"
+        if joint_site in params:
+            return params[joint_site]
+        return params[site]
+
+    def _sample_shared_mass_values():
+        values = {}
+        for index, mass_model in enumerate(lens_mass_params_list):
+            for key, param in mass_model.items():
+                if key in _BAND_SPECIFIC_LENS_MASS_KEYS:
+                    continue
+                if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
+                    site = f'lens_{key}_{index}'
+                    values[(index, key)] = _sample_param_from_prior(site, key, param)
+        return values
+
+    def mass_kwargs_from_params(params, band, sample_centers=False, shared_values=None):
         kwargs_lens = []
         bank = {'lens': kwargs_lens}
-        for index, mass_model in enumerate(lens_mass_params_list):
+        band_mass_models = band['param_list']['lens_mass_params_list']
+        for index, shared_mass_model in enumerate(lens_mass_params_list):
+            band_mass_model = band_mass_models[index]
             kwargs = {}
-            for key, param in mass_model.items():
+            for key, shared_param in shared_mass_model.items():
+                param = (
+                    band_mass_model.get(key, shared_param)
+                    if key in _BAND_SPECIFIC_LENS_MASS_KEYS else shared_param
+                )
                 link_spec = _normalize_link_spec(param)
                 if link_spec is not None:
                     kwargs[key] = _resolve_link(bank, link_spec, context=f'multiband lens_mass[{index}].{key}')
                 elif isinstance(param, (list, tuple)):
                     site = f'lens_{key}_{index}'
-                    kwargs[key] = _sample_param_from_prior(site, key, param) if sample else params[site]
+                    if key in _BAND_SPECIFIC_LENS_MASS_KEYS:
+                        kwargs[key] = (
+                            _sample_param_from_prior(site, key, param)
+                            if sample_centers else _site_value(params, band, site)
+                        )
+                    elif shared_values is not None:
+                        kwargs[key] = shared_values[(index, key)]
+                    else:
+                        kwargs[key] = params[site]
                 else:
                     kwargs[key] = param
             kwargs_lens.append(kwargs)
         return kwargs_lens
+
+    def fixed_mass_for_band(band):
+        if fixed_lens_mass_by_band is not None:
+            return fixed_lens_mass_by_band[band['name']]
+        return fixed_lens_mass
 
     def posterior_site_order():
         """Return joint latent sites in the configured component order."""
@@ -75,11 +115,23 @@ def create_multiband_prob_model(
 
         for index, mass_model in enumerate(lens_mass_params_list):
             if isinstance(mass_model, dict):
-                order.extend(f'lens_{key}_{index}' for key in mass_model)
+                order.extend(
+                    f'lens_{key}_{index}' for key in mass_model
+                    if key not in _BAND_SPECIFIC_LENS_MASS_KEYS
+                )
 
         for band in bands:
             prefix = f"{band['site_prefix']}/"
             param_list = band['param_list']
+            for index, mass_model in enumerate(param_list.get('lens_mass_params_list', [])):
+                if isinstance(mass_model, dict):
+                    order.extend(
+                        f'{prefix}lens_{key}_{index}'
+                        for key, value in mass_model.items()
+                        if key in _BAND_SPECIFIC_LENS_MASS_KEYS
+                        and _normalize_link_spec(value) is None
+                        and isinstance(value, (list, tuple))
+                    )
             for index, light_model in enumerate(param_list.get('lens_light_params_list', [])):
                 if isinstance(light_model, dict):
                     order.extend(
@@ -108,24 +160,27 @@ def create_multiband_prob_model(
 
     class MultiBandProbModel(NumpyroModel):
         def model(self):
-            kwargs_lens = (
-                fixed_lens_mass
-                if fixed_lens_mass is not None
-                else mass_kwargs_from_params({}, sample=True)
-            )
-            for holder in holders:
+            fixed_mass_mode = fixed_lens_mass is not None or fixed_lens_mass_by_band is not None
+            shared_values = None if fixed_mass_mode else _sample_shared_mass_values()
+            for band, holder, band_model in zip(bands, holders, band_models):
+                if fixed_mass_mode:
+                    kwargs_lens = fixed_mass_for_band(band)
+                else:
+                    with numpyro.handlers.scope(prefix=band['site_prefix']):
+                        kwargs_lens = mass_kwargs_from_params(
+                            {}, band, sample_centers=True, shared_values=shared_values,
+                        )
                 holder['kwargs_lens'] = kwargs_lens
-            for band, band_model in zip(bands, band_models):
                 numpyro.handlers.scope(band_model.model, prefix=band['site_prefix'])()
 
         def params2kwargs_by_band(self, params):
-            kwargs_lens = (
-                fixed_lens_mass
-                if fixed_lens_mass is not None
-                else mass_kwargs_from_params(params, sample=False)
-            )
             results = {}
             for band, holder, band_model in zip(bands, holders, band_models):
+                fixed_mass_mode = fixed_lens_mass is not None or fixed_lens_mass_by_band is not None
+                kwargs_lens = (
+                    fixed_mass_for_band(band)
+                    if fixed_mass_mode else mass_kwargs_from_params(params, band)
+                )
                 prefix = f"{band['site_prefix']}/"
                 band_params = {
                     key[len(prefix):]: value
@@ -138,13 +193,10 @@ def create_multiband_prob_model(
             return results
 
         def params2kwargs(self, params):
+            kwargs_by_band = self.params2kwargs_by_band(params)
             return {
-                'kwargs_lens': (
-                    fixed_lens_mass
-                    if fixed_lens_mass is not None
-                    else mass_kwargs_from_params(params, sample=False)
-                ),
-                'kwargs_by_band': self.params2kwargs_by_band(params),
+                'kwargs_lens': kwargs_by_band[bands[0]['name']]['kwargs_lens'],
+                'kwargs_by_band': kwargs_by_band,
             }
 
     model = MultiBandProbModel()
@@ -153,10 +205,13 @@ def create_multiband_prob_model(
     model.lens_mass_params_list = lens_mass_params_list
     model.lens_mass_type_list = lens_mass_type_list
     model.posterior_site_order = posterior_site_order
-    model.mass_kwargs_from_params = lambda params: mass_kwargs_from_params(
-        params, sample=False,
-    )
+    model.mass_kwargs_from_params = lambda params: mass_kwargs_from_params(params, bands[0])
+    for band, band_model in zip(bands, band_models):
+        band_model.mass_kwargs_from_params = (
+            lambda params, band=band: mass_kwargs_from_params(params, band)
+        )
     model.type_list = {'lens_mass_type_list': lens_mass_type_list}
+    model.band_specific_lens_mass_keys = _BAND_SPECIFIC_LENS_MASS_KEYS
     return model
 
 

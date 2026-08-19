@@ -78,6 +78,34 @@ _PER_BAND_SETTING_DEFAULTS = {
     'source_grid_scale': 1.0,
 }
 
+_BAND_SPECIFIC_LENS_MASS_KEYS = frozenset({'center_x', 'center_y'})
+
+
+def _shared_lens_mass_definitions_match(reference, candidate):
+    """Compare mass definitions while allowing band-specific centre priors."""
+    if len(reference) != len(candidate):
+        return False
+    for reference_model, candidate_model in zip(reference, candidate):
+        if set(reference_model) != set(candidate_model):
+            return False
+        for key in reference_model:
+            if key in _BAND_SPECIFIC_LENS_MASS_KEYS:
+                continue
+            if reference_model[key] != candidate_model[key]:
+                return False
+    return True
+
+
+def _shared_lens_mass_kwargs(kwargs_lens):
+    """Return the genuinely shared mass values, excluding per-band centres."""
+    return [
+        {
+            key: value for key, value in component.items()
+            if key not in _BAND_SPECIFIC_LENS_MASS_KEYS
+        }
+        for component in kwargs_lens
+    ]
+
 
 def _resolve_per_band_settings(args, band_names):
     """Expand scalar settings or validate lists aligned with observation order."""
@@ -523,7 +551,7 @@ def _run_pixelated_svi_warmup(prob_model, bands, args, init_params, init_path):
             prob_model.lens_mass_params_list,
             prob_model.lens_mass_type_list,
             args,
-            fixed_lens_mass=kwargs_lens_by_band[bands[0]['name']],
+            fixed_lens_mass_by_band=kwargs_lens_by_band,
             fixed_lens_light_by_band=kwargs_lens_light,
         )
     active_sites = set(get_active_sample_sites(warmup_model, rng_seed=args.random_seed))
@@ -911,8 +939,14 @@ def build_and_run_multiband(config_path=None):
         mass_types, mass_params = _call_config(lens_mass_config, image_size, band_args.pixel_scale, band_args, band_name)
         if shared_mass_params is None:
             shared_mass_params, shared_mass_types = mass_params, mass_types
-        elif mass_types != shared_mass_types or mass_params != shared_mass_params:
-            raise ValueError('lens_mass_config must return identical types and priors for every band.')
+        elif (
+            mass_types != shared_mass_types
+            or not _shared_lens_mass_definitions_match(shared_mass_params, mass_params)
+        ):
+            raise ValueError(
+                'lens_mass_config must return identical mass types and priors for every band, '
+                'except that center_x and center_y may differ.'
+            )
         lens_light_types, lens_light_params = _call_config(lens_light_config, image_size, band_args.pixel_scale, band_args, band_name)
         source_types, source_params = _call_config(source_light_config, image_size, band_args.pixel_scale, band_args, band_name)
         point_types, point_params = ([], []) if getattr(args, 'exclude_ps', True) else _call_config(
@@ -980,7 +1014,11 @@ def build_and_run_multiband(config_path=None):
     if use_multidata:
         shared_metadata = getattr(args, 'shared', [])
     else:
-        shared_metadata = ['lens_mass']
+        shared_metadata = ['lens_mass: all_except_center_x_center_y']
+        print(
+            '[multiband] Lens mass is shared across bands except center_x and center_y, '
+            'which are sampled independently for each band.'
+        )
     if use_multidata:
         print(f'[multidata] Shared parameter specification: {shared_metadata}')
     sampler = args.sampler
@@ -1111,7 +1149,8 @@ def build_and_run_multiband(config_path=None):
                     shared_mass_types if getattr(prob_model, 'fully_shared_lens_mass', True) else None
                 ),
                 'shared_lens_mass_params_list': (
-                    shared_mass_params if getattr(prob_model, 'fully_shared_lens_mass', True) else None
+                    _shared_lens_mass_kwargs(shared_mass_params)
+                    if getattr(prob_model, 'fully_shared_lens_mass', True) else None
                 ),
                 'num_params': num_params,
                 'sampler': sampler,
@@ -1296,8 +1335,9 @@ def build_and_run_multiband(config_path=None):
                 )
             except Exception as error:
                 print(f'[plots] corner_multiband.png skipped: {error}')
+        reference_lens = kwargs_by_band[band_names[0]]['kwargs_lens']
         shared_lens = (
-            kwargs_by_band[band_names[0]]['kwargs_lens']
+            _shared_lens_mass_kwargs(reference_lens)
             if getattr(prob_model, 'fully_shared_lens_mass', True) else None
         )
         if shared_lens is not None:
@@ -1478,7 +1518,7 @@ def build_and_run_multiband(config_path=None):
         if sampler == 'hmc' and shared_lens is not None:
             # Lens mass is shared, so save this final mass-only diagnostic once
             # at the joint result root rather than duplicating it per band.
-            shared_mass_result = {'kwargs_lens': shared_lens}
+            shared_mass_result = {'kwargs_lens': reference_lens}
             try:
                 mass_summary = save_lens_mass_ellipticity_summary(
                     bands[0]['lens_image'], shared_mass_result, run_path,
