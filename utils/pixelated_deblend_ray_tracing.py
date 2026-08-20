@@ -4,6 +4,7 @@ import sys
 import json
 import argparse
 import copy
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 from astropy.io import fits
@@ -14,9 +15,22 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from herculens_wrapper.models import create_lens_image
 
 
-def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixels=5, contrast=0.001, n_levels=32):
+def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixels=5, contrast=0.001, n_levels=32, band=None, thin=1):
     print(f"Loading outputs from run directory: {run_dir}")
     
+    run_dir = os.path.abspath(run_dir)
+    
+    # Check if run_dir points to a band subfolder of a multiband run
+    parent_dir = os.path.dirname(run_dir)
+    parent_args_path = os.path.join(parent_dir, 'args.json')
+    if not os.path.exists(os.path.join(run_dir, 'args.json')) and os.path.exists(parent_args_path):
+        with open(parent_args_path, 'r') as f:
+            parent_args = json.load(f)
+        if parent_args.get('use_multiband', False) or 'band_names' in parent_args:
+            band = os.path.basename(run_dir)
+            run_dir = parent_dir
+            print(f"Detected band subfolder. Rebasing run_dir to: {run_dir} and setting band to: {band}")
+            
     # Load JSON settings
     args_path = os.path.join(run_dir, 'args.json')
     config_path = os.path.join(run_dir, 'config.json')
@@ -33,34 +47,155 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         args_dict = json.load(f)
     with open(config_path, 'r') as f:
         config_dict = json.load(f)
-    with open(result_path, 'r') as f:
-        kwargs_result = json.load(f)
         
+    # Determine if this is multiband
+    is_multiband = args_dict.get('use_multiband', False)
+    band_names = args_dict.get('band_names', [])
+    
+    if is_multiband:
+        if not band:
+            if len(band_names) == 1:
+                band = band_names[0]
+            else:
+                raise ValueError(
+                    f"This is a multiband fit. Please specify which band to process using --band. "
+                    f"Available bands: {band_names}"
+                )
+        if band not in band_names:
+            raise ValueError(f"Specified band '{band}' not found in available bands: {band_names}")
+        band_idx = band_names.index(band)
+        print(f"Processing band: {band}")
+    else:
+        band_idx = 0
+
+    # Reconstruct parameter and type list
+    if is_multiband:
+        param_list = config_dict['bands'][band]['param_list']
+        type_list = config_dict['bands'][band]['type_list']
+    else:
+        param_list = config_dict['param_list']
+        type_list = config_dict['type_list']
+        
+    # Helper to retrieve band-specific args
+    def get_band_param(key, default_val=None):
+        val = args_dict.get(key, default_val)
+        if is_multiband and isinstance(val, (list, tuple)):
+            return val[band_idx]
+        return val
+
+    # Robust path resolution for transferring between environments (e.g. cluster -> local mac)
+    def resolve_robust_path(path):
+        if not path:
+            return path
+        if os.path.exists(path):
+            return path
+        
+        # Try resolving relative to CWD, or run_dir parents
+        cwd = os.getcwd()
+        parts = path.split(os.sep)
+        for i in range(len(parts)):
+            subpath = os.sep.join(parts[i:])
+            for base_dir in [cwd, os.path.dirname(run_dir), os.path.dirname(os.path.dirname(run_dir))]:
+                candidate = os.path.join(base_dir, subpath)
+                if os.path.exists(candidate):
+                    return os.path.abspath(candidate)
+        return path
+
+    # Helper to resolve FITS file path
+    def resolve_fits_path(path_key, name_key, default_name):
+        base = args_dict.get(path_key)
+        if not base:
+            return None
+        
+        # If base is a list/tuple, extract correct element
+        if is_multiband and isinstance(base, (list, tuple)):
+            base = base[band_idx]
+        
+        # Apply robust resolution to base path
+        base = resolve_robust_path(base)
+        
+        if os.path.isfile(base):
+            return base
+            
+        name = args_dict.get(name_key, default_name)
+        if is_multiband and isinstance(name, (list, tuple)):
+            name = name[band_idx]
+            
+        if is_multiband:
+            candidate = os.path.join(base, band, name)
+            candidate = resolve_robust_path(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+            candidate = os.path.join(base, name)
+            candidate = resolve_robust_path(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+        else:
+            candidate = os.path.join(base, name)
+            candidate = resolve_robust_path(candidate)
+            if os.path.isfile(candidate):
+                return candidate
+                
+        return base
+
     # Load npy pixelated source
-    source_pixels_path = os.path.join(run_dir, 'kwargs_source_pixels.npy')
+    if is_multiband:
+        source_pixels_path = os.path.join(run_dir, band, 'kwargs_source_pixels.npy')
+    else:
+        source_pixels_path = os.path.join(run_dir, 'kwargs_source_pixels.npy')
+        
     if not os.path.exists(source_pixels_path):
-        raise FileNotFoundError(f"Missing kwargs_source_pixels.npy in {run_dir}")
+        raise FileNotFoundError(f"Missing kwargs_source_pixels.npy in {source_pixels_path}")
     source_pixels = np.load(source_pixels_path)
     
+    # Load kwargs_result
+    if is_multiband:
+        band_result_path = os.path.join(run_dir, band, 'kwargs_result.json')
+        if os.path.exists(band_result_path):
+            with open(band_result_path, 'r') as f:
+                kwargs_result = json.load(f)
+        else:
+            with open(result_path, 'r') as f:
+                top_result = json.load(f)
+            kwargs_result = top_result['kwargs_by_band'][band]
+    else:
+        with open(result_path, 'r') as f:
+            kwargs_result = json.load(f)
+            
     # Load FITS data cutout, noise map, PSF, mask
     print("Loading data FITS files...")
-    image_data = fits.getdata(args_dict['data_path']).astype(np.float64)
+    data_file = resolve_fits_path('data_path', 'data_name', 'Data_cutout.fits')
+    noise_file = resolve_fits_path('noise_path', 'noise_name', 'noise.fits')
+    psf_file = resolve_fits_path('psf_path', 'psf_name', 'psf_modelled.fits')
+    
+    if not data_file or not os.path.isfile(data_file):
+        raise FileNotFoundError(f"Could not resolve data FITS path: {data_file}")
+    if not noise_file or not os.path.isfile(noise_file):
+        raise FileNotFoundError(f"Could not resolve noise FITS path: {noise_file}")
+    if not psf_file or not os.path.isfile(psf_file):
+        raise FileNotFoundError(f"Could not resolve PSF FITS path: {psf_file}")
+        
+    print(f"Using FITS files:\n - Data: {data_file}\n - Noise: {noise_file}\n - PSF: {psf_file}")
+    image_data = fits.getdata(data_file).astype(np.float64)
     background_offset = float(args_dict.get('background_offset', 0.0))
     if background_offset != 0.0:
         image_data = image_data - background_offset
         print(f"[bkg] Applied stored global background offset: {background_offset:.6f}")
-    noise_map = fits.getdata(args_dict['noise_path']).astype(np.float64)
-    psf_data = fits.getdata(args_dict['psf_path']).astype(np.float64)
+    noise_map = fits.getdata(noise_file).astype(np.float64)
+    psf_data = fits.getdata(psf_file).astype(np.float64)
     psf_data = psf_data / np.sum(psf_data) # normalize PSF
     
     source_arc_mask = None
-    if args_dict.get('source_arc_mask_path'):
-        source_arc_mask = fits.getdata(args_dict['source_arc_mask_path']).astype(bool)
+    source_arc_mask_file = resolve_fits_path('source_arc_mask_path', 'source_arc_mask_name', 'mask_1.fits')
+    if source_arc_mask_file and os.path.isfile(source_arc_mask_file):
+        source_arc_mask = fits.getdata(source_arc_mask_file).astype(bool)
+        print(f" - Mask: {source_arc_mask_file}")
         
     # Initialize LensImage Extension
     print("Reconstructing LensImage model...")
+    supersampling_factor = get_band_param('supersampling_factor', 2)
     kwargs_numerics = {
-        'supersampling_factor': args_dict.get('supersampling_factor', 2)
+        'supersampling_factor': supersampling_factor
     }
     kwargs_lens_equation_solver = {
         'nsolutions': args_dict.get('ps_nsolutions', 5),
@@ -69,19 +204,134 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         'nsubdivisions': args_dict.get('ps_nsubdivisions', 3),
     }
     
+    pixel_scale = get_band_param('pixel_scale')
+    source_grid_scale = get_band_param('source_grid_scale', 1.0)
+    
     lens_image = create_lens_image(
-        param_list=config_dict['param_list'],
-        type_list=config_dict['type_list'],
+        param_list=param_list,
+        type_list=type_list,
         image_data=image_data,
         noise_map=noise_map,
         psf_data=psf_data,
-        pixel_scale=args_dict['pixel_scale'],
+        pixel_scale=pixel_scale,
         kwargs_numerics=kwargs_numerics,
         kwargs_lens_equation_solver=kwargs_lens_equation_solver,
         source_arc_mask=source_arc_mask,
-        source_grid_scale=args_dict.get('source_grid_scale', 1.0),
+        source_grid_scale=source_grid_scale,
     )
     
+    # Mask regions of the source plane outside the ray-traced source_arc_mask footprint
+    if source_arc_mask is not None:
+        try:
+            from matplotlib.path import Path
+            print("Mapping source_arc_mask to source plane for masking...")
+            img_x, img_y = lens_image.Grid.pixel_coordinates
+            img_x = np.asarray(img_x)
+            img_y = np.asarray(img_y)
+            if img_x.ndim == 1 and img_y.ndim == 1:
+                img_x, img_y = np.meshgrid(img_x, img_y)
+                
+            fig_dummy, ax_dummy = plt.subplots()
+            cs = ax_dummy.contour(img_x, img_y, source_arc_mask.astype(float), levels=[0.5])
+            segments = cs.allsegs[0] if (hasattr(cs, 'allsegs') and len(cs.allsegs) > 0) else []
+            plt.close(fig_dummy)
+            
+            mapped_contours = []
+            kwargs_lens = kwargs_result.get('kwargs_lens', None)
+            for seg in segments:
+                if len(seg) >= 3:
+                    x_b_img, y_b_img = seg[:, 0], seg[:, 1]
+                    beta_x_b, beta_y_b = lens_image.MassModel.ray_shooting(
+                        x_b_img, y_b_img, kwargs_lens
+                    )
+                    mapped_contours.append((np.asarray(beta_x_b), np.asarray(beta_y_b)))
+                    
+            if mapped_contours:
+                inside_mask = np.zeros(source_pixels.shape, dtype=bool)
+                xx_grid, yy_grid = lens_image.SourceModel.pixel_grid.pixel_coordinates
+                if xx_grid.ndim == 1 and yy_grid.ndim == 1:
+                    xx_grid, yy_grid = np.meshgrid(xx_grid, yy_grid)
+                points = np.column_stack((xx_grid.ravel(), yy_grid.ravel()))
+                for beta_x_b, beta_y_b in mapped_contours:
+                    polygon_vertices = np.column_stack((beta_x_b, beta_y_b))
+                    path = Path(polygon_vertices)
+                    inside_mask |= path.contains_points(points).reshape(source_pixels.shape)
+                    
+                # Apply mask to the median source pixels
+                source_pixels = np.where(inside_mask, source_pixels, 0.0)
+                print("Applied mapped source_arc_mask to source plane pixels.")
+        except Exception as e:
+            print(f"Warning: could not apply source_arc_mask to source plane: {e}")
+            
+    # Load HMC sampler chains if HMC is used
+    sampler = args_dict.get('sampler', 'svi')
+    mcmc_samples = None
+    rec_sources = None
+    samples_hdf5_path = os.path.join(run_dir, 'hmc_samples.h5')
+    
+    if sampler == 'hmc' and os.path.exists(samples_hdf5_path):
+        try:
+            from herculens_wrapper.samplers import _load_hmc_samples_hdf5
+            from run_multiband import _band_hmc_samples
+            import jax
+            import jax.numpy as jnp
+            from herculens_wrapper.models import PowerSpectrum
+            
+            print("Loading HMC samples from hmc_samples.h5...")
+            raw_samples, _ = _load_hmc_samples_hdf5(samples_hdf5_path)
+            mcmc_samples = _band_hmc_samples(raw_samples, {
+                'site_prefix': f'band_{band_idx}_{band}' if is_multiband else '',
+                'name': band,
+                'prob_model': None
+            })
+            
+            n_samples_total = len(mcmc_samples['pixels_wn_source_grid'])
+            print(f"Loaded {n_samples_total} posterior samples.")
+            if thin > 1:
+                print(f"Thinning samples by a factor of {thin}...")
+                for key in list(mcmc_samples.keys()):
+                    mcmc_samples[key] = np.asarray(mcmc_samples[key])[::thin]
+                n_samples_total = len(mcmc_samples['pixels_wn_source_grid'])
+                print(f"Using {n_samples_total} thinned posterior samples.")
+                
+            # Reconstruct 2D source plane for all samples using JAX PowerSpectrum vmap
+            print("Reconstructing physical source planes for samples...")
+            p_wn_arr = jnp.asarray(mcmc_samples['pixels_wn_source_grid'], dtype=jnp.float64)
+            n_arr = jnp.asarray(np.ravel(mcmc_samples['n_source_grid']), dtype=jnp.float64)
+            sigma_arr = jnp.asarray(np.ravel(mcmc_samples['sigma_source_grid']), dtype=jnp.float64)
+            rho_arr = jnp.asarray(np.ravel(mcmc_samples['rho_source_grid']), dtype=jnp.float64)
+            
+            ny, nx = p_wn_arr.shape[1], p_wn_arr.shape[2]
+            k_grid = PowerSpectrum.K_grid((ny, nx))
+            k_values = jnp.asarray(k_grid.k)
+            
+            is_positive = True
+            if 'pixelated_prior' in config_dict:
+                is_positive = bool(config_dict['pixelated_prior'].get('positive', True))
+                
+            def single_source_pixels(n, sigma, rho, p_wn):
+                scale = jnp.sqrt(PowerSpectrum.P_Matern(k_values, n, sigma, rho, k_zero=0.0))
+                pixels = jnp.fft.irfft2(PowerSpectrum.pack_fft_values(p_wn * scale), s=scale.shape, norm='ortho')
+                if is_positive:
+                    return jax.nn.softplus(100.0 * pixels) / 100.0
+                return pixels
+                
+            vmap_fn = jax.jit(jax.vmap(single_source_pixels))
+            
+            batch_size = 200
+            all_rec_sources = []
+            for b in range(0, n_samples_total, batch_size):
+                b_end = min(b + batch_size, n_samples_total)
+                batch_srcs = vmap_fn(n_arr[b:b_end], sigma_arr[b:b_end], rho_arr[b:b_end], p_wn_arr[b:b_end])
+                all_rec_sources.append(np.asarray(batch_srcs))
+                
+            rec_sources = np.concatenate(all_rec_sources, axis=0)
+            print(f"Successfully reconstructed {len(rec_sources)} source planes.")
+        except Exception as e:
+            print(f"Warning: Failed to load and reconstruct HMC samples: {e}. Falling back to single point estimate.")
+            sampler = 'svi'
+            mcmc_samples = None
+            
     # Watershed-based deblending using photutils
     print("Deblending source plane components using photutils...")
     peak_flux = np.max(source_pixels)
@@ -152,33 +402,121 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
             kw_clean['kwargs_source'] = clean_src
         return kw_clean
 
-    # Pre-render standard combined model and lens light
-    kwargs_all = copy.deepcopy(kwargs_result)
-    kwargs_all['kwargs_source'][0]['pixels'] = source_pixels
-    kwargs_all = _clean_kwargs(kwargs_all)
-    
-    model_combined = lens_image.model(**kwargs_all, source_add=True, lens_light_add=True, point_source_add=True)
-    model_lens_light = lens_image.model(**kwargs_all, source_add=False, lens_light_add=True, point_source_add=False)
-    
-    # Render each component
-    lensed_components = []
-    for k in range(num_to_show):
-        comp = components[k]
-        masked_source = np.zeros_like(source_pixels)
-        masked_source[comp['mask']] = source_pixels[comp['mask']]
+    if sampler == 'hmc' and mcmc_samples is not None:
+        # Reconstruct sample-averaged lensed contributions
+        print(f"Evaluating sample-averaged lensed contributions over {n_samples_total} samples...")
         
-        kwargs_comp = copy.deepcopy(kwargs_result)
-        kwargs_comp['kwargs_source'][0]['pixels'] = masked_source
-        kwargs_comp = _clean_kwargs(kwargs_comp)
+        # Helpers to reconstruct kwargs for sample i
+        def get_sample_kwargs(i):
+            sample_kw = copy.deepcopy(kwargs_result)
+            
+            # 1. Update lens mass parameters
+            if 'kwargs_lens' in sample_kw:
+                for j, comp in enumerate(sample_kw['kwargs_lens']):
+                    for key in list(comp.keys()):
+                        param_name = f"lens_{key}_{j}"
+                        if param_name in mcmc_samples:
+                            comp[key] = float(np.ravel(mcmc_samples[param_name][i])[0])
+                            
+            # 2. Update lens light parameters
+            if 'kwargs_lens_light' in sample_kw:
+                for j, comp in enumerate(sample_kw['kwargs_lens_light']):
+                    for key in list(comp.keys()):
+                        param_name = f"lens_light_{key}_{j}"
+                        if param_name in mcmc_samples:
+                            comp[key] = float(np.ravel(mcmc_samples[param_name][i])[0])
+                            
+            # 3. Update point source parameters
+            if 'kwargs_point_source' in sample_kw:
+                for j, comp in enumerate(sample_kw['kwargs_point_source']):
+                    for key in list(comp.keys()):
+                        for prefix in ("point_source_", "ps_"):
+                            param_name = f"{prefix}{key}_{j}"
+                            if param_name in mcmc_samples:
+                                comp[key] = float(np.ravel(mcmc_samples[param_name][i])[0])
+                                break
+                                
+            # 4. Update source parameters with the reconstructed pixels for sample i
+            if 'kwargs_source' in sample_kw:
+                for j, comp in enumerate(sample_kw['kwargs_source']):
+                    comp['pixels'] = rec_sources[i]
+                    for key in ('n_source_grid', 'rho_source_grid', 'sigma_source_grid'):
+                        for name in (key, f"source_{key}_{j}", f"{key}_{j}"):
+                            if name in mcmc_samples:
+                                comp[key] = float(np.ravel(mcmc_samples[name][i])[0])
+                                break
+            return sample_kw
+
+        list_model_combined = []
+        list_model_lens_light = []
+        list_lensed_components = [[] for _ in range(num_to_show)]
         
-        comp_lensed = lens_image.model(
-            **kwargs_comp, source_add=True, lens_light_add=False, point_source_add=False
-        )
-        lensed_components.append(comp_lensed)
+        start_time = time.time()
+        for i in range(n_samples_total):
+            if i % 100 == 0:
+                print(f"Processing sample {i}/{n_samples_total}...")
+                
+            sample_kw = get_sample_kwargs(i)
+            sample_kw = _clean_kwargs(sample_kw)
+            
+            comp_tot = lens_image.model(**sample_kw, source_add=True, lens_light_add=True, point_source_add=True)
+            comp_ll = lens_image.model(**sample_kw, source_add=False, lens_light_add=True, point_source_add=False)
+            list_model_combined.append(comp_tot)
+            list_model_lens_light.append(comp_ll)
+            
+            for k in range(num_to_show):
+                comp = components[k]
+                masked_source = np.zeros_like(source_pixels)
+                # Mask the sample's reconstructed source plane
+                masked_source[comp['mask']] = rec_sources[i][comp['mask']]
+                
+                kwargs_comp = copy.deepcopy(sample_kw)
+                kwargs_comp['kwargs_source'][0]['pixels'] = masked_source
+                
+                comp_lensed = lens_image.model(
+                    **kwargs_comp, source_add=True, lens_light_add=False, point_source_add=False
+                )
+                list_lensed_components[k].append(comp_lensed)
+                
+        elapsed = time.time() - start_time
+        print(f"Evaluated all samples in {elapsed:.2f} seconds.")
+        
+        # Compute pixel-by-pixel medians
+        model_combined = np.median(np.array(list_model_combined), axis=0)
+        model_lens_light = np.median(np.array(list_model_lens_light), axis=0)
+        
+        lensed_components = []
+        for k in range(num_to_show):
+            comp_med = np.median(np.array(list_lensed_components[k]), axis=0)
+            lensed_components.append(comp_med)
+            
+    else:
+        # Pre-render standard combined model and lens light (Point-estimate approach)
+        kwargs_all = copy.deepcopy(kwargs_result)
+        kwargs_all['kwargs_source'][0]['pixels'] = source_pixels
+        kwargs_all = _clean_kwargs(kwargs_all)
+        
+        model_combined = lens_image.model(**kwargs_all, source_add=True, lens_light_add=True, point_source_add=True)
+        model_lens_light = lens_image.model(**kwargs_all, source_add=False, lens_light_add=True, point_source_add=False)
+        
+        # Render each component
+        lensed_components = []
+        for k in range(num_to_show):
+            comp = components[k]
+            masked_source = np.zeros_like(source_pixels)
+            masked_source[comp['mask']] = source_pixels[comp['mask']]
+            
+            kwargs_comp = copy.deepcopy(kwargs_result)
+            kwargs_comp['kwargs_source'][0]['pixels'] = masked_source
+            kwargs_comp = _clean_kwargs(kwargs_comp)
+            
+            comp_lensed = lens_image.model(
+                **kwargs_comp, source_add=True, lens_light_add=False, point_source_add=False
+            )
+            lensed_components.append(comp_lensed)
         
     # Extents for plot axes in arcseconds
     ny_img, nx_img = image_data.shape
-    pixel_scale = args_dict['pixel_scale']
     img_half_w_x = nx_img * pixel_scale / 2.0
     img_half_w_y = ny_img * pixel_scale / 2.0
     img_extent = [-img_half_w_x, img_half_w_x, -img_half_w_y, img_half_w_y]
@@ -293,7 +631,10 @@ def deblend_and_ray_trace(run_dir, threshold_frac=0.05, plot_scale='log', n_pixe
         axes[1, col_idx].axis('off')
         
     plt.tight_layout()
-    output_plot_path = os.path.join(run_dir, 'deblended_contributions.png')
+    if is_multiband:
+        output_plot_path = os.path.join(run_dir, band, 'deblended_contributions.png')
+    else:
+        output_plot_path = os.path.join(run_dir, 'deblended_contributions.png')
     plt.savefig(output_plot_path, dpi=200, bbox_inches='tight')
     plt.close()
     
@@ -327,9 +668,18 @@ if __name__ == '__main__':
         '--n_levels', type=int, default=32,
         help='Number of multi-thresholding levels for watershed deblending'
     )
+    parser.add_argument(
+        '--band', type=str, default=None,
+        help='Specific band to process (required for multiband results)'
+    )
+    parser.add_argument(
+        '--thin', type=int, default=1,
+        help='Thinning factor for HMC chains (1 means no thinning/use all samples)'
+    )
     
     args = parser.parse_args()
     deblend_and_ray_trace(
         args.run_dir, args.threshold_frac, args.plot_scale,
-        n_pixels=args.n_pixels, contrast=args.contrast, n_levels=args.n_levels
+        n_pixels=args.n_pixels, contrast=args.contrast, n_levels=args.n_levels,
+        band=args.band, thin=args.thin
     )
