@@ -512,9 +512,24 @@ def estimate_mass(
     aperture_multipliers=(1.0, 3.0, 5.0, 10.0), plot_points=50,
 ):
     run_dir = Path(run_dir).expanduser().resolve()
-    result_path = run_dir / 'kwargs_result.json'
+    
+    # Fallback logic for joint/multiband runs: search for any band subdirectory containing kwargs_result.json
+    band_dir = None
+    for item in run_dir.iterdir():
+        if item.is_dir() and (item / 'kwargs_result.json').is_file():
+            band_dir = item
+            break
+            
+    if band_dir is not None:
+        print(f'[estimate_mass] Found band-specific subdirectory: {band_dir.name}')
+        result_path = band_dir / 'kwargs_result.json'
+        sigma_path = band_dir / 'kwargs_sigma.json'
+    else:
+        result_path = run_dir / 'kwargs_result.json'
+        sigma_path = run_dir / 'kwargs_sigma.json'
+        
     config_path = run_dir / 'config.json'
-    sigma_path = run_dir / 'kwargs_sigma.json'
+    
     for path in (result_path, config_path):
         if not path.is_file():
             raise FileNotFoundError(f'Missing required file: {path}')
@@ -672,6 +687,7 @@ def estimate_mass(
         'total_mass_to_infinity': _total_mass_to_infinity_assessment(
             mass_types, kwargs_lens
         ),
+        'kwargs_sigma': sigma_result.get('kwargs_lens') if sigma_result else None,
         'uncertainty': uncertainty,
         'caveat': (
             'This is a projected lensing mass inside a chosen aperture, not a 3D or '
@@ -720,8 +736,117 @@ def main():
     )
     output_path = Path(args.output).expanduser() if args.output else Path(args.run_dir) / 'enclosed_mass_theta_E.json'
     output_path = output_path.resolve()
+    
+    # Construct simplified clean output JSON
+    clean_profiles = [t for t in estimate['mass_model']['profile_types'] if t != 'SHEAR']
+    
+    def propagate_q_pa(e1, e2, e1_sigmas=None, e2_sigmas=None, n_samples=10000):
+        # Best-fit values
+        eta = np.sqrt(e1**2 + e2**2)
+        eta = np.clip(eta, 0.0, 0.999)
+        q = (1.0 - eta) / (1.0 + eta)
+        
+        pa = 0.5 * np.arctan2(e2, e1) * 180.0 / np.pi
+        pa = pa % 180.0
+        
+        if e1_sigmas is None or e2_sigmas is None:
+            return f"{q:.5f}", f"{pa:.5f}"
+            
+        # Generate split-normal samples
+        s1 = np.random.randn(n_samples)
+        e1_samples = np.where(s1 < 0, e1 + s1 * e1_sigmas[0], e1 + s1 * e1_sigmas[1])
+        
+        s2 = np.random.randn(n_samples)
+        e2_samples = np.where(s2 < 0, e2 + s2 * e2_sigmas[0], e2 + s2 * e2_sigmas[1])
+        
+        # Calculate q samples
+        eta_samples = np.sqrt(e1_samples**2 + e2_samples**2)
+        eta_samples = np.clip(eta_samples, 0.0, 0.999)
+        q_samples = (1.0 - eta_samples) / (1.0 + eta_samples)
+        
+        q_lower = q - np.percentile(q_samples, 16)
+        q_upper = np.percentile(q_samples, 84) - q
+        
+        # Calculate PA samples and center them around best PA to avoid boundary wrapping issues
+        pa_samples = 0.5 * np.arctan2(e2_samples, e1_samples) * 180.0 / np.pi
+        d_pa = (pa_samples - pa + 90.0) % 180.0 - 90.0
+        pa_samples_centered = pa + d_pa
+        
+        pa_lower = pa - np.percentile(pa_samples_centered, 16)
+        pa_upper = np.percentile(pa_samples_centered, 84) - pa
+        
+        return f"{q:.5f}, -{q_lower:.5f}, +{q_upper:.5f}", f"{pa:.5f}, -{pa_lower:.5f}, +{pa_upper:.5f}"
+
+    clean_lens_params = []
+    clean_axis_ratio_and_pa = []
+    for component_index, (kw, t) in enumerate(zip(estimate['mass_model']['kwargs_lens'], estimate['mass_model']['profile_types'])):
+        if t == 'SHEAR':
+            continue
+        comp_dict = {}
+        for name, best_fit in kw.items():
+            # Check if we have sigmas for this parameter
+            sigmas = None
+            if estimate.get('kwargs_sigma') and component_index < len(estimate['kwargs_sigma']):
+                sigmas = estimate['kwargs_sigma'][component_index].get(name)
+            
+            # Format value
+            if sigmas is not None and isinstance(sigmas, (list, tuple)) and len(sigmas) == 2:
+                lower, upper = sigmas
+                if lower > 0.0 or upper > 0.0:
+                    comp_dict[name] = f"{best_fit:.5f}, -{lower:.5f}, +{upper:.5f}"
+                else:
+                    comp_dict[name] = f"{best_fit:.5f}"
+            else:
+                comp_dict[name] = f"{best_fit:.5f}"
+        clean_lens_params.append(comp_dict)
+                
+        # Calculate physical axis ratio and PA (with error propagation)
+        if 'e1' in kw and 'e2' in kw:
+            e1 = kw['e1']
+            e2 = kw['e2']
+            e1_sigmas = None
+            e2_sigmas = None
+            if estimate.get('kwargs_sigma') and component_index < len(estimate['kwargs_sigma']):
+                e1_sigmas = estimate['kwargs_sigma'][component_index].get('e1')
+                e2_sigmas = estimate['kwargs_sigma'][component_index].get('e2')
+            
+            q_str, pa_str = propagate_q_pa(e1, e2, e1_sigmas, e2_sigmas)
+            clean_axis_ratio_and_pa.append({
+                'axis_ratio': q_str,
+                'PA': pa_str
+            })
+        
+    def to_sci(val):
+        if val is None:
+            return None
+        return f"{val:.6e}"
+        
+    simplified = {
+        'profile_types': clean_profiles,
+        'lens_parameters': clean_lens_params,
+        'axis_ratio_and_PA': clean_axis_ratio_and_pa,
+        'redshifts': estimate['redshifts'],
+        'cosmology': estimate['cosmology'],
+        'physical_distances_mpc': estimate['distances_mpc'],
+        'enclosed_mass': {
+            'mass_type': 'projected_2D_surface_mass',
+            'aperture_radius_arcsec': estimate['aperture']['radius_arcsec'],
+            'aperture_radius_kpc': estimate['aperture']['radius_kpc'],
+            'mass_msun': to_sci(estimate['projected_enclosed_mass_msun']),
+            'uncertainty_lower_msun': to_sci(estimate['uncertainty']['mass_error_lower_msun']) if estimate['uncertainty'] else None,
+            'uncertainty_upper_msun': to_sci(estimate['uncertainty']['mass_error_upper_msun']) if estimate['uncertainty'] else None,
+        },
+        'total_mass': {
+            'mass_type': 'spherical_3D_deprojected_mass_m200c',
+            'm200c_msun': to_sci(estimate['m200c_spherical_EPL_extrapolation']['m200c_msun']) if (estimate['m200c_spherical_EPL_extrapolation'] and 'm200c_msun' in estimate['m200c_spherical_EPL_extrapolation']) else None,
+            'r200c_kpc': estimate['m200c_spherical_EPL_extrapolation']['r200c_kpc'] if (estimate['m200c_spherical_EPL_extrapolation'] and 'r200c_kpc' in estimate['m200c_spherical_EPL_extrapolation']) else None,
+            'uncertainty_lower_msun': to_sci(estimate['m200c_spherical_EPL_extrapolation']['uncertainty']['m200c_error_lower_msun']) if (estimate['m200c_spherical_EPL_extrapolation'] and estimate['m200c_spherical_EPL_extrapolation'].get('uncertainty')) else None,
+            'uncertainty_upper_msun': to_sci(estimate['m200c_spherical_EPL_extrapolation']['uncertainty']['m200c_error_upper_msun']) if (estimate['m200c_spherical_EPL_extrapolation'] and estimate['m200c_spherical_EPL_extrapolation'].get('uncertainty')) else None,
+        }
+    }
+    
     with output_path.open('w') as handle:
-        json.dump(estimate, handle, indent=2)
+        json.dump(simplified, handle, indent=2)
     plot_path = output_path.with_name('enclosed_mass_vs_radius_theta_E.png')
     _save_enclosed_mass_plot(
         estimate['mass_profile_plot_samples'], estimate['aperture_mass_profile'], plot_path
