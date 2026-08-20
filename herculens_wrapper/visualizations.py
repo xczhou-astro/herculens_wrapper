@@ -72,6 +72,60 @@ def _image_extent(ny, nx, pixel_scale):
     ]
 
 
+def _parametric_source_plane_grid(lens_image, kwargs_lens, ny, nx, pixel_scale):
+    """Build a square display grid from the ray-traced source-arc mask."""
+    try:
+        mask = getattr(lens_image, 'source_arc_mask', None)
+        if mask is None or not np.any(np.asarray(mask, dtype=bool)):
+            raise ValueError('no active source-arc mask pixels')
+
+        x_image, y_image = lens_image.ImageNumerics.coordinates_evaluate
+        x_raytraced, y_raytraced = lens_image.MassModel.ray_shooting(
+            x_image,
+            y_image,
+            kwargs_lens,
+        )
+        outline = np.asarray(
+            getattr(lens_image, '_source_arc_mask_outline_flat'),
+            dtype=bool,
+        )
+        x_raytraced = np.asarray(x_raytraced)[outline]
+        y_raytraced = np.asarray(y_raytraced)[outline]
+        if x_raytraced.size == 0 or y_raytraced.size == 0:
+            raise ValueError('source-arc mask has no boundary pixels')
+
+        x_min, x_max = float(np.min(x_raytraced)), float(np.max(x_raytraced))
+        y_min, y_max = float(np.min(y_raytraced)), float(np.max(y_raytraced))
+        center_x = 0.5 * (x_min + x_max)
+        center_y = 0.5 * (y_min + y_max)
+        half_size = 0.5 * max(x_max - x_min, y_max - y_min)
+        if not np.isfinite(half_size) or half_size <= 0:
+            raise ValueError('empty ray-traced source-plane extent')
+
+        npix_src = max(int(ny), int(nx))
+        extent = [
+            center_x - half_size,
+            center_x + half_size,
+            center_y - half_size,
+            center_y + half_size,
+        ]
+        x_src = np.linspace(extent[0], extent[1], npix_src)
+        y_src = np.linspace(extent[2], extent[3], npix_src)
+        xx_src, yy_src = np.meshgrid(x_src, y_src)
+        return xx_src, yy_src, extent
+    except Exception as error:
+        print(
+            '[plot_source_plane] Warning: could not derive the parametric '
+            f'source-plane extent from the source-arc mask ({error}); '
+            'using the image-plane extent.'
+        )
+        extent = _image_extent(ny, nx, pixel_scale)
+        x_src = np.linspace(extent[0], extent[1], nx)
+        y_src = np.linspace(extent[2], extent[3], ny)
+        xx_src, yy_src = np.meshgrid(x_src, y_src)
+        return xx_src, yy_src, extent
+
+
 def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None, residual_vis_max=0.0):
     num = len(plot_data)
     fig, axes = plt.subplots(1, num, figsize=(4 * num + 2 * num, 5))
@@ -408,10 +462,13 @@ def plot_source_plane(
             ny, nx = num_pixel, num_pixel
             p_scale = source_pixel_scale
 
-        extent = _image_extent(ny, nx, p_scale)
-        x = np.linspace(extent[0], extent[1], nx)
-        y = np.linspace(extent[2], extent[3], ny)
-        xx, yy = np.meshgrid(x, y)
+        xx, yy, extent = _parametric_source_plane_grid(
+            lens_image,
+            kwargs_result.get('kwargs_lens'),
+            ny,
+            nx,
+            p_scale,
+        )
 
         source_for_plot = np.asarray(
             lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
@@ -652,10 +709,13 @@ def plot_composite_2x3_panel(
             extent_src = list(lens_image.SourceModel.pixel_grid.extent)
     else:
         p_scale = float(getattr(lens_image.Grid, 'pixel_width', pixel_scale))
-        extent_src = _image_extent(ny, nx, p_scale)
-        x_src = np.linspace(extent_src[0], extent_src[1], nx)
-        y_src = np.linspace(extent_src[2], extent_src[3], ny)
-        xx_src, yy_src = np.meshgrid(x_src, y_src)
+        xx_src, yy_src, extent_src = _parametric_source_plane_grid(
+            lens_image,
+            kwargs_result.get('kwargs_lens'),
+            ny,
+            nx,
+            p_scale,
+        )
         source_for_plot = np.asarray(
             lens_image.SourceModel.surface_brightness(xx_src, yy_src, kwargs_result['kwargs_source'])
         ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
@@ -887,10 +947,13 @@ def plot_multiband_composite(
             source_pixels = np.asarray(source_pixels)
             extent_src = list(lens_image.SourceModel.pixel_grid.extent)
         else:
-            extent_src = _image_extent(*image_data.shape, pixel_scale)
-            x_src = np.linspace(extent_src[0], extent_src[1], image_data.shape[1])
-            y_src = np.linspace(extent_src[2], extent_src[3], image_data.shape[0])
-            xx_src, yy_src = np.meshgrid(x_src, y_src)
+            xx_src, yy_src, extent_src = _parametric_source_plane_grid(
+                lens_image,
+                kwargs_result.get('kwargs_lens'),
+                image_data.shape[0],
+                image_data.shape[1],
+                pixel_scale,
+            )
             source_pixels = np.asarray(
                 lens_image.SourceModel.surface_brightness(
                     xx_src, yy_src, kwargs_result.get('kwargs_source', []),
