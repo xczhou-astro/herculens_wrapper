@@ -20,6 +20,7 @@ import numpy as np
 from herculens_wrapper.utils import (
     _configure_cuda_from_args,
     _resolve_single_config_spec,
+    archive_input_files,
     center_crop,
     configure_import_paths,
     empty_config,
@@ -871,6 +872,15 @@ def build_and_run_multiband(config_path=None):
         for name, value in band_settings.items():
             setattr(band_args, name, value)
         paths = observation_paths[index] if use_multidata else _band_paths(args, band_name)
+        archive_input_files(
+            {
+                'data': paths['data_path'],
+                'noise': paths['noise_path'],
+                'psf': paths['psf_path'],
+                'source_arc_mask': paths['source_arc_mask_path'],
+            },
+            os.path.join(save_path, 'data', band_name),
+        )
         image_data = get_fits_data(paths['data_path'])
         noise_map = get_fits_data(paths['noise_path'])
         psf_data = get_fits_data(paths['psf_path'])

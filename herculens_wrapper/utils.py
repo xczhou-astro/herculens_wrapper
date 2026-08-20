@@ -1,5 +1,7 @@
+import filecmp
 import json
 import os
+import shutil
 from types import SimpleNamespace
 
 import numpy as np
@@ -463,6 +465,44 @@ def normalize_run_args_paths(args, config_dir=None):
                 normalized if isinstance(value, list) else normalized[0]
             ))
     return args
+
+
+def archive_input_files(input_paths, destination_dir):
+    """Copy resolved run inputs without replacing an existing snapshot."""
+    os.makedirs(destination_dir, exist_ok=True)
+    archived = {}
+    destinations = {}
+    for role, source_path in input_paths.items():
+        if source_path is None:
+            continue
+        source_path = os.path.abspath(os.fspath(source_path))
+        if not os.path.isfile(source_path):
+            raise FileNotFoundError(f'Cannot archive missing {role} input: {source_path}')
+
+        destination_path = os.path.join(destination_dir, os.path.basename(source_path))
+        previous_source = destinations.get(destination_path)
+        if previous_source is not None and previous_source != source_path:
+            raise ValueError(
+                f'Cannot archive {role}: {source_path!r} and {previous_source!r} '
+                f'have the same filename {os.path.basename(source_path)!r}.'
+            )
+        destinations[destination_path] = source_path
+
+        if os.path.abspath(destination_path) == source_path:
+            archived[role] = destination_path
+            continue
+        if os.path.exists(destination_path):
+            if not filecmp.cmp(source_path, destination_path, shallow=False):
+                raise FileExistsError(
+                    f'Refusing to overwrite archived {role} input: {destination_path}. '
+                    'Use a new save_path or remove the existing snapshot explicitly.'
+                )
+            print(f'[data] Preserved existing {role}: {destination_path}')
+        else:
+            shutil.copy2(source_path, destination_path)
+            print(f'[data] Archived {role}: {destination_path}')
+        archived[role] = destination_path
+    return archived
 
 
 def create_source_arc_mask_from_radius(image_shape, pixel_scale, radius_config):

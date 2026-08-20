@@ -29,6 +29,7 @@ from herculens_wrapper.utils import (
     OPTIMIZATION_SAMPLERS,
     Tee,
     _configure_cuda_from_args,
+    archive_input_files,
     log_jax_device_layout,
     _resolve_single_config_spec,
     center_crop,
@@ -236,6 +237,16 @@ def build_and_run(config_path=None):
     lens_light_config = getattr(config_module, 'lens_light_config', empty_config)
     source_light_config = getattr(config_module, 'source_light_config', empty_config)
     point_source_config = getattr(config_module, 'point_source_config', empty_config)
+
+    archive_input_files(
+        {
+            'data': args.data_path,
+            'noise': args.noise_path,
+            'psf': args.psf_path,
+            'source_arc_mask': getattr(args, 'source_arc_mask_path', None),
+        },
+        os.path.join(save_path, 'data'),
+    )
 
     image_data = get_fits_data(args.data_path)
     noise_map = get_fits_data(args.noise_path)
