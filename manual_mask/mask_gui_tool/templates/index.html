@@ -1,0 +1,2162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Strong Lensing Mask & Crop GUI</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --panel-bg: rgba(17, 24, 39, 0.7);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --accent-color: #3b82f6;
+            --accent-hover: #2563eb;
+            --text-color: #f3f4f6;
+            --text-muted: #9ca3af;
+            
+            --mask-1-color: rgba(239, 68, 68, 0.6); /* Red */
+            --mask-2-color: rgba(34, 197, 94, 0.6); /* Green */
+            --mask-out-color: rgba(59, 130, 246, 0.6); /* Blue */
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        header {
+            background-color: rgba(17, 24, 39, 0.9);
+            border-bottom: 1px solid var(--border-color);
+            padding: 12px 24px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+            z-index: 10;
+        }
+
+        header h1 {
+            font-size: 1.25rem;
+            font-weight: 600;
+            letter-spacing: -0.025em;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        header h1::before {
+            content: '';
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            background-color: var(--accent-color);
+            border-radius: 50%;
+            box-shadow: 0 0 10px var(--accent-color);
+        }
+
+        .workspace-info {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            background-color: rgba(255, 255, 255, 0.05);
+            padding: 4px 10px;
+            border-radius: 6px;
+            border: 1px solid var(--border-color);
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Sidebar Panels */
+        .sidebar {
+            width: 340px;
+            background-color: var(--panel-bg);
+            border-right: 1px solid var(--border-color);
+            backdrop-filter: blur(12px);
+            padding: 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+            z-index: 5;
+        }
+
+        .section-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--text-muted);
+            margin-bottom: 8px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        label {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-color);
+        }
+
+        select, input[type="text"], input[type="number"], button {
+            background-color: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: #fff;
+            padding: 10px 12px;
+            font-family: inherit;
+            font-size: 0.9rem;
+            outline: none;
+            transition: all 0.2s ease;
+        }
+
+        select:focus, input:focus {
+            border-color: var(--accent-color);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2);
+        }
+
+        button {
+            cursor: pointer;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        button.primary {
+            background-color: var(--accent-color);
+            border-color: var(--accent-color);
+        }
+
+        button.primary:hover {
+            background-color: var(--accent-hover);
+        }
+
+        button.secondary {
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+
+        button.secondary:hover {
+            background-color: rgba(255, 255, 255, 0.15);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        /* Ranges / Sliders */
+        .slider-container {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .slider-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 6px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 3px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: var(--accent-color);
+            cursor: pointer;
+            box-shadow: 0 0 5px rgba(0,0,0,0.5);
+            transition: transform 0.1s;
+        }
+
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
+        }
+
+        /* Display Panel Area */
+        .workspace {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background-color: #080b11;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .tabs {
+            display: flex;
+            background-color: rgba(17, 24, 39, 0.5);
+            border-bottom: 1px solid var(--border-color);
+            padding: 0 24px;
+        }
+
+        .tab {
+            padding: 14px 20px;
+            font-size: 0.9rem;
+            font-weight: 500;
+            color: var(--text-muted);
+            border-bottom: 2px solid transparent;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab.active {
+            color: #fff;
+            border-bottom-color: var(--accent-color);
+        }
+
+        .panel-view {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        }
+
+        .quad-panels.panel-view {
+            height: auto !important;
+            align-self: start;
+        }
+
+        .quad-panels {
+            display: grid !important;
+            grid-template-columns: repeat(2, 310px) !important;
+            grid-template-rows: repeat(2, auto) !important;
+            row-gap: 8px !important;
+            column-gap: 20px !important;
+            align-items: start !important;
+            align-content: start !important;
+            justify-content: center !important;
+            justify-items: center !important;
+            padding: 4px 12px;
+            max-width: 100%;
+        }
+
+        .quad-panels canvas.pixelated {
+            width: 310px;
+            height: 310px;
+            max-width: 310px;
+            max-height: 310px;
+            display: block;
+        }
+
+        .panel-box {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 310px;
+            gap: 4px;
+            margin: 0;
+            padding: 0;
+        }
+
+        .panel-label {
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: var(--accent-color);
+            letter-spacing: 0.02em;
+            text-transform: uppercase;
+            text-align: center;
+            width: 100%;
+            margin: 0;
+            padding: 0;
+            line-height: 1.2;
+        }
+
+        .colorbar-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            width: 310px;
+            margin-top: 2px;
+            margin-bottom: 0;
+        }
+
+        .colorbar-canvas {
+            flex: 1;
+            height: 10px !important;
+            max-height: 10px !important;
+            border-radius: 2px;
+            border: 1px solid var(--border-color);
+            display: block;
+        }
+
+        .cbar-label {
+            font-size: 0.7rem;
+            color: var(--text-muted);
+            font-family: monospace;
+            white-space: nowrap;
+            line-height: 1;
+        }
+
+        .canvas-container {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            position: relative;
+            padding: 24px;
+            overflow: auto;
+        }
+
+        canvas {
+            background-color: #000;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        /* Stretched Canvas rendering */
+        canvas.pixelated {
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        /* Tool status bar */
+        .statusbar {
+            background-color: rgba(17, 24, 39, 0.9);
+            border-top: 1px solid var(--border-color);
+            padding: 8px 24px;
+            font-size: 0.8rem;
+            color: var(--text-muted);
+            display: flex;
+            justify-content: space-between;
+            z-index: 10;
+        }
+
+        /* Mask Drawing Tools Panel */
+        .brush-panel {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .layer-selector {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .layer-option {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 8px 12px;
+            background-color: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .layer-option:hover {
+            background-color: rgba(255, 255, 255, 0.08);
+        }
+
+        .layer-option.selected {
+            background-color: rgba(59, 130, 246, 0.1);
+            border-color: var(--accent-color);
+        }
+
+        .layer-color-dot {
+            width: 14px;
+            height: 14px;
+            border-radius: 4px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .dot-mask-1 { background-color: var(--mask-1-color); }
+        .dot-mask-2 { background-color: var(--mask-2-color); }
+        .dot-mask-out { background-color: var(--mask-out-color); }
+
+        .layer-label {
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .tool-modes {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .tool-mode {
+            padding: 8px;
+            font-size: 0.85rem;
+        }
+
+        /* Overlay/Spinner */
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background-color: rgba(11, 15, 25, 0.8);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 16px;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+
+        .overlay.active {
+            opacity: 1;
+            pointer-events: all;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: var(--accent-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Notifications toast */
+        .toast {
+            position: absolute;
+            bottom: 24px;
+            right: 24px;
+            background-color: #10b981;
+            color: #fff;
+            padding: 12px 20px;
+            border-radius: 8px;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.3);
+            font-weight: 500;
+            font-size: 0.9rem;
+            opacity: 0;
+            transform: translateY(10px);
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            pointer-events: none;
+            z-index: 1000;
+        }
+
+        .toast.error {
+            background-color: #ef4444;
+        }
+
+        .toast.active {
+            opacity: 1;
+            transform: translateY(0);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Strong Lensing Mask & Crop GUI</h1>
+        <div class="workspace-info" id="workspace-info">Scanning...</div>
+    </header>
+
+    <main>
+        <!-- Overlay Loading Screen -->
+        <div class="overlay" id="loading-overlay">
+            <div class="spinner"></div>
+            <div id="loading-text" style="font-weight: 500;">Loading FITS image...</div>
+        </div>
+
+        <!-- Sidebar Panel for Controls -->
+        <div class="sidebar">
+            <!-- Crop Tab Panel Controls -->
+            <div id="crop-controls" class="sidebar-section">
+                <div class="control-group" style="margin-bottom: 20px;">
+                    <div class="section-title">Target FITS File</div>
+                    <!-- RGB Image File Section -->
+                    <div class="control-group" id="rgb-file-section" style="display: none; margin-bottom: 12px;">
+                        <label>RGB Image File Path (.png, .jpg)</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="rgb-file-path-input" placeholder="Select or enter RGB image path" style="flex: 1; min-width: 0;">
+                            <button class="secondary" id="btn-browse-rgb" style="white-space: nowrap;">
+                                Browse...
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="control-group">
+                        <label id="fits-file-label">FITS File Path</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="fits-file-path-input" placeholder="Select or enter FITS file path" style="flex: 1; min-width: 0;">
+                            <button class="secondary" id="btn-browse-file" style="white-space: nowrap;">
+                                Browse...
+                            </button>
+                        </div>
+                    </div>
+                    <button class="primary" id="btn-load-file" style="margin-top: 8px; width: 100%;">
+                        Load FITS File
+                    </button>
+                </div>
+
+                <div class="control-group" style="margin-bottom: 20px;">
+                    <div class="section-title">HDU Extensions</div>
+                    <div class="control-group" style="margin-bottom: 8px;">
+                        <label>Image HDU (Science)</label>
+                        <select id="image-hdu-select">
+                            <option value="">Auto-detect (Default)</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Noise HDU (Error/Noise)</label>
+                        <select id="noise-hdu-select">
+                            <option value="">Auto-detect / External file</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-bottom: 20px;">
+                    <div class="section-title">Cutout Settings</div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px;">
+                        <div class="control-group">
+                            <label>Center X (pixel)</label>
+                            <input type="number" id="center-x" value="250" step="0.1">
+                        </div>
+                        <div class="control-group">
+                            <label>Center Y (pixel)</label>
+                            <input type="number" id="center-y" value="250" step="0.1">
+                        </div>
+                    </div>
+                </div>
+
+                <div class="control-group" style="margin-bottom: 20px; border-bottom: 1px solid var(--border-color); padding-bottom: 20px;">
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label>Cutout Box Size (pixels)</label>
+                            <input type="number" id="box-size-input" value="50" min="5" max="500" step="1" style="width: 70px; padding: 2px 6px; font-size: 13px; text-align: center; border: 1px solid var(--border-color); border-radius: 4px; background: var(--bg-card); color: var(--text-color);">
+                        </div>
+                        <input type="range" id="box-size" min="5" max="500" value="50" step="1">
+                    </div>
+                </div>
+
+                <!-- Output Folder Selection -->
+                <div class="control-group" style="margin-bottom: 24px;">
+                    <div class="section-title">Output Settings</div>
+                    <div class="control-group">
+                        <label>Output Folder (Defaults to FITS File Path)</label>
+                        <input type="text" id="output-folder" placeholder="Defaults to FITS file directory">
+                    </div>
+                </div>
+
+                <button class="primary" id="btn-lock-crop" style="width: 100%;">
+                    Perform Crop & Paint
+                </button>
+            </div>
+
+            <!-- Mask Paint Panel Controls (Hidden by default) -->
+            <div id="paint-controls" class="sidebar-section" style="display: none;">
+                <div class="brush-panel">
+                    <div class="section-title">Brush & Drawing Settings</div>
+                    
+                    <div class="tool-modes">
+                        <button class="tool-mode secondary selected" id="tool-brush">Draw</button>
+                        <button class="tool-mode secondary" id="tool-eraser">Eraser</button>
+                    </div>
+
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label>Brush Size (grid pixels)</label>
+                            <span id="brush-size-val">4</span>
+                        </div>
+                        <input type="range" id="brush-size" min="1" max="15" value="4" step="1">
+                    </div>
+
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label>Mask Opacity</label>
+                            <span id="opacity-val">60%</span>
+                        </div>
+                        <input type="range" id="mask-opacity" min="10" max="90" value="60">
+                    </div>
+
+                    <div class="layer-selector">
+                        <div class="section-title">Mask Layers</div>
+                        <div class="layer-option selected" data-layer="mask_1">
+                            <div class="layer-color-dot dot-mask-1"></div>
+                            <span class="layer-label">Mask 1 (Source Arc 1)</span>
+                        </div>
+                        <div class="layer-option" data-layer="mask_2">
+                            <div class="layer-color-dot dot-mask-2"></div>
+                            <span class="layer-label">Mask 2 (Source Arc 2)</span>
+                        </div>
+                        <div class="layer-option" data-layer="mask_out">
+                            <div class="layer-color-dot dot-mask-out"></div>
+                            <span class="layer-label">Mask Out (Exclusions)</span>
+                        </div>
+                    </div>
+
+                    <button class="secondary" id="btn-clear-layer" style="width: 100%; color: #ef4444; border-color: rgba(239, 68, 68, 0.2);">
+                        Clear Active Layer
+                    </button>
+
+                    <div style="margin-top: 10px; border-top: 1px solid var(--border-color); padding-top: 20px; display: flex; flex-direction: column; gap: 10px;">
+                        <button class="primary" id="btn-save-all" style="width: 100%;">
+                            Save Cutout & Masks
+                        </button>
+                        <button class="secondary" id="btn-back" style="width: 100%;">
+                            Back to Crop
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Global Contrast & Scale Tuning -->
+            <div class="sidebar-section" style="border-top: 1px solid var(--border-color); padding-top: 20px;">
+                <div class="control-group">
+                    <div class="section-title">Contrast & Scale</div>
+                    <div class="control-group" style="margin-bottom: 8px;">
+                        <label>Color Map</label>
+                        <select id="cmap-type">
+                            <option value="twilight" selected>Twilight (Default)</option>
+                            <option value="bwr">Blue-White-Red (BWR)</option>
+                            <option value="viridis">Viridis</option>
+                            <option value="magma">Magma</option>
+                            <option value="grayscale">Grayscale</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Stretch Function</label>
+                        <select id="scale-type">
+                            <option value="log" selected>Logarithmic (Log)</option>
+                            <option value="asinh">Arcsinh (Asinh)</option>
+                            <option value="sqrt">Square Root (Sqrt)</option>
+                            <option value="linear">Linear</option>
+                        </select>
+                    </div>
+                    <div class="slider-container" style="margin-top: 8px;">
+                        <div class="slider-header">
+                            <label>Min Clip (Percentile)</label>
+                            <span id="pct-min-val">1.0%</span>
+                        </div>
+                        <input type="range" id="pct-min" min="0" max="10" value="1.0" step="0.1">
+                    </div>
+                    <div class="slider-container">
+                        <div class="slider-header">
+                            <label>Max Clip (Percentile)</label>
+                            <span id="pct-max-val">99.5%</span>
+                        </div>
+                        <input type="range" id="pct-max" min="90" max="100" value="99.5" step="0.1">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Workspace Area -->
+        <div class="workspace">
+            <div class="tabs">
+                <div class="tab active" id="tab-crop">1. Crop & Center</div>
+                <div class="tab" id="tab-paint">2. Paint Masks</div>
+            </div>
+
+            <!-- Canvas Container -->
+            <div class="canvas-container">
+                <!-- Crop Mode View -->
+                <div id="crop-view" class="panel-view">
+                    <canvas id="crop-canvas"></canvas>
+                </div>
+
+                <!-- Paint Mode 4-Panel View Grid -->
+                <div id="paint-view" class="panel-view quad-panels" style="display: none;">
+                    <div class="panel-box">
+                        <div class="panel-label">1. Interactive Mask Painting</div>
+                        <canvas id="paint-canvas" class="pixelated"></canvas>
+                        <div class="colorbar-wrapper">
+                            <span class="cbar-label" id="paint-cbar-min">0.0</span>
+                            <canvas class="colorbar-canvas" id="paint-cbar-canvas"></canvas>
+                            <span class="cbar-label" id="paint-cbar-max">1.0</span>
+                        </div>
+                    </div>
+                    <div class="panel-box">
+                        <div class="panel-label">2. Masked Feature (mask * image)</div>
+                        <canvas id="masked-canvas" class="pixelated"></canvas>
+                        <div class="colorbar-wrapper">
+                            <span class="cbar-label" id="masked-cbar-min">0.0</span>
+                            <canvas class="colorbar-canvas" id="masked-cbar-canvas"></canvas>
+                            <span class="cbar-label" id="masked-cbar-max">1.0</span>
+                        </div>
+                    </div>
+                    <div class="panel-box">
+                        <div class="panel-label">3. Unmasked Data (abs(mask - 1) * image)</div>
+                        <canvas id="unmasked-canvas" class="pixelated"></canvas>
+                        <div class="colorbar-wrapper">
+                            <span class="cbar-label" id="unmasked-cbar-min">0.0</span>
+                            <canvas class="colorbar-canvas" id="unmasked-cbar-canvas"></canvas>
+                            <span class="cbar-label" id="unmasked-cbar-max">1.0</span>
+                        </div>
+                    </div>
+                    <div class="panel-box">
+                        <div class="panel-label">4. Signal-to-Noise Ratio (SNR = Data / Noise)</div>
+                        <canvas id="snr-canvas" class="pixelated"></canvas>
+                        <div class="colorbar-wrapper">
+                            <span class="cbar-label" id="snr-cbar-min">0.0</span>
+                            <canvas class="colorbar-canvas" id="snr-cbar-canvas"></canvas>
+                            <span class="cbar-label" id="snr-cbar-max">1.0</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Statusbar -->
+            <div class="statusbar">
+                <span id="coord-info">Hover over image to inspect pixel coordinates</span>
+                <span id="fits-info">No file loaded</span>
+            </div>
+        </div>
+
+        <!-- Toast Notifications -->
+        <div class="toast" id="toast">Outputs successfully saved!</div>
+    </main>
+
+    <script>
+        // Colormap definitions (interpolated from matplotlib colormaps)
+        const COLORMAPS = {
+            twilight: [[226, 217, 226], [196, 206, 212], [149, 181, 199], [114, 151, 193], [98, 118, 186], [94, 81, 173], [89, 42, 143], [69, 19, 92], [47, 20, 54], [74, 19, 66], [116, 30, 79], [152, 53, 80], [178, 86, 82], [194, 124, 99], [204, 163, 137], [216, 199, 190], [226, 217, 226]],
+            bwr: [[0, 0, 255], [32, 32, 255], [64, 64, 255], [96, 96, 255], [128, 128, 255], [160, 160, 255], [192, 192, 255], [224, 224, 255], [255, 254, 254], [255, 222, 222], [255, 190, 190], [255, 158, 158], [255, 126, 126], [255, 94, 94], [255, 62, 62], [255, 30, 30], [255, 0, 0]],
+            viridis: [[68, 1, 84], [72, 24, 106], [71, 45, 123], [66, 64, 134], [59, 82, 139], [51, 99, 141], [44, 114, 142], [38, 130, 142], [33, 145, 140], [31, 160, 136], [40, 174, 128], [63, 188, 115], [94, 201, 98], [132, 212, 75], [173, 220, 48], [216, 226, 25], [253, 231, 37]],
+            magma: [[0, 0, 4], [10, 8, 34], [29, 17, 71], [54, 16, 107], [81, 18, 124], [106, 28, 129], [131, 38, 129], [156, 46, 127], [183, 55, 121], [208, 65, 111], [231, 82, 99], [245, 107, 92], [252, 137, 97], [254, 167, 114], [254, 196, 136], [253, 226, 163], [252, 253, 191]],
+            grayscale: [[0, 0, 0], [255, 255, 255]]
+        };
+
+        function getColorFromCmap(val, cmapName = 'twilight') {
+            val = Math.max(0, Math.min(1, val));
+            const map = COLORMAPS[cmapName] || COLORMAPS.twilight;
+            const len = map.length - 1;
+            const scaled = val * len;
+            const idx = Math.floor(scaled);
+            const frac = scaled - idx;
+            
+            if (idx >= len) return map[len];
+            
+            const c0 = map[idx];
+            const c1 = map[idx + 1];
+            
+            return [
+                Math.round(c0[0] + frac * (c1[0] - c0[0])),
+                Math.round(c0[1] + frac * (c1[1] - c0[1])),
+                Math.round(c0[2] + frac * (c1[2] - c0[2]))
+            ];
+        }
+
+        // Core application state
+        const state = {
+            mode: 'crop', // 'crop' or 'paint'
+            files: [],
+            selectedFile: '',
+            selectedRGBFile: '',
+            useRGB: false,
+            rgbImage: null,
+            imageWidth: 0,
+            imageHeight: 0,
+            
+            // Raw floating point data list from FITS loader
+            rawFITSData: null,
+            sortedFITSData: null,
+            rawNoiseData: null,
+            
+            centerX: 250,
+            centerY: 250,
+            boxSize: 50,
+            
+            // Scale and Contrast tuning parameters
+            cmapType: 'twilight',
+            scaleType: 'log',
+            pctMin: 0.01, // 1.0%
+            pctMax: 0.995, // 99.5%
+            outputFolder: 'cutout_output',
+            
+            // Masking parameters
+            activeLayer: 'mask_1', // 'mask_1', 'mask_2', 'mask_out'
+            tool: 'brush', // 'brush' or 'eraser'
+            brushSize: 4,
+            maskOpacity: 0.6,
+            
+            // Mask arrays of size boxSize x boxSize
+            masks: {
+                mask_1: null,
+                mask_2: null,
+                mask_out: null
+            },
+            
+            isDrawing: false
+        };
+
+        // DOM Elements
+        const el = {
+            fitsFilePathInput: document.getElementById('fits-file-path-input'),
+            btnBrowseFile: document.getElementById('btn-browse-file'),
+            btnLoadFile: document.getElementById('btn-load-file'),
+            imageHduSelect: document.getElementById('image-hdu-select'),
+            noiseHduSelect: document.getElementById('noise-hdu-select'),
+            workspaceInfo: document.getElementById('workspace-info'),
+            centerXInput: document.getElementById('center-x'),
+            centerYInput: document.getElementById('center-y'),
+            boxSizeSlider: document.getElementById('box-size'),
+            boxSizeInput: document.getElementById('box-size-input'),
+            btnLockCrop: document.getElementById('btn-lock-crop'),
+            
+            cmapTypeSelect: document.getElementById('cmap-type'),
+            scaleTypeSelect: document.getElementById('scale-type'),
+            pctMinSlider: document.getElementById('pct-min'),
+            pctMinVal: document.getElementById('pct-min-val'),
+            pctMaxSlider: document.getElementById('pct-max'),
+            pctMaxVal: document.getElementById('pct-max-val'),
+            outputFolderInput: document.getElementById('output-folder'),
+            
+            cropControls: document.getElementById('crop-controls'),
+            paintControls: document.getElementById('paint-controls'),
+            tabCrop: document.getElementById('tab-crop'),
+            tabPaint: document.getElementById('tab-paint'),
+            
+            cropView: document.getElementById('crop-view'),
+            paintView: document.getElementById('paint-view'),
+            cropCanvas: document.getElementById('crop-canvas'),
+            paintCanvas: document.getElementById('paint-canvas'),
+            maskedCanvas: document.getElementById('masked-canvas'),
+            unmaskedCanvas: document.getElementById('unmasked-canvas'),
+            snrCanvas: document.getElementById('snr-canvas'),
+            
+            paintCbarCanvas: document.getElementById('paint-cbar-canvas'),
+            paintCbarMin: document.getElementById('paint-cbar-min'),
+            paintCbarMax: document.getElementById('paint-cbar-max'),
+            maskedCbarCanvas: document.getElementById('masked-cbar-canvas'),
+            maskedCbarMin: document.getElementById('masked-cbar-min'),
+            maskedCbarMax: document.getElementById('masked-cbar-max'),
+            unmaskedCbarCanvas: document.getElementById('unmasked-cbar-canvas'),
+            unmaskedCbarMin: document.getElementById('unmasked-cbar-min'),
+            unmaskedCbarMax: document.getElementById('unmasked-cbar-max'),
+            snrCbarCanvas: document.getElementById('snr-cbar-canvas'),
+            snrCbarMin: document.getElementById('snr-cbar-min'),
+            snrCbarMax: document.getElementById('snr-cbar-max'),
+            
+            brushSizeSlider: document.getElementById('brush-size'),
+            brushSizeVal: document.getElementById('brush-size-val'),
+            opacitySlider: document.getElementById('mask-opacity'),
+            opacityVal: document.getElementById('opacity-val'),
+            toolBrush: document.getElementById('tool-brush'),
+            toolEraser: document.getElementById('tool-eraser'),
+            layerOptions: document.querySelectorAll('.layer-option'),
+            btnClearLayer: document.getElementById('btn-clear-layer'),
+            btnSaveAll: document.getElementById('btn-save-all'),
+            btnBack: document.getElementById('btn-back'),
+            
+            loadingOverlay: document.getElementById('loading-overlay'),
+            loadingText: document.getElementById('loading-text'),
+            coordInfo: document.getElementById('coord-info'),
+            fitsInfo: document.getElementById('fits-info'),
+            toast: document.getElementById('toast')
+        };
+
+        // Contexts
+        const cropCtx = el.cropCanvas.getContext('2d');
+        const paintCtx = el.paintCanvas.getContext('2d');
+        const maskedCtx = el.maskedCanvas.getContext('2d');
+        const unmaskedCtx = el.unmaskedCanvas.getContext('2d');
+        const snrCtx = el.snrCanvas.getContext('2d');
+
+        // Initial setup
+        window.addEventListener('DOMContentLoaded', () => {
+            fetchFiles();
+            setupEventListeners();
+        });
+
+        // Fetch initial file state from backend
+        async function fetchFiles() {
+            try {
+                const res = await fetch('/api/files');
+                const data = await res.json();
+                state.useRGB = data.use_rgb;
+                
+                if (state.useRGB) {
+                    document.getElementById('rgb-file-section').style.display = 'block';
+                    document.getElementById('fits-file-label').textContent = 'Single Band FITS Path';
+                    
+                    // Hide colorbar wrappers for panels 1, 2, and 3
+                    const paintCbar = document.getElementById('paint-cbar-canvas');
+                    if (paintCbar) paintCbar.parentElement.style.display = 'none';
+                    const maskedCbar = document.getElementById('masked-cbar-canvas');
+                    if (maskedCbar) maskedCbar.parentElement.style.display = 'none';
+                    const unmaskedCbar = document.getElementById('unmasked-cbar-canvas');
+                    if (unmaskedCbar) unmaskedCbar.parentElement.style.display = 'none';
+                    
+                    if (data.rgb_file) {
+                        document.getElementById('rgb-file-path-input').value = data.rgb_file;
+                    }
+                    if (data.target_file) {
+                        el.fitsFilePathInput.value = data.target_file;
+                    }
+                    
+                    if (data.rgb_file && data.target_file) {
+                        loadFilesRGB(data.rgb_file, data.target_file);
+                    } else {
+                        el.workspaceInfo.textContent = "Select RGB file and Single Band FITS file to begin";
+                    }
+                } else {
+                    if (data.target_file) {
+                        el.fitsFilePathInput.value = data.target_file;
+                        loadFitsFile(data.target_file);
+                    } else {
+                        el.workspaceInfo.textContent = "Select FITS file to begin";
+                    }
+                }
+            } catch (err) {
+                console.error("Failed to fetch initial file state.", err);
+            }
+        }
+
+        // Show/Hide loading overlay
+        function showLoading(show, text = "Loading...") {
+            if (show) {
+                el.loadingText.textContent = text;
+                el.loadingOverlay.classList.add('active');
+            } else {
+                el.loadingOverlay.classList.remove('active');
+            }
+        }
+
+        // Show toast notification
+        function showToast(msg, isError = false) {
+            el.toast.textContent = msg;
+            if (isError) {
+                el.toast.classList.add('error');
+            } else {
+                el.toast.classList.remove('error');
+            }
+            el.toast.classList.add('active');
+            setTimeout(() => {
+                el.toast.classList.remove('active');
+            }, 3000);
+        }
+
+        // Load FITS File into Memory
+        async function loadFilesRGB(rgbFilename, fitsFilename) {
+            if (!rgbFilename || !fitsFilename) {
+                showToast("Please specify both RGB and FITS file paths.", true);
+                return;
+            }
+            showLoading(true, "Loading RGB and FITS files...");
+            try {
+                // 1. Load FITS metadata and data
+                let url = `/api/load?file=${encodeURIComponent(fitsFilename)}`;
+                const resFits = await fetch(url);
+                if (!resFits.ok) throw new Error("FITS load failed");
+                const fitsData = await resFits.json();
+                
+                state.selectedFile = fitsFilename;
+                state.imageWidth = fitsData.width;
+                state.imageHeight = fitsData.height;
+                state.rawFITSData = fitsData.raw_data;
+                state.rawNoiseData = fitsData.raw_noise_data;
+                
+                if (fitsData.parent_dir) {
+                    el.outputFolderInput.value = fitsData.parent_dir;
+                    state.outputFolder = fitsData.parent_dir;
+                    el.workspaceInfo.textContent = fitsData.parent_dir;
+                }
+                
+                if (fitsData.hdus && fitsData.hdus.length > 0) {
+                    el.imageHduSelect.innerHTML = '<option value="">Auto-detect (Default)</option>';
+                    el.noiseHduSelect.innerHTML = '<option value="">Auto-detect / External file</option>';
+                    fitsData.hdus.forEach(h => {
+                        const optImg = document.createElement('option');
+                        optImg.value = h.index;
+                        optImg.textContent = h.label;
+                        if (String(h.name).toUpperCase() === String(fitsData.selected_image_hdu).toUpperCase() || h.index === fitsData.selected_image_hdu) {
+                            optImg.selected = true;
+                        }
+                        el.imageHduSelect.appendChild(optImg);
+                        
+                        const optNoise = document.createElement('option');
+                        optNoise.value = h.index;
+                        optNoise.textContent = h.label;
+                        el.noiseHduSelect.appendChild(optNoise);
+                    });
+                }
+                
+                state.sortedFITSData = [...fitsData.raw_data].sort((a, b) => a - b);
+                state.centerX = Math.floor(fitsData.width / 2);
+                state.centerY = Math.floor(fitsData.height / 2);
+                el.centerXInput.value = state.centerX;
+                el.centerYInput.value = state.centerY;
+                
+                el.fitsInfo.textContent = `Size: ${fitsData.width}x${fitsData.height} | Filter: ${fitsData.filter || 'N/A'}`;
+                
+                // 2. Load RGB image
+                state.selectedRGBFile = rgbFilename;
+                state.rgbImage = new Image();
+                state.rgbImage.src = `/api/rgb_image?file=${encodeURIComponent(rgbFilename)}`;
+                state.rgbImage.onload = () => {
+                    if (state.mode === 'crop') {
+                        drawCropCanvas();
+                    } else {
+                        drawPaintCanvas();
+                    }
+                    showLoading(false);
+                };
+                state.rgbImage.onerror = () => {
+                    showLoading(false);
+                    showToast("Error loading RGB image. Check format/path.", true);
+                };
+                
+            } catch (err) {
+                showLoading(false);
+                showToast("Error loading files.", true);
+            }
+        }
+
+        async function loadFitsFile(filename, imageHdu = null, noiseHdu = null) {
+            if (!filename) return;
+            showLoading(true, "Loading FITS image...");
+            try {
+                let url = `/api/load?file=${encodeURIComponent(filename)}`;
+                if (imageHdu !== null && imageHdu !== "") url += `&image_hdu=${encodeURIComponent(imageHdu)}`;
+                if (noiseHdu !== null && noiseHdu !== "") url += `&noise_hdu=${encodeURIComponent(noiseHdu)}`;
+
+                const res = await fetch(url);
+                if (!res.ok) throw new Error("Load failed");
+                const data = await res.json();
+                
+                state.selectedFile = filename;
+                state.imageWidth = data.width;
+                state.imageHeight = data.height;
+                state.rawFITSData = data.raw_data;
+                state.rawNoiseData = data.raw_noise_data;
+                
+                // Set default output folder to parent directory of FITS file
+                if (data.parent_dir) {
+                    el.outputFolderInput.value = data.parent_dir;
+                    state.outputFolder = data.parent_dir;
+                    el.workspaceInfo.textContent = data.parent_dir;
+                }
+                
+                // Populate HDU options if returned
+                if (data.hdus && data.hdus.length > 0) {
+                    const currentNoise = el.noiseHduSelect.value;
+                    
+                    el.imageHduSelect.innerHTML = '<option value="">Auto-detect (Default)</option>';
+                    el.noiseHduSelect.innerHTML = '<option value="">Auto-detect / External file</option>';
+                    
+                    data.hdus.forEach(h => {
+                        const optImg = document.createElement('option');
+                        optImg.value = h.index;
+                        optImg.textContent = h.label;
+                        if (String(h.name).toUpperCase() === String(data.selected_image_hdu).toUpperCase() || h.index === data.selected_image_hdu) {
+                            optImg.selected = true;
+                        }
+                        el.imageHduSelect.appendChild(optImg);
+                        
+                        const optNoise = document.createElement('option');
+                        optNoise.value = h.index;
+                        optNoise.textContent = h.label;
+                        el.noiseHduSelect.appendChild(optNoise);
+                    });
+                    
+                    if (currentNoise !== "") {
+                        el.noiseHduSelect.value = currentNoise;
+                    }
+                }
+                
+                // Sort data in background for fast percentile calculation
+                showLoading(true, "Processing FITS data...");
+                setTimeout(() => {
+                    state.sortedFITSData = [...data.raw_data].sort((a, b) => a - b);
+                    
+                    state.centerX = Math.floor(data.width / 2);
+                    state.centerY = Math.floor(data.height / 2);
+                    el.centerXInput.value = state.centerX;
+                    el.centerYInput.value = state.centerY;
+                    
+                    el.fitsInfo.textContent = `Size: ${data.width}x${data.height} | Filter: ${data.filter || 'N/A'}`;
+                    drawCropCanvas();
+                    showLoading(false);
+                }, 50);
+            } catch (err) {
+                showLoading(false);
+                showToast("Error loading FITS file. Check format.", true);
+            }
+        }
+
+        // Event listener setup
+        function setupEventListeners() {
+            const btnBrowseRGB = document.getElementById('btn-browse-rgb');
+            if (btnBrowseRGB) {
+                btnBrowseRGB.addEventListener('click', async () => {
+                    try {
+                        const res = await fetch('/api/select_file?type=rgb', { method: 'POST' });
+                        const data = await res.json();
+                        if (data.success && data.file) {
+                            document.getElementById('rgb-file-path-input').value = data.file;
+                            const fitsVal = el.fitsFilePathInput.value.trim();
+                            if (fitsVal) {
+                                loadFilesRGB(data.file, fitsVal);
+                            }
+                        } else if (data.message) {
+                            showToast(data.message);
+                        }
+                    } catch (err) {
+                        showToast("Error opening file dialog", true);
+                    }
+                });
+            }
+
+            el.btnBrowseFile.addEventListener('click', async () => {
+                try {
+                    const res = await fetch('/api/select_file', { method: 'POST' });
+                    const data = await res.json();
+                    if (data.success && data.file) {
+                        el.fitsFilePathInput.value = data.file;
+                        if (state.useRGB) {
+                            const rgbVal = document.getElementById('rgb-file-path-input').value.trim();
+                            if (rgbVal) {
+                                loadFilesRGB(rgbVal, data.file);
+                            }
+                        } else {
+                            loadFitsFile(data.file);
+                        }
+                    } else if (data.message) {
+                        showToast(data.message);
+                    }
+                } catch (err) {
+                    showToast("Error opening file dialog", true);
+                }
+            });
+
+            el.imageHduSelect.addEventListener('change', (e) => {
+                if (state.selectedFile) {
+                    loadFitsFile(state.selectedFile, e.target.value, el.noiseHduSelect.value);
+                }
+            });
+
+            el.btnLoadFile.addEventListener('click', () => {
+                if (state.useRGB) {
+                    const rgbVal = document.getElementById('rgb-file-path-input').value.trim();
+                    const fitsVal = el.fitsFilePathInput.value.trim();
+                    loadFilesRGB(rgbVal, fitsVal);
+                } else {
+                    const val = el.fitsFilePathInput.value.trim();
+                    if (val) {
+                        loadFitsFile(val);
+                    } else {
+                        showToast("Please enter a FITS file path.", true);
+                    }
+                }
+            });
+
+            el.fitsFilePathInput.addEventListener('keypress', (e) => {
+                if (e.key === 'Enter') {
+                    const val = el.fitsFilePathInput.value.trim();
+                    if (val) {
+                        loadFitsFile(val);
+                    }
+                }
+            });
+
+            const updateBoxSize = (valStr) => {
+                const val = parseInt(valStr);
+                if (!isNaN(val) && val >= 5 && val <= 1000) {
+                    state.boxSize = val;
+                    if (el.boxSizeSlider) el.boxSizeSlider.value = val;
+                    if (el.boxSizeInput) el.boxSizeInput.value = val;
+                    drawCropCanvas();
+                }
+            };
+
+            if (el.boxSizeSlider) {
+                el.boxSizeSlider.addEventListener('input', (e) => updateBoxSize(e.target.value));
+            }
+            if (el.boxSizeInput) {
+                el.boxSizeInput.addEventListener('input', (e) => updateBoxSize(e.target.value));
+                el.boxSizeInput.addEventListener('change', (e) => updateBoxSize(e.target.value));
+            }
+
+            const onCenterChange = () => {
+                const x = parseFloat(el.centerXInput.value);
+                const y = parseFloat(el.centerYInput.value);
+                if (!isNaN(x) && x >= 0 && x <= state.imageWidth) state.centerX = x;
+                if (!isNaN(y) && y >= 0 && y <= state.imageHeight) state.centerY = y;
+                drawCropCanvas();
+            };
+            el.centerXInput.addEventListener('input', onCenterChange);
+            el.centerYInput.addEventListener('input', onCenterChange);
+
+            // Click on crop canvas to set center
+            el.cropCanvas.addEventListener('mousedown', (e) => {
+                if (!state.rawFITSData) return;
+                const rect = el.cropCanvas.getBoundingClientRect();
+                const scaleX = state.imageWidth / el.cropCanvas.width;
+                const scaleY = state.imageHeight / el.cropCanvas.height;
+                
+                const canvasX = (e.clientX - rect.left) * scaleX;
+                const canvasY = (e.clientY - rect.top) * scaleY;
+                
+                state.centerX = Math.round(canvasX * 10) / 10;
+                state.centerY = Math.round((state.imageHeight - 1 - canvasY) * 10) / 10;
+                
+                el.centerXInput.value = state.centerX;
+                el.centerYInput.value = state.centerY;
+                drawCropCanvas();
+            });
+
+            el.cropCanvas.addEventListener('mousemove', (e) => {
+                if (!state.rawFITSData) return;
+                const rect = el.cropCanvas.getBoundingClientRect();
+                const scaleX = state.imageWidth / el.cropCanvas.width;
+                const scaleY = state.imageHeight / el.cropCanvas.height;
+                
+                const canvasX = Math.floor((e.clientX - rect.left) * scaleX);
+                const canvasY = Math.floor((e.clientY - rect.top) * scaleY);
+                const fitsY = state.imageHeight - 1 - canvasY;
+                
+                // Get pixel value
+                const idx = canvasY * state.imageWidth + canvasX;
+                const val = state.rawFITSData[idx];
+                const valStr = val !== undefined ? val.toExponential(3) : 'N/A';
+                
+                el.coordInfo.textContent = `FITS: (${canvasX}, ${fitsY}) | Value: ${valStr}`;
+            });
+
+            // Perform Crop button
+            el.btnLockCrop.addEventListener('click', () => {
+                if (!state.rawFITSData) {
+                    showToast("Please load a band first.", true);
+                    return;
+                }
+                switchMode('paint');
+            });
+
+            el.btnBack.addEventListener('click', () => {
+                switchMode('crop');
+            });
+
+            el.tabCrop.addEventListener('click', () => {
+                if (state.mode === 'paint') switchMode('crop');
+            });
+            el.tabPaint.addEventListener('click', () => {
+                if (state.mode === 'crop' && state.rawFITSData) switchMode('paint');
+            });
+
+            // Colormap changes
+            if (el.cmapTypeSelect) {
+                el.cmapTypeSelect.addEventListener('change', (e) => {
+                    state.cmapType = e.target.value;
+                    if (state.mode === 'crop') drawCropCanvas();
+                    else drawPaintCanvas();
+                });
+            }
+
+            // Stretch type changes
+            el.scaleTypeSelect.addEventListener('change', (e) => {
+                state.scaleType = e.target.value;
+                if (state.mode === 'crop') drawCropCanvas();
+                else drawPaintCanvas();
+            });
+
+            // Percentile sliders changes
+            el.pctMinSlider.addEventListener('input', (e) => {
+                state.pctMin = parseFloat(e.target.value) / 100;
+                el.pctMinVal.textContent = `${e.target.value}%`;
+                if (state.mode === 'crop') drawCropCanvas();
+                else drawPaintCanvas();
+            });
+
+            el.pctMaxSlider.addEventListener('input', (e) => {
+                state.pctMax = parseFloat(e.target.value) / 100;
+                el.pctMaxVal.textContent = `${e.target.value}%`;
+                if (state.mode === 'crop') drawCropCanvas();
+                else drawPaintCanvas();
+            });
+
+            // Layers
+            el.layerOptions.forEach(opt => {
+                opt.addEventListener('click', () => {
+                    el.layerOptions.forEach(o => o.classList.remove('selected'));
+                    opt.classList.add('selected');
+                    state.activeLayer = opt.dataset.layer;
+                });
+            });
+
+            // Modes
+            el.toolBrush.addEventListener('click', () => {
+                el.toolEraser.classList.remove('selected');
+                el.toolBrush.classList.add('selected');
+                state.tool = 'brush';
+            });
+            el.toolEraser.addEventListener('click', () => {
+                el.toolBrush.classList.remove('selected');
+                el.toolEraser.classList.add('selected');
+                state.tool = 'eraser';
+            });
+
+            el.brushSizeSlider.addEventListener('input', (e) => {
+                state.brushSize = parseInt(e.target.value);
+                el.brushSizeVal.textContent = state.brushSize;
+            });
+
+            el.opacitySlider.addEventListener('input', (e) => {
+                state.maskOpacity = parseInt(e.target.value) / 100;
+                el.opacityVal.textContent = `${e.target.value}%`;
+                drawPaintCanvas();
+            });
+
+            el.btnClearLayer.addEventListener('click', () => {
+                if (confirm(`Are you sure you want to clear ${state.activeLayer}?`)) {
+                    state.masks[state.activeLayer] = Array(state.boxSize).fill().map(() => Array(state.boxSize).fill(0));
+                    drawPaintCanvas();
+                }
+            });
+
+            // Drawing logic
+            function paintOnMatrix(col, row) {
+                if (!state.masks[state.activeLayer]) return;
+                const val = state.tool === 'brush' ? 1 : 0;
+                const r = state.brushSize;
+                
+                for (let i = -r + 1; i < r; i++) {
+                    for (let j = -r + 1; j < r; j++) {
+                        if (i*i + j*j <= r*r) {
+                            const targetRow = row + i;
+                            const targetCol = col + j;
+                            if (targetRow >= 0 && targetRow < state.boxSize && targetCol >= 0 && targetCol < state.boxSize) {
+                                state.masks[state.activeLayer][targetRow][targetCol] = val;
+                            }
+                        }
+                    }
+                }
+                
+                drawPaintCanvas();
+            }
+
+            const handlePaintDrawing = (e) => {
+                const rect = el.paintCanvas.getBoundingClientRect();
+                const scaleX = state.boxSize / rect.width;
+                const scaleY = state.boxSize / rect.height;
+                
+                const cellX = Math.floor((e.clientX - rect.left) * scaleX);
+                const cellY = Math.floor((e.clientY - rect.top) * scaleY);
+                
+                if (cellX >= 0 && cellX < state.boxSize && cellY >= 0 && cellY < state.boxSize) {
+                    paintOnMatrix(cellX, cellY);
+                }
+            };
+
+            el.paintCanvas.addEventListener('mousedown', (e) => {
+                state.isDrawing = true;
+                handlePaintDrawing(e);
+            });
+            window.addEventListener('mouseup', () => {
+                state.isDrawing = false;
+            });
+            const handleHoverInfo = (e, canvasEl) => {
+                const rect = canvasEl.getBoundingClientRect();
+                const scaleX = state.boxSize / rect.width;
+                const scaleY = state.boxSize / rect.height;
+                const cellX = Math.floor((e.clientX - rect.left) * scaleX);
+                const cellY = Math.floor((e.clientY - rect.top) * scaleY);
+                
+                const centerX_int = Math.floor(state.centerX + 0.5);
+                const centerY_int = Math.floor(state.centerY + 0.5);
+                const x0 = centerX_int - Math.floor(state.boxSize / 2);
+                const y0 = centerY_int - Math.floor(state.boxSize / 2);
+                const fitsX = x0 + cellX;
+                const fitsY = y0 + (state.boxSize - 1 - cellY);
+                
+                // Get value from original FITS data
+                const idx = (state.imageHeight - 1 - fitsY) * state.imageWidth + fitsX;
+                const val = state.rawFITSData ? state.rawFITSData[idx] : undefined;
+                const noise = state.rawNoiseData ? state.rawNoiseData[idx] : undefined;
+                
+                const valStr = val !== undefined ? val.toExponential(3) : 'N/A';
+                const noiseStr = (noise !== undefined && noise > 0) ? noise.toExponential(3) : 'N/A';
+                const snrStr = (val !== undefined && noise !== undefined && noise > 0) ? (val / noise).toFixed(2) : 'N/A';
+                
+                el.coordInfo.textContent = `Cutout cell: (${cellX}, ${cellY}) | Orig FITS: (${fitsX}, ${fitsY}) | Image: ${valStr} | Noise: ${noiseStr} | SNR: ${snrStr}`;
+            };
+
+            el.paintCanvas.addEventListener('mousemove', (e) => {
+                if (state.isDrawing) handlePaintDrawing(e);
+                handleHoverInfo(e, el.paintCanvas);
+            });
+            el.maskedCanvas.addEventListener('mousemove', (e) => {
+                handleHoverInfo(e, el.maskedCanvas);
+            });
+            el.unmaskedCanvas.addEventListener('mousemove', (e) => {
+                handleHoverInfo(e, el.unmaskedCanvas);
+            });
+            el.snrCanvas.addEventListener('mousemove', (e) => {
+                handleHoverInfo(e, el.snrCanvas);
+            });
+
+            el.btnSaveAll.addEventListener('click', saveCutoutAndMasks);
+        }
+
+        // On-the-fly contrast stretching for rendering the canvas
+        function renderFITSOnCanvas(ctx, canvas, rawData, width, height, startCol, startRow, displayWidth, displayHeight, cropWidth, cropHeight) {
+            canvas.width = displayWidth;
+            canvas.height = displayHeight;
+            
+            if (cropWidth === undefined) cropWidth = width;
+            if (cropHeight === undefined) cropHeight = height;
+            
+            // Get value limits from sorted array (use local region pixels if cropped)
+            let localSorted = state.sortedFITSData;
+            if (cropWidth < width || cropHeight < height) {
+                const boxPixels = [];
+                for (let r = 0; r < cropHeight; r++) {
+                    const imgY = Math.floor(startRow + r);
+                    if (imgY < 0 || imgY >= height) continue;
+                    for (let c = 0; c < cropWidth; c++) {
+                        const imgX = Math.floor(startCol + c);
+                        if (imgX < 0 || imgX >= width) continue;
+                        const idx = imgY * width + imgX;
+                        const val = rawData[idx];
+                        if (val !== undefined && !isNaN(val)) {
+                            boxPixels.push(val);
+                        }
+                    }
+                }
+                if (boxPixels.length > 0) {
+                    localSorted = boxPixels.sort((a, b) => a - b);
+                }
+            }
+            
+            const len = localSorted.length;
+            const vmin = localSorted[Math.floor(state.pctMin * (len - 1))];
+            const vmax = localSorted[Math.floor(state.pctMax * (len - 1))];
+            const range = vmax - vmin;
+            
+            // Create target visual image buffer
+            const imgData = ctx.createImageData(displayWidth, displayHeight);
+            
+            const scaleX = cropWidth / displayWidth;
+            const scaleY = cropHeight / displayHeight;
+            
+            for (let y = 0; y < displayHeight; y++) {
+                const imgY = Math.floor(startRow + y * scaleY);
+                if (imgY < 0 || imgY >= height) continue;
+                
+                for (let x = 0; x < displayWidth; x++) {
+                    const imgX = Math.floor(startCol + x * scaleX);
+                    if (imgX < 0 || imgX >= width) continue;
+                    
+                    const idx = imgY * width + imgX;
+                    const val = rawData[idx];
+                    
+                    // Normalize
+                    let norm = range > 0 ? (val - vmin) / range : 0;
+                    norm = Math.max(0, Math.min(1, norm));
+                    
+                    // Stretch function
+                    if (state.scaleType === 'log') {
+                        norm = Math.log1p(norm * 9) / Math.log1p(9); // Log 10
+                    } else if (state.scaleType === 'asinh') {
+                        norm = Math.asinh(norm * 10) / Math.asinh(10);
+                    } else if (state.scaleType === 'sqrt') {
+                        norm = Math.sqrt(norm);
+                    }
+                    
+                    const rgb = getColorFromCmap(norm, state.cmapType || 'twilight');
+                    const canvasIdx = (y * displayWidth + x) * 4;
+                    imgData.data[canvasIdx] = rgb[0];
+                    imgData.data[canvasIdx+1] = rgb[1];
+                    imgData.data[canvasIdx+2] = rgb[2];
+                    imgData.data[canvasIdx+3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            drawColorbar(el.paintCbarCanvas, el.paintCbarMin, el.paintCbarMax, vmin, vmax, state.cmapType || 'twilight', state.scaleType);
+        }
+
+        // Helper to draw horizontal colorbar canvas strip
+        function drawColorbar(canvas, minEl, maxEl, vmin, vmax, cmapName = 'twilight', scaleType = 'log') {
+            if (!canvas) return;
+            const width = 240;
+            const height = 10;
+            canvas.width = width;
+            canvas.height = height;
+            
+            const ctx = canvas.getContext('2d');
+            const imgData = ctx.createImageData(width, height);
+            
+            for (let x = 0; x < width; x++) {
+                let norm = x / (width - 1);
+                if (scaleType === 'log') {
+                    norm = Math.log1p(norm * 9) / Math.log1p(9);
+                } else if (scaleType === 'asinh') {
+                    norm = Math.asinh(norm * 10) / Math.asinh(10);
+                } else if (scaleType === 'sqrt') {
+                    norm = Math.sqrt(norm);
+                }
+                
+                const rgb = getColorFromCmap(norm, cmapName);
+                for (let y = 0; y < height; y++) {
+                    const idx = (y * width + x) * 4;
+                    imgData.data[idx] = rgb[0];
+                    imgData.data[idx + 1] = rgb[1];
+                    imgData.data[idx + 2] = rgb[2];
+                    imgData.data[idx + 3] = 255;
+                }
+            }
+            ctx.putImageData(imgData, 0, 0);
+            
+            if (minEl && vmin !== undefined) {
+                minEl.textContent = Math.abs(vmin) >= 1e3 || (Math.abs(vmin) < 1e-2 && vmin !== 0) ? vmin.toExponential(2) : vmin.toFixed(3);
+            }
+            if (maxEl && vmax !== undefined) {
+                maxEl.textContent = Math.abs(vmax) >= 1e3 || (Math.abs(vmax) < 1e-2 && vmax !== 0) ? vmax.toExponential(2) : vmax.toFixed(3);
+            }
+        }
+
+        // Render masked image on preview canvas (mask * image, where mask = 1 for drawn, 0 for undrawn)
+        function renderMaskedFITSOnCanvas(ctx, canvas, rawData, width, height, startCol, startRow, displayWidth, displayHeight, cropWidth, cropHeight, masks) {
+            canvas.width = displayWidth;
+            canvas.height = displayHeight;
+            
+            if (cropWidth === undefined) cropWidth = width;
+            if (cropHeight === undefined) cropHeight = height;
+            
+            let localSorted = state.sortedFITSData;
+            if (cropWidth < width || cropHeight < height) {
+                const boxPixels = [];
+                for (let r = 0; r < cropHeight; r++) {
+                    const imgY = Math.floor(startRow + r);
+                    if (imgY < 0 || imgY >= height) continue;
+                    for (let c = 0; c < cropWidth; c++) {
+                        const imgX = Math.floor(startCol + c);
+                        if (imgX < 0 || imgX >= width) continue;
+                        const idx = imgY * width + imgX;
+                        const val = rawData[idx];
+                        if (val !== undefined && !isNaN(val)) {
+                            boxPixels.push(val);
+                        }
+                    }
+                }
+                if (boxPixels.length > 0) {
+                    localSorted = boxPixels.sort((a, b) => a - b);
+                }
+            }
+            
+            const len = localSorted.length;
+            const vmin = localSorted[Math.floor(state.pctMin * (len - 1))];
+            const vmax = localSorted[Math.floor(state.pctMax * (len - 1))];
+            const range = vmax - vmin;
+            
+            const imgData = ctx.createImageData(displayWidth, displayHeight);
+            const scaleX = cropWidth / displayWidth;
+            const scaleY = cropHeight / displayHeight;
+            const pixelSize = displayWidth / cropWidth;
+            
+            for (let y = 0; y < displayHeight; y++) {
+                const imgY = Math.floor(startRow + y * scaleY);
+                if (imgY < 0 || imgY >= height) continue;
+                
+                const gridRow = Math.floor(y / pixelSize);
+                
+                for (let x = 0; x < displayWidth; x++) {
+                    const imgX = Math.floor(startCol + x * scaleX);
+                    if (imgX < 0 || imgX >= width) continue;
+                    
+                    const gridCol = Math.floor(x / pixelSize);
+                    
+                    let isMasked = false;
+                    if (gridRow >= 0 && gridRow < cropHeight && gridCol >= 0 && gridCol < cropWidth && masks) {
+                        if ((masks.mask_1 && masks.mask_1[gridRow] && masks.mask_1[gridRow][gridCol]) ||
+                            (masks.mask_2 && masks.mask_2[gridRow] && masks.mask_2[gridRow][gridCol]) ||
+                            (masks.mask_out && masks.mask_out[gridRow] && masks.mask_out[gridRow][gridCol])) {
+                            isMasked = true;
+                        }
+                    }
+                    
+                    const canvasIdx = (y * displayWidth + x) * 4;
+                    
+                    if (isMasked) {
+                        // Drawn mask pixel (mask = 1) -> plot image (1 * image)
+                        const idx = imgY * width + imgX;
+                        const val = rawData[idx];
+                        
+                        let norm = range > 0 ? (val - vmin) / range : 0;
+                        norm = Math.max(0, Math.min(1, norm));
+                        
+                        if (state.scaleType === 'log') {
+                            norm = Math.log1p(norm * 9) / Math.log1p(9);
+                        } else if (state.scaleType === 'asinh') {
+                            norm = Math.asinh(norm * 10) / Math.asinh(10);
+                        } else if (state.scaleType === 'sqrt') {
+                            norm = Math.sqrt(norm);
+                        }
+                        
+                        const rgb = getColorFromCmap(norm, state.cmapType || 'twilight');
+                        imgData.data[canvasIdx] = rgb[0];
+                        imgData.data[canvasIdx+1] = rgb[1];
+                        imgData.data[canvasIdx+2] = rgb[2];
+                        imgData.data[canvasIdx+3] = 255;
+                    } else {
+                        // Undrawn pixel (mask = 0) -> plot black (0 * image)
+                        imgData.data[canvasIdx] = 0;
+                        imgData.data[canvasIdx+1] = 0;
+                        imgData.data[canvasIdx+2] = 0;
+                        imgData.data[canvasIdx+3] = 255;
+                    }
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+            drawColorbar(el.maskedCbarCanvas, el.maskedCbarMin, el.maskedCbarMax, vmin, vmax, state.cmapType || 'twilight', state.scaleType);
+        }
+
+        // Render unmasked data preview on canvas (abs(mask - 1) * image, where mask = 0 -> image, mask = 1 -> 0)
+        function renderUnmaskedFITSOnCanvas(ctx, canvas, rawData, width, height, startCol, startRow, displayWidth, displayHeight, cropWidth, cropHeight, masks) {
+            canvas.width = displayWidth;
+            canvas.height = displayHeight;
+            
+            if (cropWidth === undefined) cropWidth = width;
+            if (cropHeight === undefined) cropHeight = height;
+            
+            let localSorted = state.sortedFITSData;
+            if (cropWidth < width || cropHeight < height) {
+                const boxPixels = [];
+                for (let r = 0; r < cropHeight; r++) {
+                    const imgY = Math.floor(startRow + r);
+                    if (imgY < 0 || imgY >= height) continue;
+                    for (let c = 0; c < cropWidth; c++) {
+                        const imgX = Math.floor(startCol + c);
+                        if (imgX < 0 || imgX >= width) continue;
+                        const idx = imgY * width + imgX;
+                        const val = rawData[idx];
+                        if (val !== undefined && !isNaN(val)) {
+                            boxPixels.push(val);
+                        }
+                    }
+                }
+                if (boxPixels.length > 0) {
+                    localSorted = boxPixels.sort((a, b) => a - b);
+                }
+            }
+            
+            const len = localSorted.length;
+            const vmin = localSorted[Math.floor(state.pctMin * (len - 1))];
+            const vmax = localSorted[Math.floor(state.pctMax * (len - 1))];
+            const range = vmax - vmin;
+            
+            const imgData = ctx.createImageData(displayWidth, displayHeight);
+            const scaleX = cropWidth / displayWidth;
+            const scaleY = cropHeight / displayHeight;
+            const pixelSize = displayWidth / cropWidth;
+            
+            for (let y = 0; y < displayHeight; y++) {
+                const imgY = Math.floor(startRow + y * scaleY);
+                if (imgY < 0 || imgY >= height) continue;
+                
+                const gridRow = Math.floor(y / pixelSize);
+                
+                for (let x = 0; x < displayWidth; x++) {
+                    const imgX = Math.floor(startCol + x * scaleX);
+                    if (imgX < 0 || imgX >= width) continue;
+                    
+                    const gridCol = Math.floor(x / pixelSize);
+                    
+                    let isMasked = false;
+                    if (gridRow >= 0 && gridRow < cropHeight && gridCol >= 0 && gridCol < cropWidth && masks) {
+                        if ((masks.mask_1 && masks.mask_1[gridRow] && masks.mask_1[gridRow][gridCol]) ||
+                            (masks.mask_2 && masks.mask_2[gridRow] && masks.mask_2[gridRow][gridCol]) ||
+                            (masks.mask_out && masks.mask_out[gridRow] && masks.mask_out[gridRow][gridCol])) {
+                            isMasked = true;
+                        }
+                    }
+                    
+                    const canvasIdx = (y * displayWidth + x) * 4;
+                    
+                    if (!isMasked) {
+                        // Undrawn pixel (mask = 0) -> plot image (abs(0 - 1) * image = 1 * image)
+                        const idx = imgY * width + imgX;
+                        const val = rawData[idx];
+                        
+                        let norm = range > 0 ? (val - vmin) / range : 0;
+                        norm = Math.max(0, Math.min(1, norm));
+                        
+                        if (state.scaleType === 'log') {
+                            norm = Math.log1p(norm * 9) / Math.log1p(9);
+                        } else if (state.scaleType === 'asinh') {
+                            norm = Math.asinh(norm * 10) / Math.asinh(10);
+                        } else if (state.scaleType === 'sqrt') {
+                            norm = Math.sqrt(norm);
+                        }
+                        
+                        const rgb = getColorFromCmap(norm, state.cmapType || 'twilight');
+                        imgData.data[canvasIdx] = rgb[0];
+                        imgData.data[canvasIdx+1] = rgb[1];
+                        imgData.data[canvasIdx+2] = rgb[2];
+                        imgData.data[canvasIdx+3] = 255;
+                    } else {
+                        // Drawn mask pixel (mask = 1) -> plot black (abs(1 - 1) * image = 0)
+                        imgData.data[canvasIdx] = 0;
+                        imgData.data[canvasIdx+1] = 0;
+                        imgData.data[canvasIdx+2] = 0;
+                        imgData.data[canvasIdx+3] = 255;
+                    }
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+            drawColorbar(el.unmaskedCbarCanvas, el.unmaskedCbarMin, el.unmaskedCbarMax, vmin, vmax, state.cmapType || 'twilight', state.scaleType);
+        }
+
+        // Render Signal-to-Noise Ratio (SNR = Data / Noise) map on canvas
+        function renderSNRFITSOnCanvas(ctx, canvas, rawData, rawNoiseData, width, height, startCol, startRow, displayWidth, displayHeight, cropWidth, cropHeight) {
+            canvas.width = displayWidth;
+            canvas.height = displayHeight;
+            
+            if (cropWidth === undefined) cropWidth = width;
+            if (cropHeight === undefined) cropHeight = height;
+            
+            // Calculate local SNR values in cropped region
+            const boxSNR = [];
+            for (let r = 0; r < cropHeight; r++) {
+                const imgY = Math.floor(startRow + r);
+                if (imgY < 0 || imgY >= height) continue;
+                for (let c = 0; c < cropWidth; c++) {
+                    const imgX = Math.floor(startCol + c);
+                    if (imgX < 0 || imgX >= width) continue;
+                    const idx = imgY * width + imgX;
+                    const dataVal = rawData[idx];
+                    const noiseVal = (rawNoiseData && rawNoiseData[idx] > 0) ? rawNoiseData[idx] : 1e-2;
+                    if (dataVal !== undefined && !isNaN(dataVal)) {
+                        const snr = dataVal / noiseVal;
+                        boxSNR.push(snr);
+                    }
+                }
+            }
+            
+            if (boxSNR.length === 0) return;
+            boxSNR.sort((a, b) => a - b);
+            
+            const len = boxSNR.length;
+            const vmin = boxSNR[Math.floor(state.pctMin * (len - 1))];
+            const vmax = boxSNR[Math.floor(state.pctMax * (len - 1))];
+            const range = vmax - vmin;
+            
+            const imgData = ctx.createImageData(displayWidth, displayHeight);
+            const scaleX = cropWidth / displayWidth;
+            const scaleY = cropHeight / displayHeight;
+            
+            for (let y = 0; y < displayHeight; y++) {
+                const imgY = Math.floor(startRow + y * scaleY);
+                if (imgY < 0 || imgY >= height) continue;
+                
+                for (let x = 0; x < displayWidth; x++) {
+                    const imgX = Math.floor(startCol + x * scaleX);
+                    if (imgX < 0 || imgX >= width) continue;
+                    
+                    const idx = imgY * width + imgX;
+                    const dataVal = rawData[idx];
+                    const noiseVal = (rawNoiseData && rawNoiseData[idx] > 0) ? rawNoiseData[idx] : 1e-2;
+                    const snrVal = dataVal / noiseVal;
+                    
+                    let norm = range > 0 ? (snrVal - vmin) / range : 0;
+                    norm = Math.max(0, Math.min(1, norm));
+                    
+                    if (state.scaleType === 'log') {
+                        norm = Math.log1p(norm * 9) / Math.log1p(9);
+                    } else if (state.scaleType === 'asinh') {
+                        norm = Math.asinh(norm * 10) / Math.asinh(10);
+                    } else if (state.scaleType === 'sqrt') {
+                        norm = Math.sqrt(norm);
+                    }
+                    
+                    const rgb = getColorFromCmap(norm, state.cmapType || 'twilight');
+                    const canvasIdx = (y * displayWidth + x) * 4;
+                    imgData.data[canvasIdx] = rgb[0];
+                    imgData.data[canvasIdx+1] = rgb[1];
+                    imgData.data[canvasIdx+2] = rgb[2];
+                    imgData.data[canvasIdx+3] = 255;
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+            drawColorbar(el.snrCbarCanvas, el.snrCbarMin, el.snrCbarMax, vmin, vmax, state.cmapType || 'twilight', state.scaleType);
+        }
+
+        // Draw crop mode canvas
+        function drawCropCanvas() {
+            if (state.useRGB) {
+                if (!state.rgbImage || !state.rgbImage.complete) return;
+                
+                const displayWidth = 500;
+                const displayHeight = Math.round((state.imageHeight / state.imageWidth) * displayWidth);
+                
+                el.cropCanvas.width = displayWidth;
+                el.cropCanvas.height = displayHeight;
+                cropCtx.drawImage(state.rgbImage, 0, 0, displayWidth, displayHeight);
+                
+                // Overlay crop box
+                const scale = displayWidth / state.imageWidth;
+                const canvasCX = state.centerX * scale;
+                const canvasCY = (state.imageHeight - 1 - state.centerY) * scale;
+                const size = state.boxSize * scale;
+                
+                const x = canvasCX - size / 2;
+                const y = canvasCY - size / 2;
+                
+                cropCtx.lineWidth = 2;
+                cropCtx.strokeStyle = '#3b82f6';
+                cropCtx.strokeRect(x, y, size, size);
+                
+                cropCtx.beginPath();
+                cropCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+                cropCtx.lineWidth = 1;
+                cropCtx.moveTo(canvasCX - 8, canvasCY);
+                cropCtx.lineTo(canvasCX + 8, canvasCY);
+                cropCtx.moveTo(canvasCX, canvasCY - 8);
+                cropCtx.lineTo(canvasCX, canvasCY + 8);
+                cropCtx.stroke();
+                
+            } else {
+                if (!state.rawFITSData) return;
+                
+                const displayWidth = 500;
+                const displayHeight = Math.round((state.imageHeight / state.imageWidth) * displayWidth);
+                
+                // Draw visually stretched FITS image directly on canvas
+                renderFITSOnCanvas(cropCtx, el.cropCanvas, state.rawFITSData, state.imageWidth, state.imageHeight, 0, 0, displayWidth, displayHeight);
+                
+                // Overlay crop box
+                const scale = displayWidth / state.imageWidth;
+                const canvasCX = state.centerX * scale;
+                const canvasCY = (state.imageHeight - 1 - state.centerY) * scale;
+                const size = state.boxSize * scale;
+                
+                const x = canvasCX - size / 2;
+                const y = canvasCY - size / 2;
+                
+                cropCtx.lineWidth = 2;
+                cropCtx.strokeStyle = '#3b82f6';
+                cropCtx.strokeRect(x, y, size, size);
+                
+                cropCtx.beginPath();
+                cropCtx.strokeStyle = 'rgba(255,255,255,0.7)';
+                cropCtx.lineWidth = 1;
+                cropCtx.moveTo(canvasCX - 8, canvasCY);
+                cropCtx.lineTo(canvasCX + 8, canvasCY);
+                cropCtx.moveTo(canvasCX, canvasCY - 8);
+                cropCtx.lineTo(canvasCX, canvasCY + 8);
+                cropCtx.stroke();
+            }
+        }
+
+        // Draw paint mode canvas
+        function drawPaintCanvas() {
+            if (state.useRGB) {
+                if (!state.rgbImage || !state.rgbImage.complete) return;
+                
+                const panelSize = 350;
+                el.paintCanvas.width = panelSize;
+                el.paintCanvas.height = panelSize;
+                el.maskedCanvas.width = panelSize;
+                el.maskedCanvas.height = panelSize;
+                el.unmaskedCanvas.width = panelSize;
+                el.unmaskedCanvas.height = panelSize;
+                el.snrCanvas.width = panelSize;
+                el.snrCanvas.height = panelSize;
+                
+                const centerX_int = Math.floor(state.centerX + 0.5);
+                const centerY_int = Math.floor(state.centerY + 0.5);
+                const x0 = centerX_int - Math.floor(state.boxSize / 2);
+                const y0_fits = centerY_int - Math.floor(state.boxSize / 2);
+                const y0 = state.imageHeight - y0_fits - state.boxSize;
+                
+                // 1. Draw interactive crop image on paintCanvas
+                paintCtx.drawImage(state.rgbImage, x0, y0, state.boxSize, state.boxSize, 0, 0, panelSize, panelSize);
+                
+                // Overlay painted masks
+                const pixelSize = panelSize / state.boxSize;
+                for (let r = 0; r < state.boxSize; r++) {
+                    for (let c = 0; c < state.boxSize; c++) {
+                        let r1 = state.masks.mask_1[r][c];
+                        let r2 = state.masks.mask_2[r][c];
+                        let rout = state.masks.mask_out[r][c];
+                        
+                        if (r1 || r2 || rout) {
+                            paintCtx.beginPath();
+                            if (r1 && r2 && rout) {
+                                paintCtx.fillStyle = `rgba(255, 255, 255, ${state.maskOpacity})`;
+                            } else if (r1 && r2) {
+                                paintCtx.fillStyle = `rgba(239, 220, 80, ${state.maskOpacity})`;
+                            } else if (r1) {
+                                paintCtx.fillStyle = `rgba(239, 68, 68, ${state.maskOpacity})`;
+                            } else if (r2) {
+                                paintCtx.fillStyle = `rgba(34, 197, 94, ${state.maskOpacity})`;
+                            } else if (rout) {
+                                paintCtx.fillStyle = `rgba(59, 130, 246, ${state.maskOpacity})`;
+                            }
+                            paintCtx.fillRect(c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+                        }
+                    }
+                }
+                
+                // 2. Draw live masked feature preview (mask * image)
+                maskedCtx.drawImage(state.rgbImage, x0, y0, state.boxSize, state.boxSize, 0, 0, panelSize, panelSize);
+                const maskedImgData = maskedCtx.getImageData(0, 0, panelSize, panelSize);
+                for (let y = 0; y < panelSize; y++) {
+                    const r = Math.floor(y / pixelSize);
+                    if (r < 0 || r >= state.boxSize) continue;
+                    for (let x = 0; x < panelSize; x++) {
+                        const c = Math.floor(x / pixelSize);
+                        if (c < 0 || c >= state.boxSize) continue;
+                        
+                        let r1 = state.masks.mask_1[r][c];
+                        let r2 = state.masks.mask_2[r][c];
+                        let rout = state.masks.mask_out[r][c];
+                        if (!r1 && !r2 && !rout) {
+                            const idx = (y * panelSize + x) * 4;
+                            maskedImgData.data[idx] = 0;
+                            maskedImgData.data[idx+1] = 0;
+                            maskedImgData.data[idx+2] = 0;
+                        }
+                    }
+                }
+                maskedCtx.putImageData(maskedImgData, 0, 0);
+                
+                // 3. Draw live unmasked data preview (abs(mask - 1) * image)
+                unmaskedCtx.drawImage(state.rgbImage, x0, y0, state.boxSize, state.boxSize, 0, 0, panelSize, panelSize);
+                const unmaskedImgData = unmaskedCtx.getImageData(0, 0, panelSize, panelSize);
+                for (let y = 0; y < panelSize; y++) {
+                    const r = Math.floor(y / pixelSize);
+                    if (r < 0 || r >= state.boxSize) continue;
+                    for (let x = 0; x < panelSize; x++) {
+                        const c = Math.floor(x / pixelSize);
+                        if (c < 0 || c >= state.boxSize) continue;
+                        
+                        let r1 = state.masks.mask_1[r][c];
+                        let r2 = state.masks.mask_2[r][c];
+                        let rout = state.masks.mask_out[r][c];
+                        if (r1 || r2 || rout) {
+                            const idx = (y * panelSize + x) * 4;
+                            unmaskedImgData.data[idx] = 0;
+                            unmaskedImgData.data[idx+1] = 0;
+                            unmaskedImgData.data[idx+2] = 0;
+                        }
+                    }
+                }
+                unmaskedCtx.putImageData(unmaskedImgData, 0, 0);
+                
+                // 4. Draw SNR map (Data / Noise)
+                if (state.rawFITSData && state.rawNoiseData) {
+                    renderSNRFITSOnCanvas(snrCtx, el.snrCanvas, state.rawFITSData, state.rawNoiseData, state.imageWidth, state.imageHeight, x0, y0, panelSize, panelSize, state.boxSize, state.boxSize);
+                }
+                
+            } else {
+                if (!state.rawFITSData) return;
+                
+                const panelSize = 350;
+                el.paintCanvas.width = panelSize;
+                el.paintCanvas.height = panelSize;
+                el.maskedCanvas.width = panelSize;
+                el.maskedCanvas.height = panelSize;
+                el.unmaskedCanvas.width = panelSize;
+                el.unmaskedCanvas.height = panelSize;
+                el.snrCanvas.width = panelSize;
+                el.snrCanvas.height = panelSize;
+                
+                // Slice coordinate computations in original image space
+                const centerX_int = Math.floor(state.centerX + 0.5);
+                const centerY_int = Math.floor(state.centerY + 0.5);
+                const x0 = centerX_int - Math.floor(state.boxSize / 2);
+                const y0_fits = centerY_int - Math.floor(state.boxSize / 2);
+                const y0 = state.imageHeight - y0_fits - state.boxSize;
+                
+                // 1. Draw interactive crop image + mask overlays on paintCanvas
+                renderFITSOnCanvas(paintCtx, el.paintCanvas, state.rawFITSData, state.imageWidth, state.imageHeight, x0, y0, panelSize, panelSize, state.boxSize, state.boxSize);
+                
+                // Overlay painted masks
+                const pixelSize = panelSize / state.boxSize;
+                
+                for (let r = 0; r < state.boxSize; r++) {
+                    for (let c = 0; c < state.boxSize; c++) {
+                        let r1 = state.masks.mask_1[r][c];
+                        let r2 = state.masks.mask_2[r][c];
+                        let rout = state.masks.mask_out[r][c];
+                        
+                        if (r1 || r2 || rout) {
+                            paintCtx.beginPath();
+                            
+                            if (r1 && r2 && rout) {
+                                paintCtx.fillStyle = `rgba(255, 255, 255, ${state.maskOpacity})`;
+                            } else if (r1 && r2) {
+                                paintCtx.fillStyle = `rgba(239, 220, 80, ${state.maskOpacity})`;
+                            } else if (r1) {
+                                paintCtx.fillStyle = `rgba(239, 68, 68, ${state.maskOpacity})`;
+                            } else if (r2) {
+                                paintCtx.fillStyle = `rgba(34, 197, 94, ${state.maskOpacity})`;
+                            } else if (rout) {
+                                paintCtx.fillStyle = `rgba(59, 130, 246, ${state.maskOpacity})`;
+                            }
+                            
+                            paintCtx.fillRect(c * pixelSize, r * pixelSize, pixelSize, pixelSize);
+                        }
+                    }
+                }
+
+                // 2. Draw live masked feature preview (mask * image)
+                renderMaskedFITSOnCanvas(maskedCtx, el.maskedCanvas, state.rawFITSData, state.imageWidth, state.imageHeight, x0, y0, panelSize, panelSize, state.boxSize, state.boxSize, state.masks);
+
+                // 3. Draw live unmasked data preview (abs(mask - 1) * image)
+                renderUnmaskedFITSOnCanvas(unmaskedCtx, el.unmaskedCanvas, state.rawFITSData, state.imageWidth, state.imageHeight, x0, y0, panelSize, panelSize, state.boxSize, state.boxSize, state.masks);
+
+                // 4. Draw SNR map (Data / Noise)
+                renderSNRFITSOnCanvas(snrCtx, el.snrCanvas, state.rawFITSData, state.rawNoiseData, state.imageWidth, state.imageHeight, x0, y0, panelSize, panelSize, state.boxSize, state.boxSize);
+            }
+        }
+
+        const handleHoverInfo = (e, canvasEl) => {
+            const rect = canvasEl.getBoundingClientRect();
+            const scaleX = state.boxSize / canvasEl.width;
+            const scaleY = state.boxSize / canvasEl.height;
+            const cellX = Math.floor((e.clientX - rect.left) * scaleX);
+            const cellY = Math.floor((e.clientY - rect.top) * scaleY);
+            
+            const centerX_int = Math.floor(state.centerX + 0.5);
+            const centerY_int = Math.floor(state.centerY + 0.5);
+            const x0 = centerX_int - Math.floor(state.boxSize / 2);
+            const y0 = centerY_int - Math.floor(state.boxSize / 2);
+            const fitsX = x0 + cellX;
+            const fitsY = y0 + (state.boxSize - 1 - cellY);
+            
+            // Get value from original FITS data
+            const idx = (state.imageHeight - 1 - fitsY) * state.imageWidth + fitsX;
+            const val = state.rawFITSData ? state.rawFITSData[idx] : undefined;
+            const noise = state.rawNoiseData ? state.rawNoiseData[idx] : undefined;
+            
+            const valStr = val !== undefined ? val.toExponential(3) : 'N/A';
+            const noiseStr = (noise !== undefined && noise > 0) ? noise.toExponential(3) : 'N/A';
+            const snrStr = (val !== undefined && noise !== undefined && noise > 0) ? (val / noise).toFixed(2) : 'N/A';
+            
+            el.coordInfo.textContent = `Cutout cell: (${cellX}, ${cellY}) | Orig FITS: (${fitsX}, ${fitsY}) | Image: ${valStr} | Noise: ${noiseStr} | SNR: ${snrStr}`;
+        };
+
+        async function switchMode(newMode) {
+            state.mode = newMode;
+            if (newMode === 'crop') {
+                el.tabCrop.classList.add('active');
+                el.tabPaint.classList.remove('active');
+                el.cropControls.style.display = 'block';
+                el.paintControls.style.display = 'none';
+                el.cropView.style.display = 'flex';
+                el.paintView.style.display = 'none';
+                drawCropCanvas();
+            } else {
+                el.tabCrop.classList.remove('active');
+                el.tabPaint.classList.add('active');
+                el.cropControls.style.display = 'none';
+                el.paintControls.style.display = 'block';
+                el.cropView.style.display = 'none';
+                el.paintView.style.display = 'flex';
+                
+                const size = state.boxSize;
+                
+                // Initialize default empty masks
+                state.masks.mask_1 = Array(size).fill().map(() => Array(size).fill(0));
+                state.masks.mask_2 = Array(size).fill().map(() => Array(size).fill(0));
+                state.masks.mask_out = Array(size).fill().map(() => Array(size).fill(0));
+                
+                // Fetch existing masks from backend if output folder exists
+                showLoading(true, "Checking for existing masks to resume...");
+                try {
+                    const folder = el.outputFolderInput.value;
+                    let url = `/api/load_masks?file=${encodeURIComponent(state.selectedFile)}&output_folder=${encodeURIComponent(folder)}&box_size=${size}`;
+                    const res = await fetch(url);
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data.found) {
+                            if (data.masks.mask_1) state.masks.mask_1 = data.masks.mask_1;
+                            if (data.masks.mask_2) state.masks.mask_2 = data.masks.mask_2;
+                            if (data.masks.mask_out) state.masks.mask_out = data.masks.mask_out;
+                            showToast("Resumed from existing masks in output folder!");
+                        }
+                    }
+                } catch (err) {
+                    console.error("Error checking for existing masks:", err);
+                } finally {
+                    showLoading(false);
+                }
+                
+                drawPaintCanvas();
+            }
+        }
+
+        async function saveCutoutAndMasks() {
+            showLoading(true, "Saving FITS cutout and mask files...");
+            try {
+                const payload = {
+                    file: state.selectedFile,
+                    center_x: state.centerX,
+                    center_y: state.centerY,
+                    box_size: state.boxSize,
+                    output_folder: el.outputFolderInput.value,
+                    image_hdu: el.imageHduSelect.value,
+                    noise_hdu: el.noiseHduSelect.value,
+                    mask_1: state.masks.mask_1,
+                    mask_2: state.masks.mask_2,
+                    mask_out: state.masks.mask_out
+                };
+                
+                const res = await fetch('/api/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                
+                const data = await res.json();
+                showLoading(false);
+                
+                if (res.ok) {
+                    showToast("Cropped cutout and masks successfully saved!");
+                } else {
+                    showToast(`Error: ${data.message}`, true);
+                }
+            } catch (err) {
+                showLoading(false);
+                showToast("Failed to save outputs.", true);
+            }
+        }
+    </script>
+</body>
+</html>
