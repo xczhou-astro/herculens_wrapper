@@ -592,77 +592,172 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
         return None
 
 
-def _select_hmc_jitter_keys(init_params_unconst, args, vars_mass):
-    mode = str(getattr(args, 'hmc_init_jitter_sites', 'lens_mass')).strip().lower()
-    keys = list(init_params_unconst.keys())
-    if mode in ('none', 'false', 'off'):
-        return []
-    if mode == 'lens_mass':
-        return [k for k in vars_mass if k in init_params_unconst]
-    if mode == 'all_non_pixel':
-        return [k for k in keys if 'pixels_wn_' not in k]
-    if mode == 'all':
-        return keys
-    requested = [k.strip() for k in mode.split(',') if k.strip()]
-    return [k for k in requested if k in init_params_unconst]
+def _build_hmc_chain_init_params(
+    prob_model,
+    init_params,
+    args,
+    num_chains,
+    init_params_path,
+):
+    """Initialize chains from valid draws within the SVI guide's 1-sigma region."""
+    init_params_unconst = {
+        key: jnp.asarray(value, dtype=jnp.float64)
+        for key, value in to_unconstrained(prob_model, init_params).items()
+    }
+    from herculens_wrapper.utils import resolve_init_run_dir
 
+    try:
+        init_run = resolve_init_run_dir(init_params_path)
+        guide_path = os.path.join(init_run, 'svi_guide_params.pkl')
+        if not os.path.isfile(guide_path):
+            raise FileNotFoundError(guide_path)
+        with open(guide_path, 'rb') as handle:
+            guide_params = pickle.load(handle)
+        guide_params = jax.tree_util.tree_map(jnp.asarray, guide_params)
 
-def _build_hmc_chain_init_params(prob_model, init_params_unconst, args, num_chains, vars_mass):
-    if num_chains <= 1 or init_params_unconst is None:
-        return init_params_unconst
+        guide = autoguide.AutoLowRankMultivariateNormal(prob_model.model)
+        with numpyro.handlers.seed(
+            rng_seed=int(getattr(args, 'random_seed', 0)) + 104729,
+        ):
+            guide._setup_prototype()
 
-    jitter_scale = float(getattr(args, 'hmc_init_jitter_scale', 0.0))
-    jitter_keys = _select_hmc_jitter_keys(init_params_unconst, args, vars_mass)
-    if jitter_scale <= 0.0 or not jitter_keys:
+        prefix = guide.prefix
+        loc = jnp.asarray(guide_params[f'{prefix}_loc'])
+        scale = jnp.asarray(guide_params[f'{prefix}_scale'])
+        cov_factor = jnp.asarray(guide_params[f'{prefix}_cov_factor'])
+        if loc.shape != scale.shape or cov_factor.shape[0] != loc.shape[0]:
+            raise ValueError('saved AutoLowRank guide parameter shapes are inconsistent')
+        if int(loc.size) != int(guide.latent_dim):
+            raise ValueError(
+                f'saved guide latent dimension {loc.size} does not match '
+                f'the HMC model dimension {guide.latent_dim}'
+            )
+
+        guide_median = guide.median(guide_params)
+        for key, expected in init_params.items():
+            if key not in guide_median:
+                raise ValueError(f'saved SVI guide is missing active site {key!r}')
+            if np.shape(guide_median[key]) != np.shape(expected):
+                raise ValueError(
+                    f'saved SVI guide shape for {key!r} is {np.shape(guide_median[key])}, '
+                    f'but HMC expects {np.shape(expected)}'
+                )
+
+        effective_factor = cov_factor * scale[..., None]
+        marginal_std = scale * jnp.sqrt(
+            1.0 + jnp.sum(jnp.square(cov_factor), axis=-1)
+        )
+        posterior = numpyro.distributions.LowRankMultivariateNormal(
+            loc,
+            effective_factor,
+            jnp.square(scale),
+        )
+    except Exception as error:
+        print(
+            '[hmc:init] Could not load the joint SVI posterior '
+            f'({error}); using the saved SVI median initialization.'
+        )
+        if num_chains == 1:
+            return init_params_unconst
         return jax.tree_util.tree_map(
-            lambda x: jnp.broadcast_to(x, (num_chains,) + jnp.shape(x)),
+            lambda value: jnp.broadcast_to(
+                value, (num_chains,) + jnp.shape(value),
+            ),
             init_params_unconst,
         )
 
-    max_tries = int(getattr(args, 'hmc_init_jitter_max_tries', 200))
-    rng_key = jax.random.PRNGKey(int(getattr(args, 'random_seed', 0)) + 7919)
+    max_retries = max(int(getattr(args, 'hmc_init_max_retries', 100)), 0)
+    rng_key = jax.random.PRNGKey(int(getattr(args, 'random_seed', 0)) + 130363)
     chain_params = []
     print(
-        f"[hmc] Jittering initial parameters for {num_chains} chains "
-        f"(scale={jitter_scale:g}, sites={jitter_keys})"
+        f'[hmc:init] Drawing {num_chains} chain initializations from the joint '
+        f'SVI posterior within 1 sigma (max_retries={max_retries} per chain).'
     )
 
-    for chain_idx in range(num_chains):
+    for chain_index in range(num_chains):
         accepted = None
-        accepted_log_prob = None
-        for attempt in range(max_tries):
-            proposal = dict(init_params_unconst)
-            for key in jitter_keys:
-                rng_key, noise_key = jax.random.split(rng_key)
-                base = jnp.asarray(init_params_unconst[key])
-                proposal[key] = base + jitter_scale * jax.random.normal(
-                    noise_key,
-                    shape=base.shape,
-                    dtype=base.dtype,
-                )
-            try:
-                constrained = to_constrained(prob_model, proposal)
-                log_prob = float(np.sum(prob_model.log_prob(constrained, constrained=True)))
-                if np.isfinite(log_prob):
-                    accepted = proposal
-                    accepted_log_prob = log_prob
-                    break
-            except Exception:
-                pass
-        if accepted is None:
-            raise ValueError(
-                f"Failed to generate a finite-log-prob HMC initial jitter "
-                f"for chain {chain_idx} after {max_tries} attempts."
+        for attempt in range(max_retries):
+            rng_key, sample_key = jax.random.split(rng_key)
+            latent = posterior.sample(sample_key)
+
+            # Direct rejection is impractical with thousands of latent
+            # coordinates. Keep the joint draw direction and contract it into
+            # the guide's marginal 1-sigma box in unconstrained space.
+            delta = latent - loc
+            standardized_max = jnp.max(
+                jnp.abs(delta) / jnp.maximum(marginal_std, 1e-12)
             )
-        print(
-            f"[hmc] Accepted jittered init for chain {chain_idx} "
-            f"(log_prob={accepted_log_prob:.2f})"
-        )
+            contraction = jnp.minimum(
+                1.0,
+                0.999 / jnp.maximum(standardized_max, 1e-12),
+            )
+            latent_1sigma = loc + contraction * delta
+            candidate_all = guide._unpack_and_constrain(
+                latent_1sigma, guide_params,
+            )
+
+            try:
+                candidate = {}
+                for key, expected in init_params.items():
+                    if key not in candidate_all:
+                        raise KeyError(f'candidate is missing active site {key!r}')
+                    value = jnp.asarray(candidate_all[key], dtype=jnp.float64)
+                    if value.shape != jnp.shape(expected):
+                        raise ValueError(
+                            f'candidate shape mismatch for {key!r}: '
+                            f'{value.shape} != {jnp.shape(expected)}'
+                        )
+                    if not bool(jnp.all(jnp.isfinite(value))):
+                        raise ValueError(
+                            f'candidate contains non-finite values at {key!r}'
+                        )
+                    candidate[key] = value
+
+                candidate_unconst = to_unconstrained(prob_model, candidate)
+                if not all(
+                    bool(jnp.all(jnp.isfinite(jnp.asarray(value))))
+                    for value in candidate_unconst.values()
+                ):
+                    raise ValueError('candidate is non-finite in unconstrained space')
+                log_prob = float(np.sum(
+                    prob_model.log_prob(candidate, constrained=True)
+                ))
+                if not np.isfinite(log_prob):
+                    raise ValueError('candidate has non-finite joint log-probability')
+
+                accepted = {
+                    key: jnp.asarray(value, dtype=jnp.float64)
+                    for key, value in candidate_unconst.items()
+                }
+                print(
+                    f'[hmc:init] Chain {chain_index}: accepted SVI draw on attempt '
+                    f'{attempt + 1} (log_prob={log_prob:.2f}, '
+                    f'contraction={float(contraction):.3f}).'
+                )
+                break
+            except Exception as error:
+                if attempt + 1 == max_retries:
+                    print(
+                        f'[hmc:init] Chain {chain_index}: no valid SVI draw after '
+                        f'{max_retries} attempts ({error}); using the SVI median.'
+                    )
+
+        if accepted is None:
+            if max_retries == 0:
+                print(
+                    f'[hmc:init] Chain {chain_index}: posterior initialization '
+                    'retries are disabled; using the SVI median.'
+                )
+            accepted = init_params_unconst
         chain_params.append(accepted)
 
+    if num_chains == 1:
+        return chain_params[0]
     return {
-        key: jnp.stack([jnp.asarray(chain[key]) for chain in chain_params], axis=0)
-        for key in init_params_unconst.keys()
+        key: jnp.stack(
+            [jnp.asarray(chain[key]) for chain in chain_params], axis=0,
+        )
+        for key in init_params_unconst
     }
 
 
@@ -1396,10 +1491,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             )
             init_params_unconst_chain = _build_hmc_chain_init_params(
                 prob_model,
-                init_params_unconst,
+                init_params,
                 args,
                 num_chains,
-                vars_mass,
+                init_params_path,
             )
             mcmc.run(
                 rng_key_,
