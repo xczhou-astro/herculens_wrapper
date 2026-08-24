@@ -352,18 +352,16 @@ def save_hmc_diagnostics(
         import os
         import numpy as np
 
-        # Focus on lens mass and power spectrum related parameters
+        # Diagnostics intentionally focus on lens-mass parameters. Matérn
+        # hyperparameters remain in the saved posterior but are omitted here.
         def local_site_name(key):
             return key.rsplit('/', 1)[-1]
 
         target_keys = [
             key for key in samples.keys()
             if (
-                ('lens_' in local_site_name(key)
-                 and 'lens_light_' not in local_site_name(key))
-                or local_site_name(key) in (
-                    'n_source_grid', 'rho_source_grid', 'sigma_source_grid',
-                )
+                'lens_' in local_site_name(key)
+                and 'lens_light_' not in local_site_name(key)
             )
         ]
 
@@ -386,7 +384,7 @@ def save_hmc_diagnostics(
                     if expected_key in target_keys and expected_key not in ordered_keys:
                         ordered_keys.append(expected_key)
 
-        # Append any remaining target_keys (like power spectrum related parameters)
+        # Append any remaining lens-mass keys not represented in the config order.
         for k in target_keys:
             if k not in ordered_keys:
                 ordered_keys.append(k)

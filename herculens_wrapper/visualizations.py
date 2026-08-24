@@ -22,6 +22,19 @@ from herculens_wrapper.utils import (
 )
 
 
+_MATERN_HYPERPARAMETER_SITES = frozenset({
+    'n_source_grid',
+    'rho_source_grid',
+    'sigma_source_grid',
+})
+
+
+def _is_matern_hyperparameter(name):
+    """Match local Matérn sites, including scoped multi-band names."""
+    base_name = str(name).split('[', 1)[0]
+    return base_name.rsplit('/', 1)[-1] in _MATERN_HYPERPARAMETER_SITES
+
+
 def _point_source_colors(n):
     n = int(max(n, 1))
     cmap = plt.get_cmap('tab10')
@@ -1581,7 +1594,7 @@ def plot_corner_traced_params(
     cols = []
     labels = []
     for name in sorted_keys:
-        if name in exclude or name.startswith('ps_'):
+        if name in exclude or name.startswith('ps_') or _is_matern_hyperparameter(name):
             continue
         arr = np.asarray(samples[name])
         if arr.ndim == 1:
@@ -1732,6 +1745,8 @@ def plot_corner_emcee(
     cols = []
     sel_labels = []
     for i, lab in enumerate(labels):
+        if _is_matern_hyperparameter(lab):
+            continue
         if any(lab == ex or lab.startswith(f'{ex}[') for ex in exclude_sites):
             continue
         if i >= X.shape[1]:
