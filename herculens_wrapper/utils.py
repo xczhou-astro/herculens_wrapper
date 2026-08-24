@@ -446,6 +446,7 @@ def normalize_run_args_paths(args, config_dir=None):
         'ps_mask_path',
         'image_positions_catalog',
         'source_arc_mask_path',
+        'contaminate_mask_path',
     )
     for key in path_keys:
         if hasattr(args, key):
@@ -465,6 +466,30 @@ def normalize_run_args_paths(args, config_dir=None):
                 normalized if isinstance(value, list) else normalized[0]
             ))
     return args
+
+
+def load_binary_exclusion_mask(mask_path, image_shape, crop_size=None, role='contaminate mask'):
+    """Load a binary FITS mask whose non-zero pixels are excluded from fitting."""
+    if mask_path is None:
+        return None
+
+    mask = np.asarray(get_fits_data(mask_path), dtype=np.float64)
+    if crop_size is not None:
+        mask = center_crop(mask, crop_size)
+    if mask.shape != tuple(image_shape):
+        raise ValueError(
+            f'{role} shape {mask.shape} does not match image shape {tuple(image_shape)}.'
+        )
+    if not np.all(np.isfinite(mask)):
+        raise ValueError(f'{role} must contain only finite binary values (0 or 1).')
+    binary_values = np.isclose(mask, 0.0) | np.isclose(mask, 1.0)
+    if not np.all(binary_values):
+        invalid = np.unique(mask[~binary_values])
+        raise ValueError(
+            f'{role} must contain only 0 (fit) and 1 (exclude); '
+            f'found values such as {invalid[:5].tolist()}.'
+        )
+    return mask > 0.5
 
 
 def archive_input_files(input_paths, destination_dir):

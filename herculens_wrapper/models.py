@@ -560,6 +560,7 @@ def create_prob_model(
     args=None,
     additional_observations=None,
     param_overrides=None,
+    likelihood_mask=None,
 ):
     noise = Noise(nx=image_data.shape[0], ny=image_data.shape[0], noise_map=noise_map)
 
@@ -908,13 +909,18 @@ def create_prob_model(
             l_scale = getattr(args, 'likelihood_scale', 1.0)
             l_scale = float(l_scale)
 
-            # Fit every image pixel. ``source_arc_mask`` only restricts
-            # the rendered source component and must not mask the lens-light
-            # pixels out of the observation likelihood.
+            # ``source_arc_mask`` only restricts the rendered source component.
+            # Bad/contaminated observation pixels are excluded separately by
+            # ``likelihood_mask`` without masking lens light elsewhere.
+            likelihood_dist = dist.Normal(model_image, model_std)
+            if likelihood_mask is not None:
+                likelihood_dist = likelihood_dist.mask(
+                    jnp.asarray(likelihood_mask, dtype=bool)
+                )
             with numpyro.handlers.scale(scale=l_scale):
                 numpyro.sample(
                     "obs",
-                    dist.Normal(model_image, model_std).to_event(2),
+                    likelihood_dist.to_event(2),
                     obs=data,
                 )
             # Same-band multi-data mode: one set of physical lens/source
@@ -929,10 +935,16 @@ def create_prob_model(
                     observation_lens_image.Noise.C_D_model(observation_model_image)
                 )
                 observation_scale = float(observation.get('likelihood_scale', l_scale))
+                observation_dist = dist.Normal(observation_model_image, observation_std)
+                observation_mask = observation.get('likelihood_mask')
+                if observation_mask is not None:
+                    observation_dist = observation_dist.mask(
+                        jnp.asarray(observation_mask, dtype=bool)
+                    )
                 with numpyro.handlers.scale(scale=observation_scale):
                     numpyro.sample(
                         f'obs_data_{observation_index}',
-                        dist.Normal(observation_model_image, observation_std).to_event(2),
+                        observation_dist.to_event(2),
                         obs=jnp.asarray(observation['image_data']),
                     )
             hyperparams = []
@@ -1160,6 +1172,7 @@ def create_prob_model(
     model_instance.lens_image = lens_image
     model_instance.image_data = image_data
     model_instance.noise_map = noise_map
+    model_instance.likelihood_mask = likelihood_mask
     model_instance.param_list = param_list
     model_instance.type_list = type_list
     model_instance.source_support_mask = source_support_mask
@@ -1987,10 +2000,30 @@ def validate_param_list(type_list, param_list):
         if profile_type != "MPPL":
             continue
         if "m" not in params:
-            raise ValueError(f"MPPL mass component {index} requires a fixed integer 'm' >= 2.")
+            raise ValueError(f"MPPL mass component {index} requires a fixed integer 'm' >= 1.")
         multipole_order = params["m"]
-        if isinstance(multipole_order, (list, tuple)) or int(multipole_order) != multipole_order or multipole_order < 2:
+        if isinstance(multipole_order, (list, tuple)) or int(multipole_order) != multipole_order or multipole_order < 1:
             raise ValueError(
-                f"MPPL mass component {index} requires 'm' to be a fixed integer >= 2; "
+                f"MPPL mass component {index} requires 'm' to be a fixed integer >= 1; "
                 "multipole order cannot be sampled continuously."
+            )
+        uses_amplitude_phase = "a_m" in params or "phi_m" in params
+        uses_ellipticity = "e_x" in params or "e_y" in params
+        if uses_amplitude_phase and uses_ellipticity:
+            raise ValueError(
+                f"MPPL mass component {index} must use either ('a_m', 'phi_m') "
+                "or ('e_x', 'e_y'), not both."
+            )
+        if uses_amplitude_phase and ("a_m" not in params or "phi_m" not in params):
+            raise ValueError(
+                f"MPPL mass component {index} requires both 'a_m' and 'phi_m'."
+            )
+        if uses_ellipticity and ("e_x" not in params or "e_y" not in params):
+            raise ValueError(
+                f"MPPL mass component {index} requires both 'e_x' and 'e_y'."
+            )
+        if not uses_amplitude_phase and not uses_ellipticity:
+            raise ValueError(
+                f"MPPL mass component {index} requires either ('a_m', 'phi_m') "
+                "or ('e_x', 'e_y')."
             )

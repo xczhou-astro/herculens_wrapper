@@ -28,6 +28,7 @@ from herculens_wrapper.utils import (
     get_fits_data,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
+    load_binary_exclusion_mask,
     log_jax_device_layout,
     normalize_run_args_paths,
     resolve_project_path,
@@ -126,7 +127,7 @@ def _resolve_per_band_settings(args, band_names):
     return resolved
 
 
-def _band_paths(args, band_name):
+def _band_paths(args, band_name, index, n_bands):
     """Resolve ``{base_path}/{band}/{filename}`` inputs for one band."""
     paths = {
         path_key: os.path.join(
@@ -139,6 +140,29 @@ def _band_paths(args, band_name):
     missing = [path for path in paths.values() if not os.path.isfile(path)]
     if missing:
         raise FileNotFoundError(f"Missing multiband files for {band_name!r}: {missing}")
+
+    contaminate_base = getattr(args, 'contaminate_mask_path', None)
+    if contaminate_base is not None:
+        contaminate_base = _indexed_config_value(
+            contaminate_base, index, n_bands, 'contaminate_mask_path',
+        )
+        contaminate_name = _indexed_config_value(
+            getattr(args, 'contaminate_mask_name', 'mask_2.fits'),
+            index,
+            n_bands,
+            'contaminate_mask_name',
+        )
+        contaminate_path = (
+            contaminate_base if os.path.isfile(contaminate_base)
+            else os.path.join(contaminate_base, band_name, contaminate_name)
+        )
+        if not os.path.isfile(contaminate_path):
+            raise FileNotFoundError(
+                f"Missing contaminate mask for {band_name!r}: {contaminate_path}"
+            )
+        paths['contaminate_mask_path'] = contaminate_path
+    else:
+        paths['contaminate_mask_path'] = None
     return paths
 
 
@@ -207,10 +231,26 @@ def _multidata_paths(args, n_data):
         path_key: _multidata_file_paths(args, path_key, name_key, default_name, n_data)
         for path_key, (name_key, default_name) in _BAND_FILE_NAMES.items()
     }
-    return [
-        {path_key: by_kind[path_key][index] for path_key in _BAND_FILE_NAMES}
-        for index in range(n_data)
-    ]
+    contaminate_paths = None
+    if getattr(args, 'contaminate_mask_path', None) is not None:
+        contaminate_paths = _multidata_file_paths(
+            args,
+            'contaminate_mask_path',
+            'contaminate_mask_name',
+            'mask_2.fits',
+            n_data,
+        )
+    observations = []
+    for index in range(n_data):
+        paths = {
+            path_key: by_kind[path_key][index]
+            for path_key in _BAND_FILE_NAMES
+        }
+        paths['contaminate_mask_path'] = (
+            contaminate_paths[index] if contaminate_paths is not None else None
+        )
+        observations.append(paths)
+    return observations
 
 
 def _materialize_pixel_arrays(kwargs, run_dir):
@@ -871,13 +911,17 @@ def build_and_run_multiband(config_path=None):
         }
         for name, value in band_settings.items():
             setattr(band_args, name, value)
-        paths = observation_paths[index] if use_multidata else _band_paths(args, band_name)
+        paths = (
+            observation_paths[index]
+            if use_multidata else _band_paths(args, band_name, index, len(band_names))
+        )
         archive_input_files(
             {
                 'data': paths['data_path'],
                 'noise': paths['noise_path'],
                 'psf': paths['psf_path'],
                 'source_arc_mask': paths['source_arc_mask_path'],
+                'contaminate_mask': paths.get('contaminate_mask_path'),
             },
             os.path.join(save_path, 'data', band_name),
         )
@@ -885,6 +929,14 @@ def build_and_run_multiband(config_path=None):
         noise_map = get_fits_data(paths['noise_path'])
         psf_data = get_fits_data(paths['psf_path'])
         source_arc_mask = get_fits_data(paths['source_arc_mask_path']).astype(bool)
+        contaminate_mask = load_binary_exclusion_mask(
+            paths.get('contaminate_mask_path'),
+            image_data.shape if band_args.crop_size is None else (
+                band_args.crop_size, band_args.crop_size
+            ),
+            crop_size=band_args.crop_size,
+            role=f'{band_name} contaminate mask',
+        )
         if band_args.crop_size is not None:
             image_data = center_crop(image_data, band_args.crop_size)
             noise_map = center_crop(noise_map, band_args.crop_size)
@@ -944,6 +996,17 @@ def build_and_run_multiband(config_path=None):
             image_data_before_bad_pixel_mask - background_offset,
             image_data_before_bad_pixel_mask,
         )
+
+        fit_mask_bool = ~bad_pixel_mask
+        if contaminate_mask is not None:
+            fit_mask_bool &= ~contaminate_mask
+            print(
+                f'[mask:{band_name}] Excluding {int(np.sum(contaminate_mask))} '
+                f'contaminant pixels; {int(np.sum(fit_mask_bool))}/{fit_mask_bool.size} '
+                'pixels remain in the likelihood.'
+            )
+        image_data = np.where(fit_mask_bool, image_data, 0.0)
+        noise_map = np.where(fit_mask_bool, noise_map, 1e10)
 
         image_size = image_data.shape[0]
         mass_types, mass_params = _call_config(lens_mass_config, image_size, band_args.pixel_scale, band_args, band_name)
@@ -1009,7 +1072,8 @@ def build_and_run_multiband(config_path=None):
             'image_data_before_bad_pixel_mask': image_data_before_bad_pixel_mask,
             'noise_map_before_bad_pixel_mask': noise_map_before_bad_pixel_mask,
             'bad_pixel_mask': bad_pixel_mask,
-            'fit_mask_bool': ~bad_pixel_mask,
+            'contaminate_mask': contaminate_mask,
+            'fit_mask_bool': fit_mask_bool,
             'save_path': None,
         })
 
@@ -1120,6 +1184,7 @@ def build_and_run_multiband(config_path=None):
                 band['save_path'], band['type_list']['point_source_type_list'],
                 band['param_list']['point_source_params_list'],
                 getattr(band['lens_image'], 'source_arc_mask', None),
+                contaminate_mask=band.get('contaminate_mask'),
                 background_offset=band['background_offset'],
                 bad_pixel_mask=band['bad_pixel_mask'],
                 output_basename='input_data_before_mask',
@@ -1129,6 +1194,7 @@ def build_and_run_multiband(config_path=None):
                 band['save_path'], band['type_list']['point_source_type_list'],
                 band['param_list']['point_source_params_list'],
                 getattr(band['lens_image'], 'source_arc_mask', None),
+                contaminate_mask=band.get('contaminate_mask'),
                 background_offset=band['background_offset'],
             )
 
@@ -1220,8 +1286,11 @@ def build_and_run_multiband(config_path=None):
                     initial_kwargs_json, band['name'],
                 )
                 initial_model = band['lens_image'].model(**initial_kwargs_by_band[band['name']])
+                initial_residual = (
+                    (initial_model - band['image_data']) / band['noise_map']
+                )
                 initial_chi2 = float(np.sum(
-                    ((initial_model - band['image_data']) / band['noise_map']) ** 2
+                    initial_residual[band['fit_mask_bool']] ** 2
                 ))
                 print(f"Initial {band['name']} chi^2: {initial_chi2:.2f}")
                 initial_band_results.append({
@@ -1460,9 +1529,16 @@ def build_and_run_multiband(config_path=None):
             result_arrays[f'{band["name"]}_best_fit_model'] = np.asarray(metrics_model)
             result_arrays[f'{band["name"]}_image_data'] = np.asarray(band['image_data'])
             result_arrays[f'{band["name"]}_noise_map'] = np.asarray(band['noise_map'])
+            result_arrays[f'{band["name"]}_fit_mask_bool'] = np.asarray(
+                band['fit_mask_bool']
+            )
             result_arrays[f'{band["name"]}_source_arc_mask'] = np.asarray(
                 getattr(band['lens_image'], 'source_arc_mask', None)
             )
+            if band.get('contaminate_mask') is not None:
+                result_arrays[f'{band["name"]}_contaminate_mask'] = np.asarray(
+                    band['contaminate_mask']
+                )
 
         total_log_likelihood = _joint_log_likelihood(prob_model, best_params)
         with open(os.path.join(run_path, 'kwargs_result.json'), 'w') as handle:

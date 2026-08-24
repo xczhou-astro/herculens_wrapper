@@ -192,6 +192,7 @@ def plot_input_data(
     background_offset=0.0,
     bad_pixel_mask=None,
     output_basename='input_data',
+    contaminate_mask=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -237,6 +238,11 @@ def plot_input_data(
                 np.asarray(bad_pixel_mask), levels=[0.5], colors='red',
                 extent=extent, linewidths=1.0,
             )
+        if contaminate_mask is not None:
+            axis.contour(
+                np.asarray(contaminate_mask), levels=[0.5], colors='orange',
+                extent=extent, linewidths=1.2, linestyles='--',
+            )
         for ras, decs, color, label in point_sources:
             axis.scatter(
                 ras, decs, s=40, marker='o', facecolors='none',
@@ -281,6 +287,11 @@ def plot_input_data(
             axes[1, 0].contour(
                 np.asarray(bad_pixel_mask), levels=[0.5], colors='red',
                 extent=extent, linewidths=1.0,
+            )
+        if contaminate_mask is not None:
+            axes[1, 0].contour(
+                np.asarray(contaminate_mask), levels=[0.5], colors='orange',
+                extent=extent, linewidths=1.2, linestyles='--',
             )
         axes[1, 0].set_title(f"Signal-to-noise{' (symlog)' if log_scale else ''}")
         fig.colorbar(
@@ -1635,6 +1646,7 @@ def display_init(
     num_params,
     type_list=None,
     residual_vis_max=0.0,
+    fit_mask_bool=None,
 ):
     """Plot the initial guess model before inference."""
     kwargs_init = prob_model.params2kwargs(init_params)
@@ -1652,8 +1664,15 @@ def display_init(
     if mask is not None:
         mask = np.asarray(mask)
 
-    init_chi2 = float(np.sum(((initial_model - image_data) / noise_map) ** 2))
-    init_reduced, _, _, dof_init = fit_dof_and_reduced_chi2(init_chi2, image_data, num_params)
+    standardized_residual = (initial_model - image_data) / noise_map
+    if fit_mask_bool is None:
+        init_chi2 = float(np.sum(standardized_residual ** 2))
+    else:
+        fit_mask_bool = np.asarray(fit_mask_bool, dtype=bool)
+        init_chi2 = float(np.sum(standardized_residual[fit_mask_bool] ** 2))
+    init_reduced, _, _, dof_init = fit_dof_and_reduced_chi2(
+        init_chi2, image_data, num_params, mask_bool=fit_mask_bool,
+    )
     print(
         f'Initial chi^2: {init_chi2:.2f} (reduced: {init_reduced:.4f}, dof={dof_init})'
     )
@@ -2020,7 +2039,7 @@ def generate_run_plots(
     if comp_total is not None:
         best_fit_model = comp_total
 
-    if best_fit_model is not None and image_data is not None and noise_map is not None:
+    if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
 
     def _try(name, fn):

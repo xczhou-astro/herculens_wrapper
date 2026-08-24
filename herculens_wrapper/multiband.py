@@ -54,6 +54,7 @@ def create_multiband_prob_model(
                 fixed_lens_light_by_band[band['name']]
                 if fixed_lens_light_by_band is not None else None
             ),
+            likelihood_mask=band.get('fit_mask_bool'),
         ))
 
     def _site_value(params, band, site):
@@ -241,6 +242,7 @@ def _create_fully_shared_multidata_prob_model(
             'lens_image': band['lens_image'],
             'image_data': band['image_data'],
             'likelihood_scale': getattr(band.get('args', args), 'likelihood_scale', 1.0),
+            'likelihood_mask': band.get('fit_mask_bool'),
         }
         for band in bands[1:]
     ]
@@ -256,6 +258,7 @@ def _create_fully_shared_multidata_prob_model(
         fix_lens_light=fixed_lens_light is not None,
         kwargs_lens_light_fixed=fixed_lens_light,
         additional_observations=additional_observations,
+        likelihood_mask=reference.get('fit_mask_bool'),
     )
 
     def params2kwargs_by_band(params):
@@ -439,6 +442,7 @@ def _create_selectively_shared_multidata_prob_model(bands, args, shared_entries)
             band['noise_map'],
             args=band.get('args', args),
             param_overrides=lambda holder=holder: holder['overrides'],
+            likelihood_mask=band.get('fit_mask_bool'),
         )
         band_models.append(child_model)
 
@@ -539,6 +543,7 @@ def create_multidata_source_warmup_model(
             kwargs_lens_fixed=kwargs_lens_by_band[band['name']],
             fix_lens_light=True,
             kwargs_lens_light_fixed=kwargs_lens_light_by_band[band['name']],
+            likelihood_mask=band.get('fit_mask_bool'),
         ))
 
     class MultiDataSourceWarmupModel(NumpyroModel):

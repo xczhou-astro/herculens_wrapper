@@ -41,6 +41,7 @@ from herculens_wrapper.utils import (
     get_fits_data,
     json_serializer,
     kwargs_best_to_json_pixelated_npy,
+    load_binary_exclusion_mask,
     normalize_run_args_paths,
     resolve_init_run_dir,
     run_arguments_namespace,
@@ -244,6 +245,7 @@ def build_and_run(config_path=None):
             'noise': args.noise_path,
             'psf': args.psf_path,
             'source_arc_mask': getattr(args, 'source_arc_mask_path', None),
+            'contaminate_mask': getattr(args, 'contaminate_mask_path', None),
         },
         os.path.join(save_path, 'data'),
     )
@@ -321,6 +323,11 @@ def build_and_run(config_path=None):
             f"{args.source_arc_mask_radius}: shape={source_arc_mask.shape}, "
             f"active_pixels={int(source_arc_mask.sum())}"
         )
+    contaminate_mask = load_binary_exclusion_mask(
+        getattr(args, 'contaminate_mask_path', None),
+        image_data.shape,
+        crop_size=args.crop_size,
+    )
     source_grid_scale = float(getattr(args, 'source_grid_scale', 1.0))
     conjugate_points = getattr(args, 'conjugate_points', None)
     if conjugate_points is not None:
@@ -365,6 +372,7 @@ def build_and_run(config_path=None):
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
             source_arc_mask=source_arc_mask,
+            contaminate_mask=contaminate_mask,
             background_offset=background_offset,
             bad_pixel_mask=bad_pixel_mask,
             output_basename='input_data_before_mask',
@@ -372,12 +380,18 @@ def build_and_run(config_path=None):
     except Exception as e:
         print(f'[plots] input_data_before_mask.png skipped: {e}')
 
+    fit_mask_bool = ~bad_pixel_mask
     if mask_bool is not None:
-        image_data = image_data * mask_bool
-        noise_map = np.where(mask_bool, noise_map, 1e10)
-        mask_bool = mask_bool & ~bad_pixel_mask
-    else:
-        mask_bool = ~bad_pixel_mask
+        fit_mask_bool &= mask_bool
+    if contaminate_mask is not None:
+        fit_mask_bool &= ~contaminate_mask
+        print(
+            f'[mask] Excluding {int(np.sum(contaminate_mask))} contaminant pixels; '
+            f'{int(np.sum(fit_mask_bool))}/{fit_mask_bool.size} pixels remain in the likelihood.'
+        )
+    image_data = np.where(fit_mask_bool, image_data, 0.0)
+    noise_map = np.where(fit_mask_bool, noise_map, 1e10)
+    mask_bool = fit_mask_bool
 
     try:
         plot_input_data(
@@ -389,6 +403,7 @@ def build_and_run(config_path=None):
             point_source_type_list=point_source_type_list,
             point_source_params_list=point_source_params_list,
             source_arc_mask=source_arc_mask,
+            contaminate_mask=contaminate_mask,
             # background_subtract_corner=background_subtract_corner,
             # background_subtract_which_corner=background_subtract_which_corner,
             background_offset=background_offset,
@@ -601,6 +616,7 @@ def build_and_run(config_path=None):
                 kwargs_source_light_fixed=run_kwargs_source_light_fixed,
                 init_params_path=run_args.init_params_path,
                 args=run_args,
+                likelihood_mask=mask_bool,
             )
 
             shutil.copy(config_path, os.path.join(run_save_path, os.path.basename(config_path)))
@@ -699,6 +715,7 @@ def build_and_run(config_path=None):
                                 fix_source_light=False,
                                 init_params_path=run_args.init_params_path,
                                 args=run_args,
+                                likelihood_mask=mask_bool,
                             )
                             warmup_args = SimpleNamespace(**vars(run_args))
                             warmup_args.max_iterations_svi = max_warmup_it
@@ -751,6 +768,7 @@ def build_and_run(config_path=None):
                     num_params=num_params,
                     type_list=type_list,
                     residual_vis_max=getattr(run_args, 'residual_vis_max', 0.0),
+                    fit_mask_bool=mask_bool,
                 )
             except Exception as e:
                 print(f'[plots] initial_guess_model.png skipped: {e}')
@@ -898,7 +916,8 @@ def build_and_run(config_path=None):
                 except Exception as e:
                     print(f"[warning] Failed to compute source pixel scale for metrics: {e}")
 
-            chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+            standardized_residual = (best_fit_model - image_data) / noise_map
+            chi2 = float(np.sum(standardized_residual[mask_bool] ** 2))
             log_likelihood = float(np.sum(run_prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 run_save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
@@ -945,6 +964,10 @@ def build_and_run(config_path=None):
                 image_data=np.asarray(image_data),
                 noise_map=np.asarray(noise_map),
                 source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
+                contaminate_mask=(
+                    np.asarray(contaminate_mask) if contaminate_mask is not None else None
+                ),
+                fit_mask_bool=np.asarray(mask_bool),
                 image_unit=np.asarray('pixel_flux'),
                 noise_unit=np.asarray('pixel_flux'),
             )
@@ -1168,6 +1191,7 @@ def build_and_run(config_path=None):
             kwargs_source_light_fixed=kwargs_source_light_fixed,
             init_params_path=args.init_params_path,
             args=args,
+            likelihood_mask=mask_bool,
         )
 
         num_params = prob_model.count_sampled_parameters()
@@ -1225,6 +1249,7 @@ def build_and_run(config_path=None):
                 num_params=num_params,
                 type_list=type_list,
                 residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                fit_mask_bool=mask_bool,
             )
         except Exception as e:
             print(f'[plots] initial_guess_model.png skipped: {e}')
@@ -1293,7 +1318,8 @@ def build_and_run(config_path=None):
                 kwargs_best,
                 output_deterministics,
             )
-            chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+            standardized_residual = (best_fit_model - image_data) / noise_map
+            chi2 = float(np.sum(standardized_residual[mask_bool] ** 2))
             log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
@@ -1355,7 +1381,8 @@ def build_and_run(config_path=None):
                 kwargs_best,
                 output_deterministics,
             )
-            chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+            standardized_residual = (best_fit_model - image_data) / noise_map
+            chi2 = float(np.sum(standardized_residual[mask_bool] ** 2))
             log_likelihood = float(np.sum(prob_model.log_likelihood(best_params)))
             metrics = save_metrics(
                 save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2,
@@ -1398,6 +1425,10 @@ def build_and_run(config_path=None):
             image_data=np.asarray(image_data),
             noise_map=np.asarray(noise_map),
             source_arc_mask=np.asarray(source_arc_mask) if source_arc_mask is not None else None,
+            contaminate_mask=(
+                np.asarray(contaminate_mask) if contaminate_mask is not None else None
+            ),
+            fit_mask_bool=np.asarray(mask_bool),
             image_unit=np.asarray('pixel_flux'),
             noise_unit=np.asarray('pixel_flux'),
         )
