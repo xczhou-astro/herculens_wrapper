@@ -1,6 +1,7 @@
 """Register wrapper-local profile names with the installed Herculens package."""
 
 from .multipole import MPPL
+from .composite import GNFWMGE, StellarMGE
 
 
 def register_mass_profiles():
@@ -24,3 +25,14 @@ def register_mass_profiles():
     mass_model_base.STRING_MAPPING["MPPL"] = MPPL
     if "MPPL" not in mass_model_base.SUPPORTED_MODELS:
         mass_model_base.SUPPORTED_MODELS.append("MPPL")
+
+    for name, profile in {"STELLAR_MGE": StellarMGE, "GNFW_MGE": GNFWMGE}.items():
+        existing = profile_mapping.STRING_MAPPING.get(name)
+        if existing is not None and existing is not profile:
+            raise RuntimeError(f"Herculens already registered a different profile as {name!r}.")
+        profile_mapping.STRING_MAPPING[name] = profile
+        mass_model_base.STRING_MAPPING[name] = profile
+        if name not in profile_mapping.SUPPORTED_MODELS:
+            profile_mapping.SUPPORTED_MODELS.append(name)
+        if name not in mass_model_base.SUPPORTED_MODELS:
+            mass_model_base.SUPPORTED_MODELS.append(name)

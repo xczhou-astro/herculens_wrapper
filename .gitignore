@@ -37,5 +37,4 @@ utils/visualize_dpie_multipole.py
 .vscode
 results
 
-api/
 docs/

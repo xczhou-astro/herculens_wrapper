@@ -1361,8 +1361,11 @@ def get_init_params(
         )
 
     if init_params_path is not None:
-        init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
-            os.path.abspath(str(init_params_path))
+        from herculens_wrapper.utils import resolve_init_run_dir
+
+        resolved_init_path = resolve_init_run_dir(init_params_path)
+        init_dir = resolved_init_path if os.path.isdir(str(resolved_init_path)) else os.path.dirname(
+            os.path.abspath(str(resolved_init_path))
         )
         if require_pixelated_svi:
             init_config_path = os.path.join(init_dir, 'config.json')
@@ -1397,7 +1400,7 @@ def get_init_params(
                     f"{init_config_path!r} records {init_source_types!r}."
                 )
 
-        init_info = load_kwargs_init_json(init_params_path)
+        init_info = load_kwargs_init_json(resolved_init_path)
         print(f"[Init] Loading kwargs from prior run: {init_dir}")
         try:
             ks = init_info.get('kwargs_source', [])

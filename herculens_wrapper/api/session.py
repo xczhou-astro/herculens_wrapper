@@ -1,0 +1,578 @@
+"""Single-band model initialization, inference, and visualization."""
+from __future__ import annotations
+from copy import deepcopy
+import hashlib
+import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+from typing import Any, Mapping
+import numpy as np
+from .collections import LensProfileCollection
+from .data import SingleBandData
+from .models import ModelDefinition
+from .samplers import FitResult, SamplerConfig
+from .visualization import PlotScale, _extent, _normalization
+
+def _model_backend():
+    from ..models import create_lens_image, create_prob_model, get_init_params, validate_param_list
+    return create_lens_image, create_prob_model, get_init_params, validate_param_list
+
+def _sampler_backend():
+    from ..samplers import run_hmc, run_optax, run_svi
+    return run_hmc, run_optax, run_svi
+
+class SingleBandModel:
+    """Config-free, immediately built controller for a single band."""
+    def __init__(self, *, profiles: LensProfileCollection, observation: SingleBandData,
+                 numerics: Mapping[str, Any] | None = None,
+                 source_grid_scale: float = 1.0,
+                 likelihood_scale: float = 1.0):
+        if not isinstance(profiles, LensProfileCollection):
+            raise TypeError("profiles must be a LensProfileCollection.")
+        if not isinstance(observation, SingleBandData):
+            raise TypeError("observation must be a SingleBandData instance.")
+        self.profiles, self.observation = profiles, observation
+        self.data = observation
+        self.definition: ModelDefinition = profiles.as_definition()
+        self.numerics, self.lens_image, self.prob_model = dict(numerics or {"supersampling_factor": 1}), None, None
+        if source_grid_scale <= 0:
+            raise ValueError("source_grid_scale must be positive.")
+        self.source_grid_scale = float(source_grid_scale)
+        if not np.isfinite(likelihood_scale) or likelihood_scale <= 0:
+            raise ValueError("likelihood_scale must be a finite positive number.")
+        self.likelihood_scale = float(likelihood_scale)
+        self.result: FitResult | None = None
+        self.initial_parameters: Mapping[str, Any] | None = None
+        self.initialization_path: Path | None = None
+        self._build()
+
+    def with_fixed(self, **selections: Any) -> "SingleBandModel":
+        """Create an independently built next-stage model with fixed values.
+
+        Selections follow :meth:`LensProfileCollection.with_fixed`; values are
+        taken from the current initialized or fitted profile state.
+        """
+        return SingleBandModel(
+            profiles=self.profiles.with_fixed(**selections),
+            observation=self.observation,
+            numerics=deepcopy(self.numerics),
+            source_grid_scale=self.source_grid_scale,
+            likelihood_scale=self.likelihood_scale,
+        )
+
+    def load(
+        self,
+        save_path: str | Path,
+        *,
+        seed: int = 42,
+        pixelated_init_match: str = "image",
+        num_iterations_warmup: int = 0,
+    ) -> Mapping[str, Any]:
+        """Load saved parameters into this explicitly declared model.
+
+        A collection directory such as ``pixelated_svi`` automatically selects
+        its highest-likelihood ``run_i``.  Supplying ``pixelated_svi/run_2``
+        uses that specific run.  The saved ``kwargs_result.json`` and pixelated
+        source arrays provide all result state; data and profile declarations
+        deliberately remain explicit in the calling notebook/script.
+        """
+        parameters = self.initialize(
+            seed=seed, init_params_path=save_path,
+            pixelated_init_match=pixelated_init_match,
+            num_iterations_warmup=num_iterations_warmup,
+        )
+        self.result = None
+        return parameters
+
+    def get_results(
+        self,
+        parameters: Mapping[str, Any] | None = None,
+        *,
+        random_seed: int = 42,
+    ) -> FitResult:
+        """Evaluate and cache derived products for fitted or loaded parameters.
+
+        This includes the model image and its source, lens-light, point-source,
+        and component products.  It intentionally remains separate from
+        :meth:`load`, so loading a previous run does not immediately perform
+        an expensive forward evaluation.
+        """
+        if parameters is None:
+            if self.initial_parameters is not None:
+                parameters = self.initial_parameters
+            elif self.result is not None:
+                parameters = self.result.parameters
+            else:
+                raise RuntimeError("Call load(), initialize(), or run() before get_results().")
+        from ..samplers import evaluate_parameter_components
+
+        derived = evaluate_parameter_components(
+            self.prob_model, parameters, rng_seed=random_seed,
+        )
+        self.result = FitResult(
+            parameters, {"loaded_from": str(self.initialization_path)},
+            random_seed=random_seed, derived=derived, _model=self,
+        )
+        return self.result
+
+    @property
+    def num_sampling_parameters(self) -> int:
+        """Number of scalar parameters declared for sampling.
+
+        Scalar priors are fixed, while parameter links are derived from their
+        target and therefore are not independent sampling parameters.
+        """
+        if self.initial_parameters is not None:
+            return int(sum(np.asarray(value).size for value in self.initial_parameters.values()))
+        _, parameter_lists = self.definition.as_dicts()
+        return sum(
+            1
+            for component in parameter_lists.values()
+            for profile in component
+            for prior in profile.values()
+            if isinstance(prior, (list, tuple))
+            and not (len(prior) == 4 and prior[0] == "correlated")
+        )
+    def _build(self) -> None:
+        """Create the backend model from the declared profiles and numerics."""
+        create_lens_image, create_prob_model, _, validate_param_list = _model_backend()
+        type_list, param_list = self.definition.as_dicts(); validate_param_list(type_list, param_list)
+        self.lens_image = create_lens_image(param_list, type_list, self.data.likelihood_image, self.data.likelihood_noise, self.data.psf, self.data.pixel_scale, kwargs_numerics=self.numerics, source_arc_mask=self.data.source_arc_mask, source_grid_scale=self.source_grid_scale)
+        self.prob_model = create_prob_model(
+            param_list, type_list, self.lens_image, self.data.likelihood_image,
+            self.data.likelihood_noise, likelihood_mask=self.data.likelihood_mask,
+            args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
+        )
+    def initialize(
+        self,
+        *,
+        seed: int = 42,
+        run_id: int | str | None = None,
+        init_params_path: str | Path | None = None,
+        pixelated_init_match: str = "image",
+        num_iterations_warmup: int = 0,
+    ) -> Mapping[str, Any]:
+        """Create the constrained SVI start point with ``init_to_median``.
+
+        A fresh model uses NumPyro's ``init_to_median(num_samples=25)`` with
+        ``seed``.  Passing the returned parameters to :meth:`run` therefore
+        makes the displayed initial model the actual SVI initialization.  An
+        ``init_params_path`` remains a deliberate warm start from a prior run.
+        For a pixelated source, ``pixelated_init_match='image'`` runs a short
+        SVI warmup with inherited lens mass/light held fixed; ``'source'``
+        fits Matérn hyperparameters to the inherited analytic source.
+        """
+        if run_id is not None:
+            print("\n========================================")
+            print(f"Starting Run {run_id} (seed={seed})")
+            print("========================================")
+        _, _, get_init_params, _ = _model_backend()
+        if init_params_path is None:
+            self.initialization_path = None
+        else:
+            from ..utils import resolve_init_run_dir
+            self.initialization_path = Path(resolve_init_run_dir(init_params_path)).expanduser()
+        if init_params_path is None:
+            import jax
+            from numpyro import infer
+            from numpyro.infer.util import initialize_model
+
+            model_info = initialize_model(
+                jax.random.PRNGKey(seed), self.prob_model.model,
+                init_strategy=infer.init_to_median(num_samples=25),
+                validate_grad=False,
+            )
+            initial = {
+                name: site["value"]
+                for name, site in model_info.model_trace.items()
+                if site["type"] == "sample" and not site["is_observed"]
+            }
+        else:
+            type_list, param_list = self.definition.as_dicts()
+            initial = get_init_params(
+                self.prob_model, param_list, type_list,
+                init_params_path=self.initialization_path, random_seed=seed,
+                lens_image=self.lens_image,
+            )
+            type_list, param_list = self.definition.as_dicts()
+            is_pixelated = type_list.get("source_light_type_list") == ["PIXELATED"]
+            if pixelated_init_match not in {"image", "source"}:
+                raise ValueError("pixelated_init_match must be 'image' or 'source'.")
+            if is_pixelated and pixelated_init_match == "source":
+                from ..models import PowerSpectrum
+
+                iterations = num_iterations_warmup or 2_000
+                if not isinstance(iterations, int) or iterations <= 0:
+                    raise ValueError("num_iterations_warmup must be a positive integer for source matching.")
+                ny, nx = self.lens_image.SourceModel.pixel_grid.num_pixel_axes
+                pixelated_prior = param_list["source_light_params_list"][0].get("pixelated_prior", {})
+                print(
+                    f"[pixelated-init: source] Fitting Matérn parameters "
+                    f"({iterations} iterations) from the inherited analytic source..."
+                )
+                power_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_source(
+                    self.lens_image, str(init_params_path),
+                    PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
+                    seed=seed + 7919, max_iterations=iterations,
+                )
+                for name, value in power_values.items():
+                    if name in initial:
+                        initial[name] = value
+                print("[pixelated-init: source] Source-matched initialization complete.")
+            if is_pixelated and pixelated_init_match == "image" and num_iterations_warmup > 0:
+                if not isinstance(num_iterations_warmup, int):
+                    raise TypeError("num_iterations_warmup must be an integer.")
+                create_lens_image, create_prob_model, _, _ = _model_backend()
+                _, _, run_svi = _sampler_backend()
+                initial_kwargs = self.prob_model.params2kwargs(initial)
+                warmup_model = create_prob_model(
+                    param_list, type_list, self.lens_image,
+                    self.data.likelihood_image, self.data.likelihood_noise,
+                    fix_lens_mass=bool(initial_kwargs.get("kwargs_lens")),
+                    kwargs_lens_fixed=initial_kwargs.get("kwargs_lens"),
+                    fix_lens_light=bool(initial_kwargs.get("kwargs_lens_light")),
+                    kwargs_lens_light_fixed=initial_kwargs.get("kwargs_lens_light"),
+                    init_params_path=str(init_params_path),
+                    likelihood_mask=self.data.likelihood_mask,
+                    args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
+                )
+                warmup = SamplerConfig.svi(
+                    max_iterations=num_iterations_warmup, random_seed=seed,
+                ).to_namespace()
+                print(
+                    f"[svi-warmup] Starting {num_iterations_warmup} iteration "
+                    "pixelated-source image-match warmup..."
+                )
+                warmup_params, _ = run_svi(
+                    warmup_model, self.data.likelihood_image, warmup, initial,
+                    max_iterations=num_iterations_warmup,
+                )
+                for name, value in warmup_params.items():
+                    if "source" in name or "pixels_wn" in name:
+                        initial[name] = value
+                print("[svi-warmup] Pixelated-source image-match warmup complete.")
+        self.definition.update_values(initial); self.initial_parameters = initial
+        return initial
+
+    def _hmc_manifest(self, sampler: SamplerConfig) -> dict[str, Any]:
+        """Return the immutable identity of an HMC chain and its model."""
+        types, parameters = self.definition.as_dicts()
+
+        def _array_digest(values: Any) -> str:
+            if values is None:
+                return "none"
+            array = np.ascontiguousarray(np.asarray(values))
+            digest = hashlib.sha256()
+            digest.update(str(array.dtype).encode())
+            digest.update(str(array.shape).encode())
+            digest.update(array.tobytes())
+            return digest.hexdigest()
+
+        def _json_value(value: Any):
+            if isinstance(value, np.ndarray):
+                return value.tolist()
+            if isinstance(value, np.generic):
+                return value.item()
+            raise TypeError(f"Cannot serialize {type(value).__name__} in the HMC manifest.")
+
+        model_payload = {
+            "type_list": types,
+            "parameter_list": parameters,
+            "numerics": self.numerics,
+            "source_grid_scale": self.source_grid_scale,
+            "likelihood_scale": self.likelihood_scale,
+            "pixel_scale": self.data.pixel_scale,
+            "data": {
+                "image": _array_digest(self.data.likelihood_image),
+                "noise": _array_digest(self.data.likelihood_noise),
+                "psf": _array_digest(self.data.psf),
+                "mask": _array_digest(self.data.likelihood_mask),
+            },
+        }
+        encoded = json.dumps(model_payload, sort_keys=True, default=_json_value).encode()
+        return {
+            "format_version": 1,
+            "model_fingerprint": hashlib.sha256(encoded).hexdigest(),
+            "num_chains": int(sampler.options["num_chains_hmc_numpyro"]),
+            "checkpoint_interval": int(sampler.options["checkpoint_interval_hmc_numpyro"]),
+        }
+
+    def _validate_hmc_run_directory(self, output: Path, sampler: SamplerConfig) -> bool:
+        """Create or validate metadata required to safely continue HMC."""
+        checkpoint = output / "hmc_checkpoint.pkl"
+        manifest_path = output / "hmc_manifest.json"
+        expected = self._hmc_manifest(sampler)
+        if checkpoint.exists():
+            if manifest_path.exists():
+                stored = json.loads(manifest_path.read_text())
+                for key in ("model_fingerprint", "num_chains", "checkpoint_interval"):
+                    if stored.get(key) != expected[key]:
+                        raise ValueError(
+                            f"Cannot resume HMC: {key} differs from the existing chain. "
+                            "Use the original model, num_chains, and checkpoint_interval."
+                        )
+            else:
+                # Compatibility with chains produced before the API manifest
+                # existed.  The backend still checks chain count and interval.
+                manifest_path.write_text(json.dumps(expected, indent=2) + "\n")
+                print(f"[hmc] Existing checkpoint has no manifest; wrote {manifest_path} for future resumes.")
+            return True
+        manifest_path.write_text(json.dumps(expected, indent=2) + "\n")
+        return False
+
+    def resume_hmc(self, sampler: SamplerConfig, *, save_path: str | Path) -> FitResult:
+        """Continue an interrupted HMC chain stored in ``save_path``.
+
+        ``sampler.num_samples`` is the desired *total* retained draws per
+        chain, not the number of extra draws.  ``num_chains`` and
+        ``checkpoint_interval`` must match the original run.  A prior SVI
+        initialization is not needed here because the checkpoint contains the
+        warmed-up NUTS state.
+        """
+        if sampler.name != "hmc":
+            raise TypeError("resume_hmc() requires SamplerConfig.hmc(...).")
+        output = Path(save_path).expanduser()
+        if not (output / "hmc_checkpoint.pkl").is_file():
+            raise FileNotFoundError(
+                f"No HMC checkpoint found at {output / 'hmc_checkpoint.pkl'}. "
+                "Use model.run(hmc, ...) to start a new chain."
+            )
+        from ..samplers import _load_hmc_samples_hdf5
+
+        samples_path = output / "hmc_samples.h5"
+        if not samples_path.is_file():
+            raise FileNotFoundError(
+                f"Cannot resume HMC: {samples_path} is missing. The checkpoint alone "
+                "does not contain the posterior state required by the API sampler."
+            )
+        archived_samples, _ = _load_hmc_samples_hdf5(str(samples_path))
+        if not archived_samples:
+            raise ValueError("Cannot resume HMC: the posterior archive contains no samples.")
+        # ``run_hmc`` receives these only to reconstruct its NUTS/Gibbs kernel
+        # structure; the saved warmup state, rather than this draw, continues
+        # the Markov chains.
+        initial = {name: np.asarray(values)[-1] for name, values in archived_samples.items()}
+        return self.run(sampler, init_params=initial, save_path=output)
+    def run(self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
+            save_path: str | Path | None = None) -> FitResult:
+        """Run inference from supplied or automatically initialized parameters."""
+        if init_params is not None:
+            initial = dict(init_params)
+        elif self.initial_parameters is not None:
+            initial = dict(self.initial_parameters)
+        else:
+            initial = self.initialize(seed=sampler.random_seed)
+        self.definition.update_values(initial)
+        run_hmc, run_optax, run_svi = _sampler_backend(); args = sampler.to_namespace()
+        if sampler.name == "optax": params, details, samples = *run_optax(self.prob_model, args, initial), None
+        elif sampler.name == "svi": params, details, samples = *run_svi(self.prob_model, self.data.likelihood_image, args, initial), None
+        elif sampler.name == "hmc":
+            if save_path is None:
+                raise ValueError("HMC requires save_path for checkpoints and posterior samples.")
+            output = Path(save_path).expanduser()
+            output.mkdir(parents=True, exist_ok=True)
+            resuming = self._validate_hmc_run_directory(output, sampler)
+            if self.initialization_path is None and not resuming:
+                raise ValueError(
+                    "HMC requires model.initialize(init_params_path=...) before model.run()."
+                )
+            args.save_path = str(output)
+            samples, params, details = run_hmc(
+                self.prob_model, args, initial,
+                init_params_path=(str(self.initialization_path) if self.initialization_path is not None else None),
+            )
+            # ``run_hmc`` flattens chain and draw axes before returning the
+            # posterior samples.  Retain the original chain count so result
+            # visualizations can reconstruct one summary per chain.
+            details["num_chains_hmc_numpyro"] = int(args.num_chains_hmc_numpyro)
+        else: raise ValueError(f"Unknown sampler {sampler.name!r}.")
+        from ..samplers import evaluate_parameter_components, kwargs_with_deterministics
+        derived = dict(details.get("derived", {}))
+        if sampler.name == "hmc":
+            kwargs, deterministics = kwargs_with_deterministics(
+                self.prob_model, params, rng_seed=sampler.random_seed,
+            )
+            derived.update({"kwargs": kwargs, "deterministics": deterministics})
+        else:
+            derived = evaluate_parameter_components(
+                self.prob_model, params, rng_seed=sampler.random_seed,
+            )
+        details["derived"] = derived
+        self.definition.update_values(params); self.result = FitResult(
+            params, details, samples, random_seed=sampler.random_seed,
+            derived=derived, _model=self,
+        )
+        return self.result
+    def model_image(self, parameters: Mapping[str, Any] | None = None) -> np.ndarray:
+        if self.prob_model is None or self.lens_image is None: raise RuntimeError("The backend model is unavailable.")
+        if parameters is None:
+            if self.result is not None: parameters = self.result.parameters
+            elif self.initial_parameters is not None: parameters = self.initial_parameters
+            elif self.definition.has_free_parameters: raise RuntimeError("Supply parameters or call run() first.")
+            else: parameters = {}
+        return np.asarray(self.lens_image.model(**self.prob_model.params2kwargs(parameters)))
+
+    def mass_component_convergence(
+        self, parameters: Mapping[str, Any] | None = None,
+    ) -> dict[str, np.ndarray]:
+        """Return total, stellar, and gNFW convergence maps when present.
+
+        The maps are evaluated directly from the same compiled mass profiles
+        used during inference, so their sum is exactly the relevant part of
+        the fitted lens mass model.
+        """
+        if self.prob_model is None or self.lens_image is None:
+            raise RuntimeError("The backend model is unavailable.")
+        if parameters is None:
+            if self.result is None:
+                raise RuntimeError("Supply parameters or call run() first.")
+            parameters = self.result.parameters
+        kwargs_lens = self.prob_model.params2kwargs(parameters)["kwargs_lens"]
+        x_grid, y_grid = self.lens_image.Grid.pixel_coordinates
+        types, _ = self.definition.as_dicts()
+        result: dict[str, np.ndarray] = {}
+        component_types = types["lens_mass_type_list"]
+        labels = {"STELLAR_MGE": "stellar", "GNFW_MGE": "dark_matter"}
+        for index, profile_type in enumerate(component_types):
+            label = labels.get(profile_type)
+            if label is None:
+                continue
+            image = np.asarray(self.lens_image.MassModel.kappa(x_grid, y_grid, kwargs_lens, k=index))
+            result[label] = image if label not in result else result[label] + image
+        result["total"] = np.asarray(self.lens_image.MassModel.kappa(x_grid, y_grid, kwargs_lens))
+        return result
+    def plot_fit(self, parameters: Mapping[str, Any] | None = None, *, scale: PlotScale = "linear",
+                 residual_vis_max: float = 0.0, save_path: str | Path | None = None):
+        """Plot data, model image, and normalized residual for a parameter set.
+
+        ``scale`` applies to data and model; the normalized residual remains
+        on a symmetric linear scale so its amplitude stays interpretable.
+        """
+        import matplotlib.pyplot as plt
+        if scale not in ("linear", "log"):
+            raise ValueError("scale must be either 'linear' or 'log'.")
+        if residual_vis_max < 0:
+            raise ValueError("residual_vis_max must be non-negative.")
+        model = self.model_image(parameters); residual = (model - self.data.likelihood_image) / self.data.likelihood_noise
+        valid = np.isfinite(residual)
+        if self.data.likelihood_mask is not None:
+            valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
+        chi2 = float(np.sum(np.square(residual[valid])))
+        fig, axes = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
+        extent = _extent(self.data.image.shape, self.data.pixel_scale)
+        for axis, image, title, cmap in zip(axes, (self.data.likelihood_image, model, residual), ("Data", "Model", "Normalized residual"), ("twilight", "twilight", "coolwarm")):
+            if title == "Normalized residual":
+                finite = np.abs(image[np.isfinite(image)])
+                limit = float(residual_vis_max) if residual_vis_max > 0 else (float(np.max(finite)) if finite.size else 1.0)
+                limit = limit if limit > 0 else 1.0
+                rendered = axis.imshow(image, origin="lower", cmap=cmap, extent=extent, vmin=-limit, vmax=limit)
+            else:
+                rendered = axis.imshow(image, origin="lower", cmap=cmap, extent=extent, norm=_normalization(image, scale, signed=True))
+            if title in ("Data", "Normalized residual"):
+                if self.data.source_arc_mask is not None:
+                    axis.contour(self.data.source_arc_mask, levels=[0.5], colors="lime", linewidths=1.0, extent=extent)
+                if self.data.contaminate_mask is not None:
+                    axis.contour(self.data.contaminate_mask, levels=[0.5], colors="orange", linewidths=1.2, linestyles="--", extent=extent)
+            label = "Standardized residual" if title == "Normalized residual" else "Pixel flux"
+            if scale == "log" and title != "Normalized residual": label += " (log scale)"
+            plot_title = f"{title} ($\\chi^2$ = {chi2:.2f})" if title == "Normalized residual" else title
+            axis.set(title=plot_title, xlabel="arcsec", ylabel="arcsec"); fig.colorbar(rendered, ax=axis, shrink=0.85, label=label)
+        if save_path is not None:
+            output = Path(save_path); output.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output, dpi=200, bbox_inches="tight")
+        return fig, axes
+    def plot_initial_model(self, *, scale: PlotScale = "linear", residual_vis_max: float = 0.0,
+                     save_path: str | Path | None = None):
+        """Visualize the random initial model, creating it first if needed."""
+        if self.initial_parameters is None: self.initialize()
+        return self.plot_fit(self.initial_parameters, scale=scale, residual_vis_max=residual_vis_max, save_path=save_path)
+
+    def plot_initial_source(
+        self,
+        *,
+        scale: PlotScale = "linear",
+        residual_vis_max: float = 0.0,
+        save_path: str | Path | None = None,
+        source_pixel_scale: float = 0.01,
+        num_pixel: int = 200,
+    ) -> Path:
+        """Plot the source plane corresponding to the current SVI start point.
+
+        For pixelated models this displays the initialized source grid; for a
+        parametric model it renders the initial analytic source.  The
+        ``residual_vis_max`` argument is accepted for a uniform plotting API
+        but does not apply to a source-plane image.
+        """
+        if scale not in ("linear", "log"):
+            raise ValueError("scale must be either 'linear' or 'log'.")
+        if residual_vis_max < 0:
+            raise ValueError("residual_vis_max must be non-negative.")
+        if self.initial_parameters is None:
+            self.initialize()
+        from ..visualizations import plot_source_plane
+
+        if save_path is None:
+            directory = Path(tempfile.mkdtemp(prefix="herculens_initial_source_"))
+            filename = "initial_source_plane.png"
+        else:
+            target = Path(save_path).expanduser()
+            directory, filename = (
+                (target.parent, target.name) if target.suffix else (target, "initial_source_plane.png")
+            )
+            directory.mkdir(parents=True, exist_ok=True)
+        plot_source_plane(
+            self.lens_image, self.prob_model.params2kwargs(self.initial_parameters),
+            str(directory), source_pixel_scale=source_pixel_scale, num_pixel=num_pixel,
+            plot_scale=scale, output_filename=filename,
+            source_arc_mask=self.data.source_arc_mask,
+        )
+        output = directory / filename
+        try:
+            from IPython import get_ipython
+            if get_ipython() is not None:
+                from IPython.display import Image, display
+                display(Image(filename=str(output)))
+        except Exception:
+            pass
+        return output
+
+    def _metrics(self, parameters: Mapping[str, Any]) -> dict[str, float | int | None]:
+        """Evaluate numerical fit metrics for constrained best-fit parameters."""
+        if self.prob_model is None:
+            raise RuntimeError("Call build() before evaluating metrics.")
+        model_image = self.model_image(parameters)
+        valid = np.isfinite(self.data.likelihood_image) & np.isfinite(self.data.likelihood_noise) & (self.data.likelihood_noise > 0)
+        if self.data.likelihood_mask is not None:
+            valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
+        residual = (self.data.likelihood_image - model_image) / self.data.likelihood_noise
+        chi2 = float(np.sum(np.square(residual[valid])))
+        n_data = int(np.sum(valid))
+        n_free = int(sum(np.asarray(value).size for value in parameters.values()))
+        dof = max(n_data - n_free, 1)
+
+        # NumPyro evaluates the exact model likelihood, priors, and any
+        # registered factor penalties.  Observed sample sites are likelihoods.
+        from numpyro.infer.util import log_density
+
+        log_probability, trace = log_density(self.prob_model.model, (), {}, parameters)
+        log_probability_value = float(np.asarray(log_probability))
+        log_likelihood = 0.0
+        for site in trace.values():
+            if site.get("type") == "sample" and site.get("is_observed", False):
+                scale = site.get("scale", 1.0)
+                scale = 1.0 if scale is None else float(np.asarray(scale))
+                log_likelihood += scale * float(np.asarray(site["fn"].log_prob(site["value"])).sum())
+        log_prior_and_penalties = log_probability_value - log_likelihood
+        bic = n_free * np.log(max(n_data, 1)) - 2.0 * log_likelihood
+        return {
+            "log_likelihood": float(log_likelihood),
+            "log_probability": log_probability_value,
+            "log_prior_and_penalties": float(log_prior_and_penalties),
+            "chi2": chi2,
+            "reduced_chi2": float(chi2 / dof),
+            "bic": float(bic),
+            "n_data_pixels": n_data,
+            "n_free_parameters": n_free,
+            "degrees_of_freedom": int(dof),
+        }

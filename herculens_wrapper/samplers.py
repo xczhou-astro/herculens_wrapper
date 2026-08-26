@@ -146,6 +146,60 @@ def model_image_from_deterministics(prob_model, kwargs, deterministics=None):
     return lens_image.model(**kwargs)
 
 
+def evaluate_parameter_components(prob_model, params, *, rng_seed=0):
+    """Evaluate and cache image products for one constrained parameter set."""
+    kwargs, deterministics = kwargs_with_deterministics(
+        prob_model, params, rng_seed=rng_seed,
+    )
+    lens_image = getattr(prob_model, "lens_image", None)
+    if lens_image is None:
+        raise ValueError("prob_model does not expose lens_image for component evaluation.")
+    type_list = getattr(prob_model, "type_list", {})
+    total = np.asarray(model_image_from_deterministics(prob_model, kwargs, deterministics))
+    source = np.asarray(lens_image.model(
+        **kwargs, source_add=True, lens_light_add=False, point_source_add=False,
+    ))
+    if type_list.get("lens_light_type_list"):
+        lens_light = np.asarray(lens_image.model(
+            **kwargs, source_add=False, lens_light_add=True, point_source_add=False,
+        ))
+    else:
+        lens_light = np.zeros_like(total)
+    if type_list.get("point_source_type_list"):
+        point_source = np.asarray(lens_image.model(
+            **kwargs, source_add=False, lens_light_add=False, point_source_add=True,
+        ))
+        no_lens_light = np.asarray(lens_image.model(
+            **kwargs, source_add=True, lens_light_add=False, point_source_add=True,
+        ))
+    else:
+        point_source = np.zeros_like(total)
+        no_lens_light = source
+    components = {
+        "total": total,
+        "source": source,
+        "lens_light": lens_light,
+        "point_source": point_source,
+        "no_lens_light": no_lens_light,
+    }
+    derived = {
+        "kwargs": kwargs,
+        "deterministics": deterministics,
+        "components": components,
+        "model": total,
+        "lensed_source": source,
+        "lens_light": lens_light,
+        "point_source": point_source,
+    }
+    image_data = getattr(prob_model, "image_data", None)
+    if image_data is not None:
+        derived["data_minus_lens_light"] = np.asarray(image_data) - lens_light
+    source_kwargs = kwargs.get("kwargs_source", [])
+    if source_kwargs and isinstance(source_kwargs[0], dict) and "pixels" in source_kwargs[0]:
+        derived["source_plane"] = np.asarray(source_kwargs[0]["pixels"])
+    return derived
+
+
 def evaluate_mcmc_component_medians(
     prob_model,
     samples,
@@ -1104,8 +1158,11 @@ def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches
 
 
 def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
-    if init_params_path is None:
-        raise ValueError("HMC sampler requires a prior SVI run path (init_params_path) for warm-start.")
+    resume_checkpoint_path = os.path.join(getattr(args, 'save_path', '.'), 'hmc_checkpoint.pkl')
+    if init_params_path is None and not os.path.isfile(resume_checkpoint_path):
+        raise ValueError(
+            "HMC sampler requires a prior SVI run path (init_params_path) when starting a new chain."
+        )
         
     def _concatenate_batches(all_samples, num_chains):
         samples = {}
@@ -1450,12 +1507,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             )
         except ValueError:
             raise
-        except Exception as e:
-            print(f"[hmc] Failed to load checkpoint: {e}. Starting from scratch.")
-            all_samples = []
-            all_hmc_extra_fields = []
-            last_state = None
-            start_batch_idx = 0
+        except Exception as error:
+            raise RuntimeError(
+                f"Failed to resume the HMC checkpoint at {checkpoint_path}. "
+                "The existing chain was left unchanged."
+            ) from error
 
     elif os.path.isfile(samples_hdf5_path):
         # No checkpoint means this is intentionally a new chain, not a continuation.
@@ -1649,8 +1705,32 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     map_params = tree_median(param_samples)
 
     loglike_extra = {}
+    derived = {}
     _save_hmc_pixels_wn_summary(samples, save_path)
-    evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path)
+    source_summary = evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path)
+    if source_summary is not None:
+        source_plane, source_plane_lower, source_plane_upper = source_summary
+        derived.update({
+            'source_plane': source_plane,
+            'source_plane_lower': source_plane_lower,
+            'source_plane_upper': source_plane_upper,
+        })
+    try:
+        component_medians = evaluate_mcmc_component_medians(prob_model, samples)
+        derived['component_medians'] = component_medians
+        derived['components'] = component_medians
+        derived['model'] = component_medians['total']
+        derived['lensed_source'] = component_medians['source']
+        derived['lens_light'] = component_medians['lens_light']
+        derived['point_source'] = component_medians['point_source']
+        image_data = getattr(prob_model, 'image_data', None)
+        if image_data is not None:
+            derived['data_minus_lens_light'] = (
+                np.asarray(image_data) - component_medians['lens_light']
+            )
+        print('[hmc] Cached posterior-median component images for result output.')
+    except Exception as error:
+        print(f'[warning] Failed to cache HMC posterior component images: {error}')
 
     
     # Flatten unconstrained samples for trace analysis
@@ -1677,6 +1757,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     extra_fields = {
         'flat_samples': flat_samples,
         'hmc_sampler_health': hmc_extra_fields,
+        'derived': derived,
     }
     if loglike_extra:
         extra_fields.update({
