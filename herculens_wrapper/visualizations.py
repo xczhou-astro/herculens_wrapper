@@ -377,6 +377,7 @@ def plot_image_plane(
     else:
         model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
     residuals = (model_composite - image_data) / noise_map
+    chi2 = float(np.nansum(residuals ** 2))
 
 
     n_ps = len(ra_image_list)
@@ -421,7 +422,7 @@ def plot_image_plane(
     im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    ax[1, 2].set_title('Residuals (model - data) / noise')
+    ax[1, 2].set_title(f'Residuals (model - data) / noise ($\\chi^2$ = {chi2:.2f})')
     plt.colorbar(im5, ax=ax[1, 2], label='Standardized residual')
 
     for a in ax.ravel():
@@ -1278,6 +1279,7 @@ def plot_lens_light_subtracted_image(
         model_lens_light = np.zeros((ny, nx))
 
     subtracted = image_data - model_lens_light
+    chi2_subtracted = float(np.nansum((subtracted / noise_map) ** 2)) if noise_map is not None else None
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -1340,7 +1342,7 @@ def plot_lens_light_subtracted_image(
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-        ax[2].set_title('Data - Lens light (S/N)')
+        ax[2].set_title(f'Data - Lens light (S/N; $\\chi^2$ = {chi2_subtracted:.2f})')
         plt.colorbar(im2, ax=ax[2], label='Signal-to-noise')
     else:
         vmax_res = (
@@ -1408,12 +1410,13 @@ def plot_ring_model_comparison(
 
     image_minus_lens = np.asarray(image_data) - model_lens_light
     residual = (model_no_lens_light - image_minus_lens) / noise_map
+    chi2 = float(np.nansum(residual ** 2))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     panels = [
         (model_no_lens_light, 'Model without lens light', 'twilight'),
         (image_minus_lens, 'Image - lens light', 'twilight'),
-        (residual, 'Residuals', 'bwr'),
+        (residual, f'Residuals ($\\chi^2$ = {chi2:.2f})', 'bwr'),
     ]
 
     for idx, (panel, title, cmap) in enumerate(panels):
@@ -1807,20 +1810,22 @@ def _normalized_multipole_phase(phi_m, m):
 
 
 def lens_mass_ellipticity_summary(lens_image, kwargs_result):
-    """Return raw and human-readable values for every lens-mass component."""
+    """Return original and converted values for every lens-mass profile."""
     profile_types = list(getattr(lens_image.MassModel, 'profile_type_list', []))
-    components = []
+    profiles = []
     for index, kwargs_mass in enumerate(kwargs_result.get('kwargs_lens', [])):
         if not isinstance(kwargs_mass, dict):
             continue
         profile_type = str(profile_types[index]) if index < len(profile_types) else 'unknown'
-        component = {
+        converted = {}
+        profile = {
             'index': index,
-            'profile_type': profile_type,
-            'model_parameters': {
+            'profile': profile_type,
+            'original_parameters': {
                 key: _plain_mass_parameter(value) for key, value in kwargs_mass.items()
             },
-            'human_readable': {},
+            'converted_parameters': converted,
+            'meaning': {},
         }
 
         if {'e1', 'e2'}.issubset(kwargs_mass):
@@ -1833,25 +1838,18 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
             axis_ratio = None
             if ellipticity < 1.0:
                 axis_ratio = float((1.0 - ellipticity) / (1.0 + ellipticity))
-            shape = {
+            converted.update({
                 'ellipticity': ellipticity,
                 'axis_ratio_q': axis_ratio,
-                'position_angle_deg': pa_deg,
-                'position_angle_defined': bool(ellipticity > 0.0),
-                'meaning': (
-                    'q is the minor-to-major axis ratio. Position angle is measured '
-                    'counter-clockwise from the positive x axis and is equivalent modulo 180 deg.'
-                ),
-            }
-            component['human_readable']['elliptical_shape'] = shape
-            # Preserve the established flat keys for downstream readers.
-            component.update({
-                'e1': e1,
-                'e2': e2,
-                'ellipticity': ellipticity,
-                'axis_ratio': axis_ratio,
                 'PA_deg': pa_deg,
-                'PA_defined': bool(ellipticity > 0.0),
+            })
+            profile['meaning'].update({
+                'ellipticity': 'sqrt(e1^2 + e2^2).',
+                'axis_ratio_q': '(1 - ellipticity) / (1 + ellipticity); minor/major axis ratio.',
+                'PA_deg': (
+                    'Position angle measured counter-clockwise from the positive x axis; '
+                    'equivalent modulo 180 deg.'
+                ),
             })
 
         if {'gamma1', 'gamma2'}.issubset(kwargs_mass):
@@ -1859,26 +1857,21 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
             gamma2 = float(np.asarray(kwargs_mass['gamma2']))
             shear_strength = float(np.hypot(gamma1, gamma2))
             shear_pa_deg = float(np.degrees(0.5 * np.arctan2(gamma2, gamma1)))
-            shear = {
-                'strength_gamma_ext': shear_strength,
-                'position_angle_deg': shear_pa_deg,
-                'position_angle_defined': bool(shear_strength > 0.0),
-                'meaning': (
-                    'gamma_ext is the external-shear strength. Position angle is measured '
-                    'counter-clockwise from the positive x axis and is equivalent modulo 180 deg.'
+            converted.update({
+                'gamma_ext': shear_strength,
+                'PA_deg': shear_pa_deg,
+            })
+            profile['meaning'].update({
+                'gamma_ext': 'External-shear strength sqrt(gamma1^2 + gamma2^2).',
+                'PA_deg': (
+                    'External-shear position angle measured counter-clockwise from the positive '
+                    'x axis; equivalent modulo 180 deg.'
                 ),
-            }
-            component['human_readable']['external_shear'] = shear
-            component.update({
-                'shear_strength': shear_strength,
-                'shear_PA_deg': shear_pa_deg,
-                'shear_PA_defined': bool(shear_strength > 0.0),
             })
 
         if profile_type.upper() == 'MPPL':
             m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
             if m >= 1:
-                input_parameterization = None
                 coordinate_magnitude = None
                 if {'e_x', 'e_y'}.issubset(kwargs_mass):
                     e_x = float(np.asarray(kwargs_mass['e_x']))
@@ -1886,11 +1879,9 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                     coordinate_magnitude = float(np.hypot(e_x, e_y))
                     a_m = float(2.0 * coordinate_magnitude / (1.0 + coordinate_magnitude))
                     phi_m = float(np.arctan2(e_y, e_x) / m)
-                    input_parameterization = 'e_x/e_y'
                 elif {'a_m', 'phi_m'}.issubset(kwargs_mass):
                     a_m = float(np.asarray(kwargs_mass['a_m']))
                     phi_m = float(np.asarray(kwargs_mass['phi_m']))
-                    input_parameterization = 'a_m/phi_m'
                 else:
                     a_m = None
                     phi_m = None
@@ -1898,60 +1889,35 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                 if a_m is not None and phi_m is not None:
                     phi_m_normalized = _normalized_multipole_phase(phi_m, m)
                     phase_period_deg = 360.0 / m
-                    multipole = {
-                        'order_m': m,
-                        'input_parameterization': input_parameterization,
-                        'e_coordinate_magnitude': coordinate_magnitude,
-                        'amplitude': {
-                            'symbol': f'a_{m} (A_M{m})',
-                            'value': a_m,
-                            'meaning': (
-                                'Dimensionless strength of the order-m perturbation. It is the '
-                                f'Enzi-style A_M{m} when the MPPL reference scale b is linked to '
-                                'the companion EPL Einstein radius.'
-                            ),
-                        },
-                        'phase': {
-                            'symbol': f'phi_{m}',
-                            'radians': phi_m_normalized,
-                            'degrees': float(np.degrees(phi_m_normalized)),
-                            'defined': bool(abs(a_m) > 0.0),
-                            'equivalent_orientation_period_deg': phase_period_deg,
-                            'meaning': (
-                                'Orientation measured counter-clockwise from the positive x axis '
-                                f'in cos({m} * (theta - phi_{m})); orientations separated by '
-                                f'{phase_period_deg:g} deg are equivalent.'
-                            ),
-                        },
-                    }
-                    component['human_readable']['multipole'] = multipole
-                    component.update({
-                        'multipole_order_m': m,
-                        'a_m': a_m,
-                        'A_Mn': a_m,
+                    if coordinate_magnitude is not None:
+                        converted['e_magnitude'] = coordinate_magnitude
+                        profile['meaning']['e_magnitude'] = (
+                            'MPPL coordinate magnitude sqrt(e_x^2 + e_y^2).'
+                        )
+                    amplitude_key = f'a_{m} (A_M{m})'
+                    converted.update({
+                        amplitude_key: a_m,
                         'phi_m_rad': phi_m_normalized,
                         'phi_m_deg': float(np.degrees(phi_m_normalized)),
-                        'phi_equivalence_period_deg': phase_period_deg,
+                        'orientation_period_deg': phase_period_deg,
                     })
-        components.append(component)
+                    profile['meaning'].update({
+                        amplitude_key: (
+                            'MPPL perturbation strength 2e/(1+e). It is A_Mn when b is linked '
+                            'to the companion EPL Einstein radius.'
+                        ),
+                        'phi_m_rad': (
+                            'MPPL orientation in radians in cos[m(theta-phi_m)], measured '
+                            'counter-clockwise from the positive x axis.'
+                        ),
+                        'phi_m_deg': 'The same MPPL orientation expressed in degrees.',
+                        'orientation_period_deg': (
+                            'Equivalent MPPL orientations repeat after this angle (360/m deg).'
+                        ),
+                    })
+        profiles.append(profile)
 
-    return {
-        'description': (
-            'Human-readable lens-mass parameters evaluated from the final constrained model values.'
-        ),
-        'ellipticity_definition': 'ellipticity = sqrt(e1^2 + e2^2)',
-        'axis_ratio_definition': 'q = (1 - ellipticity) / (1 + ellipticity)',
-        'position_angle_definition': (
-            'PA_deg = 0.5 * atan2(e2, e1), in degrees, measured counter-clockwise '
-            'from the positive x axis and normalized to [-90, 90).'
-        ),
-        'multipole_definition': (
-            'For MPPL e_x/e_y inputs: e = sqrt(e_x^2 + e_y^2), '
-            'a_m = 2e/(1+e), and phi_m = atan2(e_y,e_x)/m. '
-            'The perturbation is proportional to a_m cos[m(theta-phi_m)].'
-        ),
-        'components': components,
-    }
+    return {'profiles': profiles}
 
 
 def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
@@ -1961,86 +1927,81 @@ def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
     with open(output_path, 'w') as f:
         json.dump(summary, f, indent=4)
 
-    components = summary['components']
-    if not components:
+    profiles = summary['profiles']
+    if not profiles:
         print('[lens_mass_parameters] No lens-mass components to report.')
         return summary
 
-    for component in components:
-        name = component.get('profile_type', 'lens_mass')
-        label = f"{name}[{component['index']}]"
-        shape = component.get('human_readable', {}).get('elliptical_shape')
-        shear = component.get('human_readable', {}).get('external_shear')
-        multipole = component.get('human_readable', {}).get('multipole')
-        if shape is not None:
-            q = shape['axis_ratio_q']
+    for profile in profiles:
+        label = f"{profile['profile']}[{profile['index']}]"
+        converted = profile['converted_parameters']
+        if 'ellipticity' in converted:
+            q = converted['axis_ratio_q']
             q_text = 'undefined' if q is None else f'{q:.5f}'
-            pa_text = ('undefined (circular)' if not shape['position_angle_defined']
-                       else f"{shape['position_angle_deg']:.3f} deg")
             print(
-                f"[lens_mass_parameters] {label}: e={shape['ellipticity']:.5f}, "
-                f"q={q_text}, PA={pa_text}"
+                f"[lens_mass_parameters] {label}: e={converted['ellipticity']:.5f}, "
+                f"q={q_text}, PA={converted['PA_deg']:.3f} deg"
             )
-        if shear is not None:
-            shear_pa_text = ('undefined (zero shear)' if not shear['position_angle_defined']
-                             else f"{shear['position_angle_deg']:.3f} deg")
+        elif 'gamma_ext' in converted:
             print(
-                f"[lens_mass_parameters] {label}: gamma_ext={shear['strength_gamma_ext']:.6g}, "
-                f"PA={shear_pa_text}"
+                f"[lens_mass_parameters] {label}: gamma_ext={converted['gamma_ext']:.6g}, "
+                f"PA={converted['PA_deg']:.3f} deg"
             )
-        if multipole is not None:
-            amplitude = multipole['amplitude']
-            phase = multipole['phase']
-            phase_text = ('undefined (zero amplitude)' if not phase['defined']
-                          else f"{phase['degrees']:.3f} deg")
-            print(
-                f"[lens_mass_parameters] {label}: m={multipole['order_m']}, "
-                f"{amplitude['symbol']}={amplitude['value']:.6g}, "
-                f"{phase['symbol']}={phase_text} "
-                f"(equivalent modulo {phase['equivalent_orientation_period_deg']:.3f} deg)"
-            )
-        if shape is None and shear is None and multipole is None:
-            print(f"[lens_mass_parameters] {label}: {component['model_parameters']}")
+        else:
+            amplitude_key = next((key for key in converted if key.startswith('a_') and '(A_M' in key), None)
+            if amplitude_key is not None:
+                m = profile['original_parameters']['m']
+                phase_text = ('undefined (zero amplitude)' if converted[amplitude_key] == 0
+                              else f"{converted['phi_m_deg']:.3f} deg")
+                print(
+                    f"[lens_mass_parameters] {label}: m={m}, "
+                    f"{amplitude_key}={converted[amplitude_key]:.6g}, phi_m={phase_text} "
+                    f"(period {converted['orientation_period_deg']:.3f} deg)"
+                )
+            elif converted:
+                print(f"[lens_mass_parameters] {label}: {converted}")
+            else:
+                print(f"[lens_mass_parameters] {label}: {profile['original_parameters']}")
     print(f'[lens_mass_parameters] Saved {output_path}')
     return summary
 
 
 def _mass_ellipticity_annotation(summary):
-    components = summary.get('components', [])
-    if not components:
+    profiles = summary.get('profiles', [])
+    if not profiles:
         return None
 
     lines = ['Human-readable lens-mass parameters:']
-    for component in components:
-        name = component.get('profile_type', 'mass')
-        label = f"{name}[{component['index']}]"
-        shape = component.get('human_readable', {}).get('elliptical_shape')
-        shear = component.get('human_readable', {}).get('external_shear')
-        multipole = component.get('human_readable', {}).get('multipole')
-        if shape is not None:
-            pa_text = ('PA undefined (circular)' if not shape['position_angle_defined']
-                       else f"PA={shape['position_angle_deg']:.2f} deg")
-            q = shape['axis_ratio_q']
+    has_multipole = False
+    for profile in profiles:
+        label = f"{profile['profile']}[{profile['index']}]"
+        converted = profile['converted_parameters']
+        if 'ellipticity' in converted:
+            q = converted['axis_ratio_q']
             q_text = 'q undefined' if q is None else f'q={q:.3f}'
-            lines.append(f"{label}: e={shape['ellipticity']:.3f}, {q_text}, {pa_text}")
-        if shear is not None:
-            shear_pa_text = ('PA undefined (zero shear)' if not shear['position_angle_defined']
-                             else f"PA={shear['position_angle_deg']:.2f} deg")
             lines.append(
-                f"{label}: gamma_ext={shear['strength_gamma_ext']:.4g}, {shear_pa_text}"
+                f"{label}: e={converted['ellipticity']:.3f}, {q_text}, "
+                f"PA={converted['PA_deg']:.2f} deg"
             )
-        if multipole is not None:
-            amplitude = multipole['amplitude']
-            phase = multipole['phase']
-            phase_text = ('undefined' if not phase['defined'] else f"{phase['degrees']:.2f} deg")
+        elif 'gamma_ext' in converted:
             lines.append(
-                f"{label}: m={multipole['order_m']}, {amplitude['symbol']}={amplitude['value']:.4g}, "
-                f"{phase['symbol']}={phase_text} "
-                f"(period {phase['equivalent_orientation_period_deg']:.1f} deg)"
+                f"{label}: gamma_ext={converted['gamma_ext']:.4g}, "
+                f"PA={converted['PA_deg']:.2f} deg"
+            )
+        else:
+            amplitude_key = next((key for key in converted if key.startswith('a_') and '(A_M' in key), None)
+            if amplitude_key is None:
+                continue
+            has_multipole = True
+            phase_text = ('undefined' if converted[amplitude_key] == 0
+                          else f"{converted['phi_m_deg']:.2f} deg")
+            lines.append(
+                f"{label}: {amplitude_key}={converted[amplitude_key]:.4g}, "
+                f"phi_m={phase_text} (period {converted['orientation_period_deg']:.1f} deg)"
             )
     if len(lines) == 1:
         return None
-    if any(component.get('human_readable', {}).get('multipole') for component in components):
+    if has_multipole:
         lines.append('MPPL: a_m is perturbation strength; phi_m is CCW orientation from +x.')
     return '\n'.join(lines)
 
