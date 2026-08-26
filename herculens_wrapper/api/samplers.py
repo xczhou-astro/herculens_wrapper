@@ -301,6 +301,20 @@ class FitResult:
         """Return cached-parameter stellar, dark-matter, and total κ maps."""
         return self._require_model().mass_component_convergence(self.parameters)
 
+    def enclosed_mass(self, geometry, *, radius_arcsec: float | None = None,
+                      center: tuple[float, float] | None = None, grid_size: int = 400,
+                      save_path: str | Path | None = None) -> dict[str, Any]:
+        """Return the physical projected mass within a circular lens aperture."""
+        from .physics import LensGeometry, enclosed_lensing_mass
+
+        if not isinstance(geometry, LensGeometry):
+            raise TypeError("geometry must be a LensGeometry instance.")
+        return enclosed_lensing_mass(
+            self._require_model(), self.parameters, geometry,
+            radius_arcsec=radius_arcsec, center=center, grid_size=grid_size,
+            save_path=save_path,
+        )
+
     def plot_mass_decomposition(self, *, save_path: str | Path | None = None,
                                 residual_vis_max: float = 0.0) -> Path:
         """Plot the stellar, dark-matter, and total convergence components."""

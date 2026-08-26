@@ -45,6 +45,11 @@ class SingleBandModel:
         self.result: FitResult | None = None
         self.initial_parameters: Mapping[str, Any] | None = None
         self.initialization_path: Path | None = None
+        # HMC is deliberately loaded separately from a point-estimate run:
+        # the archive may be large, and posterior image products are only
+        # evaluated when get_results() is requested.
+        self._loaded_hmc_samples: Mapping[str, Any] | None = None
+        self._loaded_hmc_details: dict[str, Any] | None = None
         self._build()
 
     def with_fixed(self, **selections: Any) -> "SingleBandModel":
@@ -98,6 +103,8 @@ class SingleBandModel:
         :meth:`load`, so loading a previous run does not immediately perform
         an expensive forward evaluation.
         """
+        if parameters is None and self._loaded_hmc_samples is not None:
+            return self._get_loaded_hmc_results(random_seed=random_seed)
         if parameters is None:
             if self.initial_parameters is not None:
                 parameters = self.initial_parameters
@@ -113,6 +120,137 @@ class SingleBandModel:
         self.result = FitResult(
             parameters, {"loaded_from": str(self.initialization_path)},
             random_seed=random_seed, derived=derived, _model=self,
+        )
+        return self.result
+
+    def load_hmc(self, save_path: str | Path) -> None:
+        """Load an on-disk HMC posterior into this explicitly declared model.
+
+        ``save_path`` must be the directory containing ``hmc_samples.h5``.
+        This method validates the model fingerprint when an HMC manifest is
+        present, reads only the posterior samples and sampler-health fields,
+        and does *not* evaluate model images.  Call :meth:`get_results` to
+        form the posterior-median result and cache its derived products.
+
+        The original ``SingleBandData`` and ``LensProfileCollection`` must
+        still be declared by the caller, exactly as for :meth:`load`.
+        """
+        output = Path(save_path).expanduser()
+        samples_path = output / "hmc_samples.h5"
+        if not samples_path.is_file():
+            raise FileNotFoundError(
+                f"No HMC posterior found at {samples_path}. Supply the HMC run directory."
+            )
+
+        manifest_path = output / "hmc_manifest.json"
+        if manifest_path.is_file():
+            stored = json.loads(manifest_path.read_text())
+            try:
+                expected = self._hmc_manifest(SamplerConfig.hmc(
+                    num_chains=int(stored["num_chains"]),
+                    checkpoint_interval=int(stored["checkpoint_interval"]),
+                ))
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"Invalid HMC manifest: {manifest_path}") from error
+            if stored.get("model_fingerprint") != expected["model_fingerprint"]:
+                raise ValueError(
+                    "The declared data, profiles, or numerics do not match this HMC posterior. "
+                    "Recreate the original SingleBandModel before loading it."
+                )
+
+        from ..samplers import _load_hmc_samples_hdf5
+        samples, sampler_health = _load_hmc_samples_hdf5(str(samples_path))
+        if not samples:
+            raise ValueError(f"The HMC posterior at {samples_path} contains no samples.")
+        lengths = {np.asarray(values).shape[0] for values in samples.values()}
+        if len(lengths) != 1 or next(iter(lengths)) == 0:
+            raise ValueError("HMC posterior sample arrays have inconsistent or empty lengths.")
+        try:
+            import h5py
+            with h5py.File(samples_path, "r") as handle:
+                num_chains = int(handle.attrs.get("num_chains", 1))
+        except Exception as error:
+            raise RuntimeError(f"Could not read HMC archive metadata from {samples_path}.") from error
+        if num_chains < 1 or next(iter(lengths)) % num_chains:
+            raise ValueError("HMC archive has an invalid number of chains or sample layout.")
+
+        self.initialization_path = output
+        self._loaded_hmc_samples = samples
+        self._loaded_hmc_details = {
+            "loaded_from": str(output),
+            "hmc_sampler_health": sampler_health,
+            "num_chains_hmc_numpyro": num_chains,
+            "num_samples_per_chain": next(iter(lengths)) // num_chains,
+        }
+        self.initial_parameters = None
+        self.result = None
+
+    def _get_loaded_hmc_results(self, *, random_seed: int) -> FitResult:
+        """Create posterior-median cached products from :meth:`load_hmc`."""
+        from ..samplers import (
+            evaluate_mcmc_component_medians,
+            evaluate_mcmc_source_pixels_summary,
+            get_active_sample_sites,
+            kwargs_with_deterministics,
+            tree_median,
+        )
+
+        samples = self._loaded_hmc_samples
+        assert samples is not None  # narrowed by get_results()
+        active_sites = get_active_sample_sites(self.prob_model, rng_seed=random_seed)
+        missing = sorted(set(active_sites) - set(samples))
+        if missing:
+            raise ValueError(
+                "The HMC archive is incompatible with this model; missing sample sites: "
+                f"{missing}"
+            )
+        parameters = tree_median({name: samples[name] for name in active_sites})
+        components = evaluate_mcmc_component_medians(
+            self.prob_model, samples, active_sites=active_sites,
+        )
+        source_summary = evaluate_mcmc_source_pixels_summary(
+            self.prob_model, samples, save_path=None, save_npy=False,
+        )
+        kwargs, deterministics = kwargs_with_deterministics(
+            self.prob_model, parameters, rng_seed=random_seed,
+            active_sites=active_sites,
+        )
+        derived: dict[str, Any] = {
+            "kwargs": kwargs,
+            "deterministics": deterministics,
+            "components": components,
+            "component_medians": components,
+            "model": components["total"],
+            "lensed_source": components["source"],
+            "lens_light": components["lens_light"],
+            "point_source": components["point_source"],
+        }
+        if self.data.likelihood_image is not None:
+            derived["data_minus_lens_light"] = (
+                np.asarray(self.data.likelihood_image) - components["lens_light"]
+            )
+        if source_summary is not None:
+            median, lower, upper = source_summary
+            derived.update({
+                "source_plane": median,
+                "source_plane_lower": lower,
+                "source_plane_upper": upper,
+            })
+            # Source-plane visualizations should use the posterior median of
+            # the reconstructed physical pixels, not pixels reconstructed
+            # from the median Fourier coefficients.
+            if kwargs.get("kwargs_source"):
+                kwargs = deepcopy(kwargs)
+                kwargs["kwargs_source"][0]["pixels"] = median
+                derived["kwargs"] = kwargs
+
+        details = dict(self._loaded_hmc_details or {})
+        details["derived"] = derived
+        self.definition.update_values(parameters)
+        self.initial_parameters = parameters
+        self.result = FitResult(
+            parameters, details, samples, random_seed=random_seed,
+            derived=derived, _model=self,
         )
         return self.result
 
