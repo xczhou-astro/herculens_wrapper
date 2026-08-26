@@ -797,6 +797,7 @@ def run_svi(
     learning_rate=None,
     init_scale=None,
     loss_kind=None,
+    num_particles=None,
 ):
     if max_iterations is None:
         max_iterations = int(getattr(args, 'max_iterations_svi', 10000))
@@ -806,6 +807,10 @@ def run_svi(
         init_scale = float(getattr(args, 'init_scale_svi', 0.1))
     if loss_kind is None:
         loss_kind = getattr(args, 'loss_kind_svi', 'trace_elbo')
+    if num_particles is None:
+        num_particles = int(getattr(args, 'num_particles_svi', 10))
+    if num_particles < 1:
+        raise ValueError("num_particles_svi must be at least 1.")
 
     def init_to_value_or_defer(site, values=None, defer=infer.init_to_median(num_samples=25)):
         if values is None:
@@ -840,15 +845,15 @@ def run_svi(
     optim = optax.adabelief(learning_rate=scheduler)
 
     if loss_kind == 'trace_meanfield_elbo':
-        loss = infer.TraceMeanField_ELBO()
+        loss = infer.TraceMeanField_ELBO(num_particles=num_particles)
     elif loss_kind == 'trace_elbo':
-        loss = infer.Trace_ELBO(num_particles=10)
+        loss = infer.Trace_ELBO(num_particles=num_particles)
     else:
         raise ValueError(f"Unknown SVI loss_kind: {loss_kind}")
 
     svi = infer.SVI(prob_model.model, guide, optim, loss)
     
-    print(f"[svi] Running NumPyro SVI (max_iterations={max_iterations}, loss={loss_kind})...")
+    print(f"[svi] Running NumPyro SVI (max_iterations={max_iterations}, loss={loss_kind}, num_particles={num_particles})...")
     result = svi.run(
         jax.random.PRNGKey(args.random_seed),
         max_iterations,

@@ -27,6 +27,8 @@ power_spectrum_source_model*
 
 configs
 *.md
+!docs/
+!docs/single_band_api.md
 
 graphify-out/
 mass-model-playground/
@@ -34,3 +36,6 @@ utils/visualize_dpie_multipole.py
 
 .vscode
 results
+
+api/
+docs/
