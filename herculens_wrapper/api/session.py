@@ -90,6 +90,32 @@ class SingleBandModel:
         self.result = None
         return parameters
 
+    def export_wrapper_config(
+        self,
+        path: str | Path,
+        sampler: SamplerConfig,
+        *,
+        save_path: str | Path,
+        n_runs: int = 1,
+        gpus: str | int | None = None,
+        init_params_path: str | Path | None = None,
+        residual_vis_max: float = 0.0,
+        wrapper_options: Mapping[str, Any] | None = None,
+    ) -> Path:
+        """Export this API declaration as a runnable legacy-wrapper config.
+
+        ``path`` may be ``config.py`` or a directory.  The model's data must
+        originate from :meth:`SingleBandData.from_fits`, because the wrapper
+        reads FITS paths rather than in-memory arrays.
+        """
+        from .config_export import export_wrapper_config
+
+        return export_wrapper_config(
+            self, path, sampler, save_path=save_path, n_runs=n_runs,
+            gpus=gpus, init_params_path=init_params_path,
+            residual_vis_max=residual_vis_max, wrapper_options=wrapper_options,
+        )
+
     def get_results(
         self,
         parameters: Mapping[str, Any] | None = None,
