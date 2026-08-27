@@ -113,15 +113,21 @@ class SingleBandData:
             "noise": Path(noise_path).expanduser(),
             "psf": Path(psf_path).expanduser(),
         }
+        if source_arc_mask_path is not None:
+            instance._input_paths["source_arc_mask"] = Path(source_arc_mask_path).expanduser()
+        if contaminate_mask_path is not None:
+            instance._input_paths["contaminate_mask"] = Path(contaminate_mask_path).expanduser()
         return instance
 
     def save(self, save_path: str | Path) -> dict[str, Path]:
-        """Save the processed image, noise map, and PSF as FITS files.
+        """Save processed data and any active masks as FITS files.
 
         Original FITS basenames are retained when the data came from
         :meth:`from_fits`; otherwise ``image.fits``, ``noise.fits``, and
-        ``psf.fits`` are used.  The saved image includes API preprocessing
-        such as cropping and background subtraction.
+        ``psf.fits`` are used. The saved image includes API preprocessing
+        such as cropping and background subtraction. Source-arc and
+        contamination masks are also saved when configured; masks generated
+        from ``source_arc_mask_radius`` use ``source_arc_mask.fits``.
         """
         from astropy.io import fits
 
@@ -135,6 +141,24 @@ class SingleBandData:
         output = {key: directory / name for key, name in names.items()}
         for key, filename in output.items():
             fits.writeto(filename, np.asarray(arrays[key]), overwrite=True)
+        if self.source_arc_mask is not None:
+            source_name = self._input_paths.get(
+                "source_arc_mask", Path("source_arc_mask.fits"),
+            ).name
+            output["source_arc_mask"] = directory / source_name
+            fits.writeto(
+                output["source_arc_mask"], np.asarray(self.source_arc_mask, dtype=np.uint8),
+                overwrite=True,
+            )
+        if self.contaminate_mask is not None:
+            contaminate_name = self._input_paths.get(
+                "contaminate_mask", Path("contaminate_mask.fits"),
+            ).name
+            output["contaminate_mask"] = directory / contaminate_name
+            fits.writeto(
+                output["contaminate_mask"], np.asarray(self.contaminate_mask, dtype=np.uint8),
+                overwrite=True,
+            )
         return output
 
     def _load_mask(self, path: str, role: str, *, binary: bool) -> np.ndarray:
