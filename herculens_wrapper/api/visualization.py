@@ -38,23 +38,25 @@ def _extent(shape: tuple[int, int], pixel_scale: float) -> list[float]:
 
 
 def _normalization(values: np.ndarray, scale: PlotScale, *, signed: bool):
+    """Return the legacy-wrapper normalization for an image-like panel.
+
+    ``signed`` remains part of the public internal call signature, but log
+    plots intentionally follow ``visualizations._norm_from_plot_scale``:
+    negative values are masked by ``LogNorm`` and do not turn the panel into
+    a symmetric-log plot.
+    """
     if scale == "linear":
         return None
-    finite = np.asarray(values, dtype=float)[np.isfinite(values)]
-    if finite.size == 0:
-        return None
-    if signed and np.any(finite < 0):
-        magnitude = np.abs(finite)
-        nonzero = magnitude[magnitude > 0]
-        if nonzero.size == 0:
-            return None
-        linthresh = max(float(np.percentile(nonzero, 5)), float(np.max(nonzero)) * 1e-6)
-        return SymLogNorm(linthresh=linthresh, vmin=-float(np.max(nonzero)), vmax=float(np.max(nonzero)))
-    positive = finite[finite > 0]
+    finite = np.asarray(values, dtype=float)
+    positive = finite[np.isfinite(finite) & (finite > 0)]
     if positive.size == 0:
         return None
-    vmin = max(float(np.percentile(positive, 1)), float(np.max(positive)) * 1e-6)
-    return LogNorm(vmin=vmin, vmax=float(np.max(positive)))
+    vmin, vmax = float(np.percentile(positive, 1.0)), float(np.percentile(positive, 99.0))
+    if not np.isfinite(vmin) or not np.isfinite(vmax):
+        return None
+    vmax = max(vmax, vmin * 10.0)
+    vmin = max(vmin, vmax * 1e-3)
+    return LogNorm(vmin=vmin, vmax=vmax)
 
 
 def plot_single_band_data(
@@ -66,8 +68,8 @@ def plot_single_band_data(
 ):
     """Plot image, noise, signal-to-noise, and PSF, returning ``(figure, axes)``.
 
-    ``scale='log'`` uses logarithmic normalization for positive arrays and a
-    symmetric-log normalization when an image contains negative values.
+    ``scale='log'`` uses the same percentile normalization as the legacy
+    wrapper, including its symmetric-log S/N panel.
     """
     if scale not in ("linear", "log"):
         raise ValueError("scale must be either 'linear' or 'log'.")
@@ -89,7 +91,13 @@ def plot_single_band_data(
         (axes[1, 1], data.psf, "PSF kernel", "twilight", False, _extent(data.psf.shape, data.pixel_scale), "PSF value"),
     )
     for axis, image, title, cmap, signed, extent, colorbar_label in panels:
-        norm = _normalization(image, scale, signed=signed)
+        if title == "Signal-to-noise" and scale == "log":
+            norm = SymLogNorm(
+                linthresh=1.0, linscale=1.0, vmin=-snr_limit,
+                vmax=snr_limit, base=10,
+            )
+        else:
+            norm = _normalization(image, scale, signed=signed)
         kwargs = {"norm": norm}
         if title == "Signal-to-noise" and scale == "linear":
             kwargs.update(vmin=-snr_limit, vmax=snr_limit)
