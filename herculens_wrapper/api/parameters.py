@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
@@ -47,13 +49,20 @@ class Parameter:
 class Profile:
     """Profile with parameter-object access, e.g. ``epl.theta_E.prior = ...``."""
 
-    _internal_names = frozenset({"profile_type", "_specifications", "_parameters"})
+    _internal_names = frozenset({
+        "profile_type", "_specifications", "_parameters", "_independent_by_band",
+        "_initialization",
+    })
 
     def __init__(self, profile_type: str, *, prior: Mapping[str, Any] | None = None,
                  value: Mapping[str, Any] | None = None, **initial_values: Any) -> None:
         object.__setattr__(self, "profile_type", str(profile_type))
         object.__setattr__(self, "_specifications", {})
         object.__setattr__(self, "_parameters", {})
+        object.__setattr__(self, "_independent_by_band", {})
+        # This is only a declaration.  File I/O and numerical initialization
+        # remain the responsibility of SingleBandModel.initialize().
+        object.__setattr__(self, "_initialization", None)
         for name, item in dict(prior or {}).items(): self.parameter(name).prior = item
         for name, item in {**dict(value or {}), **initial_values}.items(): self.parameter(name).value = item
 
@@ -93,6 +102,72 @@ class Profile:
     def set_value(self, **values: Any) -> "Profile":
         for name, item in values.items(): self.parameter(name).value = item
         return self
+
+    def initialize_from(self, path: str | Path, *, component: str) -> "Profile":
+        """Declare a saved component whose values should be fixed at model initialization.
+
+        ``path`` must explicitly name a ``kwargs_result.json`` file.  The
+        profile itself deliberately does not read that file: its enclosing
+        model resolves the declaration during :meth:`initialize`, validates
+        the component and profile index, and rebuilds the inference model so
+        these parameters are not sampled.
+        """
+        component = str(component)
+        allowed = {"lens_mass", "lens_light", "source_light", "point_source"}
+        if component not in allowed:
+            raise ValueError(f"component must be one of {sorted(allowed)}, got {component!r}.")
+        file_path = Path(path).expanduser()
+        if file_path.name != "kwargs_result.json":
+            raise ValueError(
+                "initialize_from() requires the explicit kwargs_result.json file, "
+                f"got {str(file_path)!r}."
+            )
+        self._initialization = {"path": str(file_path), "component": component, "applied": False}
+        return self
+
+    def clear_initialization(self) -> "Profile":
+        """Remove a previously declared file-based initialization source."""
+        self._initialization = None
+        return self
+
+    def set_independent(
+        self, band: str | Mapping[str, Mapping[str, Any]], parameter: str | None = None,
+        prior: Any = None,
+    ) -> "Profile":
+        """Make one mass parameter independent in a named multiband image.
+
+        If ``prior`` is omitted, the profile's ordinary prior is copied. A
+        batch declaration may be supplied as
+        ``{'F277W': {'center_x': [...], 'center_y': [...]}}``. The
+        multiband backend currently supports independent ``center_x`` and
+        ``center_y`` only; validation occurs when building that model.
+        """
+        if isinstance(band, Mapping):
+            if parameter is not None or prior is not None:
+                raise TypeError("Batch set_independent() accepts only one band-to-parameters mapping.")
+            for band_name, parameters in band.items():
+                if not isinstance(parameters, Mapping):
+                    raise TypeError(f"Independent parameters for {band_name!r} must be a dictionary.")
+                for name, band_prior in parameters.items():
+                    self.set_independent(str(band_name), str(name), band_prior)
+            return self
+        if not isinstance(band, str) or not band:
+            raise ValueError("band must be a non-empty string.")
+        if parameter is None:
+            raise TypeError("parameter is required for a single-band set_independent() call.")
+        if parameter not in self._parameters:
+            raise KeyError(f"{self.profile_type} has no registered parameter {parameter!r}.")
+        if prior is None:
+            prior = self.parameter(parameter).prior
+        if prior is None:
+            raise ValueError(f"Provide a prior for independent parameter {parameter!r}.")
+        self._independent_by_band.setdefault(band, {})[parameter] = deepcopy(prior)
+        return self
+
+    @property
+    def independent_parameters(self) -> dict[str, dict[str, Any]]:
+        """Band-specific prior overrides declared by :meth:`set_independent`."""
+        return deepcopy(self._independent_by_band)
 
     @classmethod
     def from_values(cls, profile_type: str, values: Mapping[str, Any]) -> "Profile":
@@ -142,6 +217,16 @@ class ProfileCollection(Sequence[Profile]):
     def priors(self) -> list[dict[str, Any]]:
         """Prior definitions for every profile in order."""
         return [profile.priors for profile in self.profiles]
+
+    def set_independent(
+        self, band: str | Mapping[str, Mapping[str, Any]], parameter: str | None = None,
+        prior: Any = None, *, profile_index: int = 0,
+    ) -> "ProfileCollection":
+        """Declare one parameter independent for ``band`` on a selected profile."""
+        if not isinstance(profile_index, int) or not 0 <= profile_index < len(self):
+            raise IndexError(f"profile_index={profile_index!r} is invalid.")
+        self[profile_index].set_independent(band, parameter, prior)
+        return self
 
 
 class MassProfile(Profile):
@@ -340,5 +425,69 @@ class PixelatedSource(LightProfile):
         if prior["prior_type"] not in {"matern", "wavelet_sparsity", "wavelet_penalty"}:
             raise ValueError("pixelated_prior['prior_type'] must be 'matern', 'wavelet_sparsity', or 'wavelet_penalty'.")
         super().__init__("PIXELATED", prior={"pixel_grid": grid, "pixelated_prior": prior})
+
+
+class PixelatedLensLight(LightProfile):
+    """Image-plane pixelated lens light with a positive Matérn GP prior.
+
+    ``scale_factor=1`` uses precisely the data image grid.  Values below one
+    produce a finer grid; values above one produce a coarser grid covering the
+    same image-plane footprint.  Unlike :class:`PixelatedSource`, this class
+    deliberately exposes only the Matérn prior used for lens-light fitting.
+    """
+
+    _prior_defaults = {
+        "k_zero": 0.0,
+        "n_value_low": 1e-4,
+        "n_value_high": 100.0,
+        "sigma_low": 1e-5,
+        "sigma_high": 10.0,
+        "rho_low": None,
+        "rho_high": None,
+        "positive": True,
+    }
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        *,
+        scale_factor: float = 1.0,
+        pixel_interpol: str = "fast_bilinear",
+        matern_prior: Mapping[str, Any] | None = None,
+    ) -> None:
+        if not np.isfinite(scale_factor) or float(scale_factor) <= 0:
+            raise ValueError("scale_factor must be a finite positive number.")
+        prior = {**self._prior_defaults, **dict(matern_prior or {})}
+        unsupported = set(prior) - set(self._prior_defaults) - {"n_value"}
+        if unsupported:
+            raise ValueError(
+                "PixelatedLensLight only supports Matérn settings; unsupported "
+                f"key(s): {sorted(unsupported)}."
+            )
+        if prior.get("prior_type", "matern") != "matern":
+            raise ValueError("PixelatedLensLight always uses prior_type='matern'.")
+        # Settings are intentionally not Profile Parameters: they configure
+        # the grid/prior and must never enter the generic light sampler.
+        super().__init__("PIXELATED", prior={})
+        object.__setattr__(self, "_pixel_grid", {
+            "pixel_scale_factor": float(scale_factor),
+            "pixel_interpol": str(pixel_interpol),
+        })
+        object.__setattr__(self, "_pixelated_prior", prior)
+
+    @property
+    def pixel_grid(self) -> dict[str, Any]:
+        return deepcopy(self._pixel_grid)
+
+    @property
+    def pixelated_prior(self) -> dict[str, Any]:
+        return deepcopy(self._pixelated_prior)
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        """Backend settings; neither entry represents a scalar parameter."""
+        return {"pixel_grid": self.pixel_grid, "pixelated_prior": self.pixelated_prior}
 
 class PointSourceProfile(Profile): pass

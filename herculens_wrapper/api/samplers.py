@@ -413,6 +413,7 @@ class FitResult:
             model.num_sampling_parameters, metrics["log_likelihood"],
             fit_dof_and_reduced_chi2,
             num_params_free=metrics["n_free_parameters"],
+            num_params_physical=metrics["n_physical_parameters"],
             mask_bool=model.data.likelihood_mask,
         )
         files: dict[str, Path] = {
@@ -446,6 +447,7 @@ class FitResult:
                     sigma_kwargs, str(directory), type_list,
                     pixels_filename="kwargs_source_pixels_sigma.npy",
                     pixels_wn_filename="kwargs_source_pixels_wn_sigma.npy",
+                    lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
                 )
                 with (directory / "kwargs_sigma.json").open("w") as stream:
                     json.dump(sigma_json, stream, indent=4, default=json_serializer)
@@ -538,7 +540,7 @@ def _write_parameter_shifts(directory: Path, kwargs: Mapping[str, Any], type_lis
 
 
 @dataclass
-class ResultsCombination:
+class SingleBandResultsCombination:
     """Comparison helper for repeated API fits of the same single-band model."""
 
     results: list[FitResult]

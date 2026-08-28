@@ -39,8 +39,12 @@ def _patched_surface_brightness(self, x, y, kwargs_list, k=None, **kwargs):
         clean_kwargs_list = []
         for kw in kwargs_list:
             if isinstance(kw, dict):
-                clean_kw = {key: val for key, val in kw.items() 
-                            if key not in ['pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid']}
+                clean_kw = {key: val for key, val in kw.items()
+                            if key not in [
+                                'pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid',
+                                'pixels_wn_lens_light_grid_0', 'n_lens_light_grid',
+                                'rho_lens_light_grid', 'sigma_lens_light_grid',
+                            ]}
                 clean_kwargs_list.append(clean_kw)
             else:
                 clean_kwargs_list.append(kw)
@@ -707,6 +711,24 @@ def create_prob_model(
                 bank['lens_light'] = prior_lens_light
                 if not (fix_lens_light and kwargs_lens_light_fixed is not None):
                     for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
+                        if type_list['lens_light_type_list'][i] == 'PIXELATED':
+                            pixelated_prior_lens_light = lens_light_model.get('pixelated_prior', {})
+                            ny, nx = lens_image.LensLightModel.pixel_grid.num_pixel_axes
+                            k_values = PowerSpectrum.K_grid((ny, nx)).k
+                            res = PowerSpectrum.matern_power_spectrum(
+                                'Lens-light grid', f'lens_light_grid_{i}', k_values,
+                                k_zero=pixelated_prior_lens_light.get('k_zero', None),
+                                n_value=pixelated_prior_lens_light.get('n_value'),
+                                n_low=safe_float(pixelated_prior_lens_light.get('n_value_low'), 0.0001),
+                                n_high=safe_float(pixelated_prior_lens_light.get('n_value_high'), 100.0),
+                                sigma_low=safe_float(pixelated_prior_lens_light.get('sigma_low'), 1e-5),
+                                sigma_high=safe_float(pixelated_prior_lens_light.get('sigma_high'), 10.0),
+                                rho_low=safe_float(pixelated_prior_lens_light.get('rho_low'), None),
+                                rho_high=safe_float(pixelated_prior_lens_light.get('rho_high'), None),
+                                positive=bool(pixelated_prior_lens_light.get('positive', True)),
+                            )
+                            prior_lens_light.append({'pixels': res['pixels']})
+                            continue
                         model = {}
                         for key, param in lens_light_model.items():
                             has_override, override_value = _param_override(
@@ -1024,6 +1046,28 @@ def create_prob_model(
                 bank['lens_light'] = kwargs_lens_light
                 if not (fix_lens_light and kwargs_lens_light_fixed is not None):
                     for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
+                        if type_list['lens_light_type_list'][i] == 'PIXELATED':
+                            pixelated_prior_lens_light = lens_light_model.get('pixelated_prior', {})
+                            ny, nx = lens_image.LensLightModel.pixel_grid.num_pixel_axes
+                            pixels = PowerSpectrum.pixels_from_params(
+                                params, f'lens_light_grid_{i}', PowerSpectrum.K_grid((ny, nx)).k,
+                                k_zero=pixelated_prior_lens_light.get('k_zero', None),
+                                n_value=pixelated_prior_lens_light.get('n_value'),
+                                positive=bool(pixelated_prior_lens_light.get('positive', True)),
+                            )
+                            n_value = params.get(
+                                f'n_lens_light_grid_{i}', pixelated_prior_lens_light.get('n_value'),
+                            )
+                            rho_value = params.get(f'rho_lens_light_grid_{i}')
+                            sigma_value = params.get(f'sigma_lens_light_grid_{i}')
+                            kwargs_lens_light.append({
+                                'pixels': pixels,
+                                'pixels_wn': params.get(f'pixels_wn_lens_light_grid_{i}'),
+                                'n_lens_light_grid': None if n_value is None else jnp.ravel(jnp.asarray(n_value))[0],
+                                'rho_lens_light_grid': None if rho_value is None else jnp.ravel(jnp.asarray(rho_value))[0],
+                                'sigma_lens_light_grid': None if sigma_value is None else jnp.ravel(jnp.asarray(sigma_value))[0],
+                            })
+                            continue
                         kw = {}
                         for key, param in lens_light_model.items():
                             link_spec = _normalize_link_spec(param)
@@ -1202,7 +1246,21 @@ def load_kwargs_init_json(init_params_path):
         else:
             raise FileNotFoundError(f"kwargs init file not found: {path!r}")
     with open(path) as f:
-        return json.load(f)
+        result = json.load(f)
+    # Pixelated lens-light products are stored beside kwargs_result.json just
+    # like pixelated source products.  Resolve their compact JSON stubs here
+    # so generic API loading and HMC initialization receive actual arrays.
+    for values in result.get('kwargs_lens_light', []) or []:
+        if not isinstance(values, dict):
+            continue
+        for key in ('pixels', 'pixels_wn'):
+            stub = values.get(key)
+            if isinstance(stub, dict) and stub.get('_format') == 'pixelated_pixels_npy':
+                filename = stub.get('file')
+                if not filename:
+                    raise ValueError(f"Pixelated lens-light {key!r} stub has no file entry in {path!r}.")
+                values[key] = np.load(os.path.join(run_dir, filename))
+    return result
 
 
 
@@ -1285,6 +1343,25 @@ def kwargs2params(
         and 'kwargs_lens_light' in kwargs
     ):
         for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
+            if (
+                type_list is not None
+                and type_list.get('lens_light_type_list', [None] * len(param_list['lens_light_params_list']))[i] == 'PIXELATED'
+            ):
+                if i >= len(kwargs['kwargs_lens_light']):
+                    continue
+                saved = kwargs['kwargs_lens_light'][i]
+                if not isinstance(saved, dict):
+                    continue
+                for saved_key, site_key in (
+                    ('pixels_wn', f'pixels_wn_lens_light_grid_{i}'),
+                    ('n_lens_light_grid', f'n_lens_light_grid_{i}'),
+                    ('rho_lens_light_grid', f'rho_lens_light_grid_{i}'),
+                    ('sigma_lens_light_grid', f'sigma_lens_light_grid_{i}'),
+                ):
+                    if saved.get(saved_key) is not None:
+                        value = jnp.asarray(saved[saved_key])
+                        params[site_key] = jnp.atleast_1d(value) if saved_key != 'pixels_wn' else value
+                continue
             for key, param in lens_light_model.items():
                 if _normalize_link_spec(param) is None and isinstance(param, list):
                     if i >= len(kwargs['kwargs_lens_light']):
@@ -1933,7 +2010,26 @@ def create_lens_image(
     pixel_grid, ps_grid = create_pixel_grids(num_pixels, pixel_scale)
 
     lens_mass_model = MassModel(type_list['lens_mass_type_list'])
-    lens_light_model = LightModel(type_list['lens_light_type_list'])
+    lens_light_types = type_list['lens_light_type_list']
+    pixelated_lens_indices = [
+        index for index, profile_type in enumerate(lens_light_types)
+        if profile_type == 'PIXELATED'
+    ]
+    if len(pixelated_lens_indices) > 1:
+        raise ValueError("Only one PIXELATED lens-light component is currently supported.")
+    if pixelated_lens_indices:
+        pixelated_lens_params = param_list['lens_light_params_list'][pixelated_lens_indices[0]]
+        lens_grid_settings = dict(pixelated_lens_params.get('pixel_grid', {}))
+        # interpolation is a profile setting in Herculens, not a PixelGrid
+        # setting.  Supply an explicit profile instance while retaining the
+        # string type list for the wrapper-facing parameter representation.
+        from herculens.LightModel.Profiles.pixelated import Pixelated
+        interpolation = lens_grid_settings.pop('pixel_interpol', 'fast_bilinear')
+        lens_profiles = list(lens_light_types)
+        lens_profiles[pixelated_lens_indices[0]] = Pixelated(interpolation_type=interpolation)
+        lens_light_model = LightModel(lens_profiles, kwargs_pixelated=lens_grid_settings)
+    else:
+        lens_light_model = LightModel(lens_light_types)
     src_types = type_list['source_light_type_list']
     if src_types == ['PIXELATED']:
         kwargs_pixelated = param_list['source_light_params_list'][0]

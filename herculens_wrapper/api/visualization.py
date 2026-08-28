@@ -123,3 +123,73 @@ def plot_single_band_data(
     if _in_jupyter_notebook():
         plt.show()
     return figure, axes
+
+
+def plot_multiband_data(
+    bands: dict[str, "SingleBandData"],
+    *,
+    scale: PlotScale = "linear",
+    residual_vis_max: float = 0.0,
+    save_path: str | Path | None = None,
+):
+    """Plot one ``data / noise / SNR / PSF`` row for every observation band."""
+    if scale not in ("linear", "log"):
+        raise ValueError("scale must be either 'linear' or 'log'.")
+    if residual_vis_max < 0:
+        raise ValueError("residual_vis_max must be non-negative.")
+
+    figure, axes = plt.subplots(
+        len(bands), 4, figsize=(22, 5 * len(bands)), squeeze=False,
+        constrained_layout=True,
+    )
+    titles = ("Image data", "Noise map", "Signal-to-noise", "PSF kernel")
+    for row, (band_name, data) in enumerate(bands.items()):
+        image_extent = _extent(data.image.shape, data.pixel_scale)
+        snr = np.divide(
+            data.image, data.noise, out=np.zeros_like(data.image, dtype=float),
+            where=np.isfinite(data.noise) & (data.noise > 0),
+        )
+        finite_snr = np.abs(snr[np.isfinite(snr)])
+        snr_limit = max(
+            float(np.percentile(finite_snr, 99.5)) if finite_snr.size else 1.0,
+            1.0,
+        )
+        panels = (
+            (data.image, "twilight", True, image_extent, "Pixel flux"),
+            (data.noise, "twilight", False, image_extent, "Pixel flux uncertainty"),
+            (snr, "bwr", True, image_extent, "Signal-to-noise"),
+            (data.psf, "twilight", False, _extent(data.psf.shape, data.pixel_scale), "PSF value"),
+        )
+        for column, (image, cmap, signed, extent, colorbar_label) in enumerate(panels):
+            axis = axes[row, column]
+            if column == 2 and scale == "log":
+                norm = SymLogNorm(
+                    linthresh=1.0, linscale=1.0, vmin=-snr_limit,
+                    vmax=snr_limit, base=10,
+                )
+            else:
+                norm = _normalization(image, scale, signed=signed)
+            kwargs = {"norm": norm}
+            if column == 2 and scale == "linear":
+                kwargs.update(vmin=-snr_limit, vmax=snr_limit)
+            rendered = axis.imshow(image, origin="lower", cmap=cmap, extent=extent, **kwargs)
+            if column in (0, 2):
+                if data.source_arc_mask is not None:
+                    axis.contour(data.source_arc_mask, levels=[0.5], colors="lime", linewidths=1.0, extent=extent)
+                if data.contaminate_mask is not None:
+                    axis.contour(data.contaminate_mask, levels=[0.5], colors="orange", linewidths=1.2, linestyles="--", extent=extent)
+            axis.set_xlabel("arcsec")
+            axis.set_ylabel(f"{band_name}\narcsec" if column == 0 else "arcsec")
+            if row == 0:
+                axis.set_title(titles[column])
+            if scale == "log" and column != 2:
+                colorbar_label += " (log scale)"
+            figure.colorbar(rendered, ax=axis, shrink=0.85, label=colorbar_label)
+
+    if save_path is not None:
+        output = Path(save_path).expanduser()
+        output.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output, dpi=200, bbox_inches="tight")
+    if _in_jupyter_notebook():
+        plt.show()
+    return figure, axes

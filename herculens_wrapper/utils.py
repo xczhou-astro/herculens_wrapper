@@ -617,6 +617,7 @@ def kwargs_best_to_json_pixelated_npy(
     kwargs_best, save_path, type_list, 
     pixels_filename='kwargs_source_pixels.npy',
     pixels_wn_filename='kwargs_source_pixels_wn.npy',
+    lens_light_pixels_prefix='kwargs_lens_light_pixels',
     save_pixel_arrays=True,
 ):
     import copy
@@ -653,4 +654,29 @@ def kwargs_best_to_json_pixelated_npy(
             ks = list(ks)
             ks[0] = ks0
             out['kwargs_source'] = ks
+    lens_types = type_list.get('lens_light_type_list', [])
+    lens_kwargs = out.get('kwargs_lens_light', [])
+    if lens_kwargs and any(profile_type == 'PIXELATED' for profile_type in lens_types):
+        updated = list(lens_kwargs)
+        for index, profile_type in enumerate(lens_types):
+            if profile_type != 'PIXELATED' or index >= len(updated):
+                continue
+            values = updated[index]
+            if not isinstance(values, dict):
+                continue
+            values = dict(values)
+            for key, suffix in (("pixels", ""), ("pixels_wn", "_wn")):
+                if values.get(key) is None:
+                    continue
+                filename = f"{lens_light_pixels_prefix}_{index}{suffix}.npy"
+                if save_pixel_arrays:
+                    np.save(os.path.join(save_path, filename), np.asarray(values[key]))
+                values[key] = {
+                    '_format': 'pixelated_pixels_npy',
+                    'file': filename,
+                    **({'_unit': 'pixel_flux', '_pixel_area_reference': 'image_data_pixel'} if key == 'pixels' else {}),
+                    **({} if save_pixel_arrays else {'_save_disabled': True}),
+                }
+            updated[index] = values
+        out['kwargs_lens_light'] = updated
     return out

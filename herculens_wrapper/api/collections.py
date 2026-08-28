@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
+from pathlib import Path
 from pprint import pformat
 from typing import Any, Sequence
 
@@ -57,7 +59,16 @@ class LensProfileCollection:
                     if link is not None:
                         entry["linked_to"] = f"{link._profile.profile_type}.{link.name}"
                     parameters[name] = entry
-                result[component].append({"profile": profile.profile_type, "parameters": parameters})
+                entry = {"profile": profile.profile_type, "parameters": parameters}
+                if hasattr(profile, "pixel_grid") and hasattr(profile, "pixelated_prior"):
+                    entry["pixel_grid"] = profile.pixel_grid
+                    entry["pixelated_prior"] = profile.pixelated_prior
+                if profile._initialization is not None:
+                    entry["initialize_from"] = {
+                        key: value for key, value in profile._initialization.items()
+                        if key != "applied"
+                    }
+                result[component].append(entry)
         return result
 
     @property
@@ -88,6 +99,74 @@ class LensProfileCollection:
             if profiles is not None:
                 definition.add_profiles(component, profiles)
         return definition
+
+    def apply_initializations(self) -> bool:
+        """Resolve profile ``initialize_from`` declarations into fixed values.
+
+        This is intentionally called by a model immediately before it creates
+        NumPyro's initialization state.  It returns whether a backend rebuild
+        is needed because one or more formerly sampled parameters became
+        fixed.  The saved result is indexed by the profile's declared order.
+        """
+        result_keys = {
+            "lens_mass": "kwargs_lens",
+            "lens_light": "kwargs_lens_light",
+            "source_light": "kwargs_source",
+            "point_source": "kwargs_point_source",
+        }
+        changed = False
+        for actual_component in self._components:
+            profiles = getattr(self, actual_component)
+            if profiles is None:
+                continue
+            for index, profile in enumerate(profiles):
+                declaration = profile._initialization
+                if declaration is None or declaration["applied"]:
+                    continue
+                declared_component = declaration["component"]
+                if declared_component != actual_component:
+                    raise ValueError(
+                        f"{profile.profile_type}[{index}] is in {actual_component!r}, but "
+                        f"initialize_from() declared {declared_component!r}."
+                    )
+                path = Path(declaration["path"])
+                if not path.is_file():
+                    raise FileNotFoundError(
+                        f"Initialization result file does not exist: {path}."
+                    )
+                try:
+                    with path.open() as stream:
+                        saved = json.load(stream)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"Could not read JSON initialization result: {path}.") from error
+                entries = saved.get(result_keys[actual_component])
+                if not isinstance(entries, list):
+                    raise ValueError(
+                        f"{path} has no {result_keys[actual_component]!r} list for "
+                        f"{actual_component!r}."
+                    )
+                if index >= len(entries) or not isinstance(entries[index], dict):
+                    raise ValueError(
+                        f"{path} has no usable {actual_component}[{index}] to initialize "
+                        f"{profile.profile_type}."
+                    )
+                saved_values = entries[index]
+                missing = [name for name in profile._parameters if name not in saved_values]
+                if missing:
+                    raise ValueError(
+                        f"{path}: {actual_component}[{index}] is missing declared parameter(s) "
+                        f"{missing} for {profile.profile_type}."
+                    )
+                for name in profile._parameters:
+                    # A scalar prior is represented by the backend as fixed;
+                    # retain value too for notebook inspection and staging.
+                    value = deepcopy(saved_values[name])
+                    parameter = profile.parameter(name)
+                    parameter.prior = value
+                    parameter.value = value
+                declaration["applied"] = True
+                changed = True
+        return changed
 
     def freeze(self) -> "LensProfileCollection":
         return LensProfileCollection(**{
@@ -177,6 +256,7 @@ class LensProfileCollection:
                     if profile._specification(name)["value"] is not None
                 }
                 clone = profile_class(profile.profile_type, prior=prior, value=value)
+                clone._initialization = deepcopy(profile._initialization)
                 clones[(component, index)] = clone
                 for name, parameter in profile._parameters.items():
                     parameter_map[id(parameter)] = clone.parameter(name)

@@ -17,9 +17,20 @@ _BAND_SPECIFIC_LENS_MASS_KEYS = frozenset({'center_x', 'center_y'})
 
 
 def band_site_prefix(index, band_name):
-    """Return a stable NumPyro-safe namespace for a band."""
-    label = re.sub(r'[^0-9A-Za-z_]+', '_', str(band_name)).strip('_') or 'band'
-    return f'band_{index}_{label}'
+    """Return the user-facing NumPyro namespace for a band.
+
+    Site names are deliberately written as ``F150W/lens_center_x_0`` rather
+    than the former opaque ``band_0_F150W/lens_center_x_0``.  The index is
+    retained in the signature for compatibility with callers but is not part
+    of the public site name.
+    """
+    label = str(band_name).strip()
+    if not re.fullmatch(r'[A-Za-z_][0-9A-Za-z_]*', label):
+        raise ValueError(
+            f"Band name {band_name!r} cannot be used as a NumPyro scope. "
+            "Use letters, digits, and underscores, beginning with a letter or underscore."
+        )
+    return label
 
 
 def create_multiband_prob_model(

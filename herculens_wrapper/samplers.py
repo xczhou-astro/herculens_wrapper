@@ -813,13 +813,22 @@ def _build_hmc_chain_init_params(
     }
 
 
-def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_dof_and_reduced_chi2, num_params_free=None, mask_bool=None, source_pixel_scale=None):
+def save_metrics(
+    save_path, chi2, image_data, num_params, log_likelihood,
+    fit_dof_and_reduced_chi2, num_params_free=None, num_params_physical=None,
+    mask_bool=None, source_pixel_scale=None,
+):
     if num_params_free is None:
         num_params_free = num_params
+    if num_params_physical is None:
+        num_params_physical = num_params_free
     reduced_chi2, n_pix, n_fit_free, dof = fit_dof_and_reduced_chi2(chi2, image_data, num_params_free, mask_bool=mask_bool)
-    bic = num_params_free * np.log(n_pix) - 2 * log_likelihood
+    bic_all = num_params_free * np.log(n_pix) - 2 * log_likelihood
+    bic_physical = num_params_physical * np.log(n_pix) - 2 * log_likelihood
     metrics = {
-        'BIC': float(bic),
+        'BIC': float(bic_physical),
+        'BIC_PHYSICAL': float(bic_physical),
+        'BIC_ALL': float(bic_all),
         'CHI2': float(chi2),
         'CHI2_NPIX2': float(chi2 / n_pix),
         'REDUCED_CHI2': float(reduced_chi2),
@@ -827,6 +836,7 @@ def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_do
         'N_DATA_PIXELS': int(n_pix),
         'N_PARAMS_FITTED': int(num_params),
         'N_PARAMS_FREE': int(num_params_free),
+        'N_PARAMS_PHYSICAL': int(num_params_physical),
         'LOG_LIKELIHOOD': float(log_likelihood),
     }
     if source_pixel_scale is not None:
@@ -837,7 +847,7 @@ def save_metrics(save_path, chi2, image_data, num_params, log_likelihood, fit_do
     print(
         f'Reduced chi^2: {reduced_chi2:.4f} (chi^2={chi2:.2f}, dof={dof}, p={num_params_free}), chi^2/N_pix^2={chi2 / n_pix:.4f}'
     )
-    print(f'BIC: {bic:.2f}, log-likelihood: {log_likelihood:.2f}')
+    print(f'BIC (physical): {bic_physical:.2f}, BIC (all): {bic_all:.2f}, log-likelihood: {log_likelihood:.2f}')
     return metrics
 
 
@@ -1230,7 +1240,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     # plt.savefig('debug.png')
 
 
-    # Band-scoped sites are named ``band_0_F150W/site_name``.  Classify them
+    # Band-scoped sites are named ``F150W/site_name``.  Classify them
     # from their local name while retaining the full name for NumPyro.
     def local_site_name(name):
         return name.rsplit('/', 1)[-1]
@@ -1716,6 +1726,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             'source_plane_upper': source_plane_upper,
         })
     try:
+        if hasattr(prob_model, 'bands'):
+            # Joint multiband models have one LensImage per band and cache
+            # their batch/result diagnostics through the API callback.
+            raise RuntimeError('multiband component caching is handled per band by MultiBandModel')
         component_medians = evaluate_mcmc_component_medians(prob_model, samples)
         derived['component_medians'] = component_medians
         derived['components'] = component_medians
@@ -1729,6 +1743,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 np.asarray(image_data) - component_medians['lens_light']
             )
         print('[hmc] Cached posterior-median component images for result output.')
+    except RuntimeError as error:
+        if str(error) != 'multiband component caching is handled per band by MultiBandModel':
+            print(f'[warning] Failed to cache HMC posterior component images: {error}')
     except Exception as error:
         print(f'[warning] Failed to cache HMC posterior component images: {error}')
 

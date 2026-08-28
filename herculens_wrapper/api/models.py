@@ -5,8 +5,38 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
+import numpy as np
+
 from .parameters import LightProfile, MassProfile, Parameter, PointSourceProfile, Profile, ProfileCollection
 from .types import ComponentName, PARAM_KEYS, TYPE_KEYS
+
+
+def is_pixelated_latent_site(name: str) -> bool:
+    """Whether a NumPyro site is a pixel reconstruction nuisance variable."""
+    site = str(name).rsplit("/", 1)[-1]
+    return (
+        site.startswith("pixels_wn_source_grid")
+        or site.startswith("pixels_wn_lens_light_grid_")
+        or site in {
+            "n_source_grid", "rho_source_grid", "sigma_source_grid",
+            "source_scales", "source_coarse", "source_pixels",
+        }
+        or site.startswith(("n_lens_light_grid_", "rho_lens_light_grid_", "sigma_lens_light_grid_"))
+    )
+
+
+def count_physical_parameters(parameters: Mapping[str, Any]) -> int:
+    """Count free non-pixelated parameters for the reported physical BIC.
+
+    Pixel-grid coefficients and their Matérn (or legacy wavelet) nuisance
+    variables are deliberately excluded.  Lens mass/light, point-source, and
+    analytic source parameters remain included.
+    """
+    return int(sum(
+        np.asarray(value).size
+        for name, value in parameters.items()
+        if not is_pixelated_latent_site(name)
+    ))
 
 
 def _expected_profile_class(component: ComponentName) -> type[Profile]:

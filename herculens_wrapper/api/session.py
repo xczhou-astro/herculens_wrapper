@@ -10,7 +10,7 @@ from typing import Any, Mapping
 import numpy as np
 from .collections import LensProfileCollection
 from .data import SingleBandData
-from .models import ModelDefinition
+from .models import ModelDefinition, count_physical_parameters
 from .samplers import FitResult, SamplerConfig
 from .visualization import PlotScale, _extent, _normalization
 
@@ -331,6 +331,12 @@ class SingleBandModel:
             print("\n========================================")
             print(f"Starting Run {run_id} (seed={seed})")
             print("========================================")
+        if self.profiles.apply_initializations():
+            # File-declared parameters change priors into fixed scalars.  The
+            # immediately-built backend must therefore be regenerated before
+            # NumPyro discovers its sample sites.
+            self.definition = self.profiles.as_definition()
+            self._build()
         _, _, get_init_params, _ = _model_backend()
         if init_params_path is None:
             self.initialization_path = None
@@ -713,6 +719,7 @@ class SingleBandModel:
         chi2 = float(np.sum(np.square(residual[valid])))
         n_data = int(np.sum(valid))
         n_free = int(sum(np.asarray(value).size for value in parameters.values()))
+        n_physical = count_physical_parameters(parameters)
         dof = max(n_data - n_free, 1)
 
         # NumPyro evaluates the exact model likelihood, priors, and any
@@ -728,15 +735,21 @@ class SingleBandModel:
                 scale = 1.0 if scale is None else float(np.asarray(scale))
                 log_likelihood += scale * float(np.asarray(site["fn"].log_prob(site["value"])).sum())
         log_prior_and_penalties = log_probability_value - log_likelihood
-        bic = n_free * np.log(max(n_data, 1)) - 2.0 * log_likelihood
+        bic_all = n_free * np.log(max(n_data, 1)) - 2.0 * log_likelihood
+        bic_physical = n_physical * np.log(max(n_data, 1)) - 2.0 * log_likelihood
         return {
             "log_likelihood": float(log_likelihood),
             "log_probability": log_probability_value,
             "log_prior_and_penalties": float(log_prior_and_penalties),
             "chi2": chi2,
             "reduced_chi2": float(chi2 / dof),
-            "bic": float(bic),
+            # ``bic`` now intentionally means the comparison-oriented
+            # physical BIC.  Retain the formal full-dimensional value too.
+            "bic": float(bic_physical),
+            "bic_physical": float(bic_physical),
+            "bic_all": float(bic_all),
             "n_data_pixels": n_data,
             "n_free_parameters": n_free,
+            "n_physical_parameters": n_physical,
             "degrees_of_freedom": int(dof),
         }
