@@ -31,13 +31,17 @@ def is_pixelated_latent_site(name: str) -> bool:
     """Whether a NumPyro site is a pixel reconstruction nuisance variable."""
     site = str(name).rsplit("/", 1)[-1]
     return (
-        site.startswith("pixels_wn_source_grid")
-        or site.startswith("pixels_wn_lens_light_grid_")
-        or site in {
+        # Pixel coefficients are nuisance degrees of freedom irrespective of
+        # their grid name (source, lens light, or a future pixel component).
+        "pixels_wn_" in site
+        or site.endswith("source_pixels")
+        or any(token in site for token in (
             "n_source_grid", "rho_source_grid", "sigma_source_grid",
             "source_scales", "source_coarse", "source_pixels",
-        }
-        or site.startswith(("n_lens_light_grid_", "rho_lens_light_grid_", "sigma_lens_light_grid_"))
+        ))
+        or any(token in site for token in (
+            "n_lens_light_grid_", "rho_lens_light_grid_", "sigma_lens_light_grid_",
+        ))
     )
 
 

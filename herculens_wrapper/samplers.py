@@ -267,6 +267,19 @@ def evaluate_mcmc_component_medians(
     vmap_eval = jax.jit(jax.vmap(eval_single))
 
     totals_list, sources_list, lens_lights_list, no_lens_lights_list, point_sources_list = [], [], [], [], []
+    image_data = getattr(prob_model, "image_data", None)
+    noise_map = getattr(prob_model, "noise_map", None)
+    likelihood_mask = getattr(prob_model, "likelihood_mask", None)
+    valid = None
+    log_normalization = 0.0
+    if image_data is not None and noise_map is not None:
+        image_data, noise_map = np.asarray(image_data), np.asarray(noise_map)
+        valid = np.isfinite(image_data) & np.isfinite(noise_map) & (noise_map > 0)
+        if likelihood_mask is not None:
+            valid &= np.asarray(likelihood_mask, dtype=bool)
+        log_normalization = float(np.sum(np.log(2.0 * np.pi * noise_map[valid] ** 2)))
+    likelihood_scale = float(getattr(prob_model, "likelihood_scale", 1.0))
+    max_log_likelihood, chi2_at_max_loglike, max_sample_index = -np.inf, None, None
     for b_start in range(0, n_total_samples, batch_size):
         b_end = min(b_start + batch_size, n_total_samples)
         b_samples = {
@@ -274,19 +287,37 @@ def evaluate_mcmc_component_medians(
             for k in sample_keys
         }
         b_total, b_source, b_lens_light, b_no_lens_light, b_point_source = vmap_eval(b_samples)
-        totals_list.append(np.asarray(b_total))
+        total_cpu = np.asarray(b_total)
+        totals_list.append(total_cpu)
         sources_list.append(np.asarray(b_source))
         lens_lights_list.append(np.asarray(b_lens_light))
         no_lens_lights_list.append(np.asarray(b_no_lens_light))
         point_sources_list.append(np.asarray(b_point_source))
+        if valid is not None:
+            residual = (total_cpu - image_data[None, ...]) / noise_map[None, ...]
+            chi2_batch = np.sum(np.square(residual[..., valid]), axis=1)
+            loglike_batch = -0.5 * likelihood_scale * (chi2_batch + log_normalization)
+            local_index = int(np.argmax(loglike_batch))
+            local_loglike = float(loglike_batch[local_index])
+            if local_loglike > max_log_likelihood:
+                max_log_likelihood = local_loglike
+                chi2_at_max_loglike = float(chi2_batch[local_index])
+                max_sample_index = b_start + local_index
 
-    return {
+    result = {
         'total': np.median(np.concatenate(totals_list, axis=0), axis=0),
         'source': np.median(np.concatenate(sources_list, axis=0), axis=0),
         'lens_light': np.median(np.concatenate(lens_lights_list, axis=0), axis=0),
         'no_lens_light': np.median(np.concatenate(no_lens_lights_list, axis=0), axis=0),
         'point_source': np.median(np.concatenate(point_sources_list, axis=0), axis=0),
     }
+    if valid is not None:
+        result['_sample_likelihood_summary'] = {
+            'max_log_likelihood': float(max_log_likelihood),
+            'chi2_max_loglike': chi2_at_max_loglike,
+            'max_loglike_sample_index': max_sample_index,
+        }
+    return result
 
 
 def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=500):
@@ -816,28 +847,59 @@ def _build_hmc_chain_init_params(
 def save_metrics(
     save_path, chi2, image_data, num_params, log_likelihood,
     fit_dof_and_reduced_chi2, num_params_free=None, num_params_physical=None,
-    mask_bool=None, source_pixel_scale=None,
+    mask_bool=None, source_pixel_scale=None, metric_summary=None,
 ):
+    """Save legacy metrics, or an explicit API median/max-likelihood summary."""
+    if metric_summary is not None:
+        metrics = {
+            'BIC_PHYSICAL_MEDIAN': metric_summary['bic_physical_median'],
+            'BIC_PHYSICAL_MAX_LOGLIKE': metric_summary['bic_physical_max_loglike'],
+            'CHI2_MEDIAN': metric_summary['chi2_median'],
+            'CHI2_MAX_LOGLIKE': metric_summary['chi2_max_loglike'],
+            'CHI2_PER_DATA_PIXEL_MEDIAN': metric_summary['chi2_median'] / metric_summary['n_data_pixels'],
+            'CHI2_PER_DATA_PIXEL_MAX_LOGLIKE': (
+                None if metric_summary['chi2_max_loglike'] is None
+                else metric_summary['chi2_max_loglike'] / metric_summary['n_data_pixels']
+            ),
+            'REDUCED_CHI2_MEDIAN': metric_summary['reduced_chi2_median'],
+            'REDUCED_CHI2_MAX_LOGLIKE': metric_summary['reduced_chi2_max_loglike'],
+            'N_DATA_PIXELS': metric_summary['n_data_pixels'],
+            'N_PARAMS_FITTED': int(num_params),
+            'N_PARAMS_FREE': metric_summary['n_free_parameters'],
+            'N_PARAMS_PHYSICAL': metric_summary['n_physical_parameters'],
+            'CHI2_DOF': metric_summary['degrees_of_freedom'],
+            'LOG_LIKELIHOOD_MEDIAN': metric_summary['log_likelihood_median'],
+            'MAX_LOG_LIKELIHOOD': metric_summary['max_log_likelihood'],
+            'MAX_LOGLIKE_SAMPLE_INDEX': metric_summary['max_loglike_sample_index'],
+        }
+        if source_pixel_scale is not None:
+            metrics['SOURCE_PIXEL_SCALE'] = float(source_pixel_scale)
+        with open(os.path.join(save_path, 'metrics.json'), 'w') as f:
+            json.dump(metrics, f, indent=4)
+        return metrics
     if num_params_free is None:
         num_params_free = num_params
     if num_params_physical is None:
         num_params_physical = num_params_free
     reduced_chi2, n_pix, n_fit_free, dof = fit_dof_and_reduced_chi2(chi2, image_data, num_params_free, mask_bool=mask_bool)
-    bic_all = num_params_free * np.log(n_pix) - 2 * log_likelihood
     bic_physical = num_params_physical * np.log(n_pix) - 2 * log_likelihood
     metrics = {
-        'BIC': float(bic_physical),
-        'BIC_PHYSICAL': float(bic_physical),
-        'BIC_ALL': float(bic_all),
-        'CHI2': float(chi2),
-        'CHI2_NPIX2': float(chi2 / n_pix),
-        'REDUCED_CHI2': float(reduced_chi2),
+        'BIC_PHYSICAL_MEDIAN': float(bic_physical),
+        'BIC_PHYSICAL_MAX_LOGLIKE': None,
+        'CHI2_MEDIAN': float(chi2),
+        'CHI2_MAX_LOGLIKE': None,
+        'CHI2_PER_DATA_PIXEL_MEDIAN': float(chi2 / n_pix),
+        'CHI2_PER_DATA_PIXEL_MAX_LOGLIKE': None,
+        'REDUCED_CHI2_MEDIAN': float(reduced_chi2),
+        'REDUCED_CHI2_MAX_LOGLIKE': None,
         'CHI2_DOF': int(dof),
         'N_DATA_PIXELS': int(n_pix),
         'N_PARAMS_FITTED': int(num_params),
         'N_PARAMS_FREE': int(num_params_free),
         'N_PARAMS_PHYSICAL': int(num_params_physical),
-        'LOG_LIKELIHOOD': float(log_likelihood),
+        'LOG_LIKELIHOOD_MEDIAN': float(log_likelihood),
+        'MAX_LOG_LIKELIHOOD': None,
+        'MAX_LOGLIKE_SAMPLE_INDEX': None,
     }
     if source_pixel_scale is not None:
         metrics['SOURCE_PIXEL_SCALE'] = float(source_pixel_scale)
@@ -845,9 +907,11 @@ def save_metrics(
     with open(os.path.join(save_path, 'metrics.json'), 'w') as f:
         json.dump(metrics, f, indent=4)
     print(
-        f'Reduced chi^2: {reduced_chi2:.4f} (chi^2={chi2:.2f}, dof={dof}, p={num_params_free}), chi^2/N_pix^2={chi2 / n_pix:.4f}'
+        f'Reduced chi^2 (median): {reduced_chi2:.4f} '
+        f'(chi^2={chi2:.2f}, dof={dof}, p={num_params_free}), '
+        f'chi^2/N_pix={chi2 / n_pix:.4f}'
     )
-    print(f'BIC (physical): {bic_physical:.2f}, BIC (all): {bic_all:.2f}, log-likelihood: {log_likelihood:.2f}')
+    print(f'BIC_physical (median): {bic_physical:.2f}, log-likelihood (median): {log_likelihood:.2f}')
     return metrics
 
 
@@ -1736,12 +1800,15 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             # their batch/result diagnostics through the API callback.
             raise RuntimeError('multiband component caching is handled per band by MultiBandModel')
         component_medians = evaluate_mcmc_component_medians(prob_model, samples)
+        sample_likelihood = component_medians.pop('_sample_likelihood_summary', None)
         derived['component_medians'] = component_medians
         derived['components'] = component_medians
         derived['model'] = component_medians['total']
         derived['lensed_source'] = component_medians['source']
         derived['lens_light'] = component_medians['lens_light']
         derived['point_source'] = component_medians['point_source']
+        if sample_likelihood is not None:
+            derived['sample_likelihood_summary'] = sample_likelihood
         image_data = getattr(prob_model, 'image_data', None)
         if image_data is not None:
             derived['data_minus_lens_light'] = (

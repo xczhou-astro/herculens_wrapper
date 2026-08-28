@@ -1536,6 +1536,14 @@ def _get_mge_exclude_list(all_names, threshold=3):
             
     exclude = set()
     for prefix, indices in groups.items():
+        # MPPL components are commonly supplied for several harmonic orders
+        # (e.g. m=1, 3, 4).  Their coordinates therefore look superficially
+        # like a multi-Gaussian sequence (``lens_e_x_1``, ``_2``, ``_3``),
+        # but they are distinct physical multipoles and must remain in every
+        # SVI/HMC corner plot.
+        local_prefix = prefix.rsplit('/', 1)[-1]
+        if local_prefix.endswith(('lens_e_x', 'lens_e_y')):
+            continue
         if len(indices) >= threshold:
             for name in all_names:
                 if name.startswith(prefix):

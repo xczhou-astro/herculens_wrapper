@@ -213,18 +213,37 @@ class MultiBandFitResult:
             noise = np.asarray(band["noise_map"])[valid]
             per_band[band["name"]] = {"chi2": chi2, "n_data_pixels": n_pixels}
             total_chi2 += chi2; total_pixels += n_pixels
-            log_likelihood += float(-0.5 * np.sum(residual[valid] ** 2 + np.log(2 * np.pi * noise ** 2)))
+            log_likelihood += float(
+                -0.5 * self._model.likelihood_scale
+                * np.sum(residual[valid] ** 2 + np.log(2 * np.pi * noise ** 2))
+            )
         n_parameters = int(sum(np.asarray(value).size for value in self.parameters.values()))
         n_physical = count_physical_parameters(self.parameters)
         dof = max(total_pixels - n_parameters, 1)
-        bic_all = n_parameters * np.log(total_pixels) - 2 * log_likelihood
         bic_physical = n_physical * np.log(total_pixels) - 2 * log_likelihood
-        return {"chi2": total_chi2, "n_data_pixels": total_pixels, "n_free_parameters": n_parameters,
+        metrics = {"chi2_median": total_chi2, "n_data_pixels": total_pixels, "n_free_parameters": n_parameters,
                 "n_physical_parameters": n_physical,
-                "degrees_of_freedom": dof, "reduced_chi2": total_chi2 / dof,
-                "log_likelihood": log_likelihood, "bic": bic_physical,
-                "bic_physical": bic_physical, "bic_all": bic_all,
+                "degrees_of_freedom": dof, "reduced_chi2_median": total_chi2 / dof,
+                "log_likelihood_median": log_likelihood,
+                "bic_physical_median": bic_physical,
                 "bands": per_band}
+        summary = self.details.get("sample_likelihood_summary") if self.samples is not None else None
+        if summary is None:
+            metrics.update({"max_log_likelihood": None, "chi2_max_loglike": None,
+                            "reduced_chi2_max_loglike": None,
+                            "bic_physical_max_loglike": None,
+                            "max_loglike_sample_index": None})
+        else:
+            max_loglike = float(summary["max_log_likelihood"])
+            chi2 = float(summary["chi2_max_loglike"])
+            metrics.update({
+                "max_log_likelihood": max_loglike,
+                "chi2_max_loglike": chi2,
+                "reduced_chi2_max_loglike": chi2 / dof,
+                "bic_physical_max_loglike": n_physical * np.log(total_pixels) - 2 * max_loglike,
+                "max_loglike_sample_index": summary.get("max_loglike_sample_index"),
+            })
+        return metrics
 
     def output(self, save_path: str | Path, *, residual_vis_max: float = 0.0,
                include_corner: bool = True) -> dict[str, Any]:
@@ -672,6 +691,7 @@ class MultiBandModel:
             details["num_chains_hmc_numpyro"] = int(args.num_chains_hmc_numpyro)
             print("[hmc] Computing final posterior-median component images in chunks...")
             details["component_medians_by_band"] = self._evaluate_hmc_component_medians(samples)
+            details["sample_likelihood_summary"] = self._last_hmc_likelihood_summary
         initial_for_result = dict(initial)
         self.initial_parameters = parameters
         self.result = MultiBandFitResult(
@@ -758,6 +778,7 @@ class MultiBandModel:
         }
 
         evaluators = {}
+        band_likelihood = {}
         for band in self.bands:
             name, lens_image = band["name"], band["lens_image"]
             has_lens_light = bool(band["type_list"].get("lens_light_type_list"))
@@ -790,17 +811,42 @@ class MultiBandModel:
                 return total, source, lens_light, no_lens_light, point_source, jnp.asarray(source_plane)
 
             evaluators[name] = jax.jit(jax.vmap(evaluate_one))
+            data, noise = np.asarray(band["image_data"]), np.asarray(band["noise_map"])
+            valid = np.isfinite(data) & np.isfinite(noise) & (noise > 0)
+            if band["fit_mask_bool"] is not None:
+                valid &= np.asarray(band["fit_mask_bool"], dtype=bool)
+            band_likelihood[name] = (data, noise, valid, float(np.sum(np.log(2 * np.pi * noise[valid] ** 2))))
 
+        best_loglike, best_chi2, best_index = -np.inf, None, None
         for start in range(0, n_samples, batch_size):
             stop = min(start + batch_size, n_samples)
             device_draws = {
                 key: jnp.asarray(np.asarray(value)[start:stop])
                 for key, value in samples.items()
             }
+            joint_chi2 = np.zeros(stop - start, dtype=float)
+            joint_normalization = 0.0
             for name, evaluator in evaluators.items():
                 values = evaluator(device_draws)
                 for label, image_stack in zip(outputs[name], values):
                     outputs[name][label].append(np.asarray(image_stack))
+                data, noise, valid, normalization = band_likelihood[name]
+                total = np.asarray(values[0])
+                residual = (total - data[None, ...]) / noise[None, ...]
+                joint_chi2 += np.sum(np.square(residual[..., valid]), axis=1)
+                joint_normalization += normalization
+            joint_loglike = -0.5 * self.likelihood_scale * (joint_chi2 + joint_normalization)
+            local_index = int(np.argmax(joint_loglike))
+            if float(joint_loglike[local_index]) > best_loglike:
+                best_loglike = float(joint_loglike[local_index])
+                best_chi2 = float(joint_chi2[local_index])
+                best_index = start + local_index
+
+        self._last_hmc_likelihood_summary = {
+            "max_log_likelihood": best_loglike,
+            "chi2_max_loglike": best_chi2,
+            "max_loglike_sample_index": best_index,
+        }
 
         return {
             name: {
@@ -921,11 +967,11 @@ class MultiBandResultsCombination:
             metrics = comparison[f"run_{index}"]["metrics"]
             print(
                 f"run_{index} (seed={result.random_seed}): "
-                f"log-likelihood={metrics['log_likelihood']:.2f}, "
-                f"chi2={metrics['chi2']:.2f}, "
-                f"chi2/N_pix^2={metrics['chi2'] / metrics['n_data_pixels']:.4f}, "
-                f"reduced_chi2={metrics['reduced_chi2']:.4f}, "
-                f"BIC={metrics['bic']:.2f}"
+                f"log-likelihood (median)={metrics['log_likelihood_median']:.2f}, "
+                f"chi2 (median)={metrics['chi2_median']:.2f}, "
+                f"chi2/N_pix (median)={metrics['chi2_median'] / metrics['n_data_pixels']:.4f}, "
+                f"reduced_chi2 (median)={metrics['reduced_chi2_median']:.4f}, "
+                f"BIC_physical (median)={metrics['bic_physical_median']:.2f}"
             )
         print("========================================")
         return files

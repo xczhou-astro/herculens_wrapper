@@ -100,8 +100,29 @@ class FitResult:
         return self._model
 
     def metrics(self) -> dict[str, float | int | None]:
-        """Return likelihood, probability, chi-square, and fit-summary metrics."""
-        return self._require_model()._metrics(self.parameters)
+        """Return median and, for HMC, maximum-likelihood sample metrics."""
+        metrics = self._require_model()._metrics(self.parameters)
+        summary = self.derived.get("sample_likelihood_summary") if self.samples is not None else None
+        if summary is None:
+            metrics.update({
+                "max_log_likelihood": None,
+                "chi2_max_loglike": None,
+                "reduced_chi2_max_loglike": None,
+                "bic_physical_max_loglike": None,
+                "max_loglike_sample_index": None,
+            })
+            return metrics
+        max_loglike = float(summary["max_log_likelihood"])
+        chi2 = float(summary["chi2_max_loglike"])
+        n_data, n_physical = metrics["n_data_pixels"], metrics["n_physical_parameters"]
+        metrics.update({
+            "max_log_likelihood": max_loglike,
+            "chi2_max_loglike": chi2,
+            "reduced_chi2_max_loglike": chi2 / metrics["degrees_of_freedom"],
+            "bic_physical_max_loglike": n_physical * np.log(max(n_data, 1)) - 2.0 * max_loglike,
+            "max_loglike_sample_index": summary.get("max_loglike_sample_index"),
+        })
+        return metrics
 
     def plot_best_fit(self, *, scale: str = "linear", residual_vis_max: float = 0.0,
                       save_path: str | Path | None = None):
@@ -409,12 +430,13 @@ class FitResult:
 
         metrics = self.metrics()
         save_metrics(
-            str(directory), metrics["chi2"], model.data.likelihood_image,
-            model.num_sampling_parameters, metrics["log_likelihood"],
+            str(directory), metrics["chi2_median"], model.data.likelihood_image,
+            model.num_sampling_parameters, metrics["log_likelihood_median"],
             fit_dof_and_reduced_chi2,
             num_params_free=metrics["n_free_parameters"],
             num_params_physical=metrics["n_physical_parameters"],
             mask_bool=model.data.likelihood_mask,
+            metric_summary=metrics,
         )
         files: dict[str, Path] = {
             "metrics": directory / "metrics.json",
@@ -481,8 +503,8 @@ class FitResult:
                     "hmc" if self.samples is not None
                     else "svi" if self.details.get("guide") is not None else "optax"
                 ),
-                best_fit_model=best_fit_model, chi2=metrics["chi2"],
-                reduced_chi2=metrics["reduced_chi2"], extra=plot_details,
+                best_fit_model=best_fit_model, chi2=metrics["chi2_median"],
+                reduced_chi2=metrics["reduced_chi2_median"], extra=plot_details,
                 mcmc_samples=self.samples, prob_model=model.prob_model,
                 init_params=initial, param_list=parameter_lists,
                 residual_vis_max=residual_vis_max,
@@ -574,22 +596,25 @@ class SingleBandResultsCombination:
         for index, result in enumerate(self.results):
             model = result._require_model()
             result_metrics = result.metrics()
-            # Use the same metric keys and calculation as the config pipeline.
-            legacy_metrics = {
-                "BIC": result_metrics["bic"],
-                "CHI2": result_metrics["chi2"],
-                "CHI2_NPIX2": result_metrics["chi2"] / result_metrics["n_data_pixels"],
-                "REDUCED_CHI2": result_metrics["reduced_chi2"],
+            summary_metrics = {
+                "BIC_PHYSICAL_MEDIAN": result_metrics["bic_physical_median"],
+                "BIC_PHYSICAL_MAX_LOGLIKE": result_metrics["bic_physical_max_loglike"],
+                "CHI2_MEDIAN": result_metrics["chi2_median"],
+                "CHI2_MAX_LOGLIKE": result_metrics["chi2_max_loglike"],
+                "CHI2_PER_DATA_PIXEL_MEDIAN": result_metrics["chi2_median"] / result_metrics["n_data_pixels"],
+                "REDUCED_CHI2_MEDIAN": result_metrics["reduced_chi2_median"],
+                "REDUCED_CHI2_MAX_LOGLIKE": result_metrics["reduced_chi2_max_loglike"],
                 "CHI2_DOF": result_metrics["degrees_of_freedom"],
                 "N_DATA_PIXELS": result_metrics["n_data_pixels"],
                 "N_PARAMS_FITTED": model.num_sampling_parameters,
                 "N_PARAMS_FREE": result_metrics["n_free_parameters"],
-                "LOG_LIKELIHOOD": result_metrics["log_likelihood"],
+                "LOG_LIKELIHOOD_MEDIAN": result_metrics["log_likelihood_median"],
+                "MAX_LOG_LIKELIHOOD": result_metrics["max_log_likelihood"],
             }
-            metrics.append(legacy_metrics)
+            metrics.append(summary_metrics)
             comparison[f"run_{index}"] = {
                 "seed": result.random_seed,
-                "metrics": legacy_metrics,
+                "metrics": summary_metrics,
             }
             bands.append({
                 "name": f"Run {index}",
@@ -615,11 +640,11 @@ class SingleBandResultsCombination:
             seed = self.results[index].random_seed
             print(
                 f"run_{index} (seed={seed}): "
-                f"log-likelihood={entry['LOG_LIKELIHOOD']:.2f}, "
-                f"chi2={entry['CHI2']:.2f}, "
-                f"chi2/N_pix^2={entry['CHI2_NPIX2']:.4f}, "
-                f"reduced_chi2={entry['REDUCED_CHI2']:.4f}, "
-                f"BIC={entry['BIC']:.2f}"
+                f"log-likelihood (median)={entry['LOG_LIKELIHOOD_MEDIAN']:.2f}, "
+                f"chi2 (median)={entry['CHI2_MEDIAN']:.2f}, "
+                f"chi2/N_pix (median)={entry['CHI2_PER_DATA_PIXEL_MEDIAN']:.4f}, "
+                f"reduced_chi2 (median)={entry['REDUCED_CHI2_MEDIAN']:.4f}, "
+                f"BIC_physical (median)={entry['BIC_PHYSICAL_MEDIAN']:.2f}"
             )
         print("========================================")
         files = {"comparison": json_path, "svi_run_comparison": plot_path}

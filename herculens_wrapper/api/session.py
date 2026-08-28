@@ -211,6 +211,50 @@ class SingleBandModel:
         self.initial_parameters = None
         self.result = None
 
+    def recompute_hmc_metrics(
+        self,
+        save_path: str | Path | None = None,
+        *,
+        random_seed: int = 42,
+        write: bool = True,
+    ) -> dict[str, float | int | None]:
+        """Recompute median and maximum-likelihood metrics from an HMC archive.
+
+        Pass an HMC run directory directly, or first call :meth:`load_hmc`
+        and omit ``save_path``.  The posterior is not sampled again: the
+        archived draws are evaluated in GPU-sized chunks.  When ``write`` is
+        true, the run directory's ``metrics.json`` is replaced with the
+        explicit median/max-log-likelihood metric schema.
+        """
+        if save_path is not None:
+            self.load_hmc(save_path)
+        if self._loaded_hmc_samples is None:
+            raise RuntimeError(
+                "Call load_hmc(save_path) first, or pass an HMC run directory."
+            )
+
+        # ``get_results`` performs the one necessary posterior forward pass
+        # and caches both pixel-wise component medians and the best-likelihood
+        # sample summary.  Reuse that cache on repeated calls.
+        result = self.result
+        if result is None or result.samples is None:
+            result = self.get_results(random_seed=random_seed)
+        metrics = result.metrics()
+        if write:
+            from ..samplers import save_metrics
+            from ..utils import fit_dof_and_reduced_chi2
+
+            assert self.initialization_path is not None
+            save_metrics(
+                str(self.initialization_path), metrics["chi2_median"],
+                self.data.likelihood_image, self.num_sampling_parameters,
+                metrics["log_likelihood_median"], fit_dof_and_reduced_chi2,
+                num_params_free=metrics["n_free_parameters"],
+                num_params_physical=metrics["n_physical_parameters"],
+                mask_bool=self.data.likelihood_mask, metric_summary=metrics,
+            )
+        return metrics
+
     def _get_loaded_hmc_results(self, *, random_seed: int) -> FitResult:
         """Create posterior-median cached products from :meth:`load_hmc`."""
         from ..samplers import (
@@ -234,6 +278,7 @@ class SingleBandModel:
         components = evaluate_mcmc_component_medians(
             self.prob_model, samples, active_sites=active_sites,
         )
+        sample_likelihood = components.pop("_sample_likelihood_summary", None)
         source_summary = evaluate_mcmc_source_pixels_summary(
             self.prob_model, samples, save_path=None, save_npy=False,
         )
@@ -251,6 +296,8 @@ class SingleBandModel:
             "lens_light": components["lens_light"],
             "point_source": components["point_source"],
         }
+        if sample_likelihood is not None:
+            derived["sample_likelihood_summary"] = sample_likelihood
         if self.data.likelihood_image is not None:
             derived["data_minus_lens_light"] = (
                 np.asarray(self.data.likelihood_image) - components["lens_light"]
@@ -770,7 +817,7 @@ class SingleBandModel:
         return output
 
     def _metrics(self, parameters: Mapping[str, Any]) -> dict[str, float | int | None]:
-        """Evaluate numerical fit metrics for constrained best-fit parameters."""
+        """Evaluate metrics at the coordinate-wise posterior median parameters."""
         if self.prob_model is None:
             raise RuntimeError("Call build() before evaluating metrics.")
         model_image = self.model_image(parameters)
@@ -797,19 +844,14 @@ class SingleBandModel:
                 scale = 1.0 if scale is None else float(np.asarray(scale))
                 log_likelihood += scale * float(np.asarray(site["fn"].log_prob(site["value"])).sum())
         log_prior_and_penalties = log_probability_value - log_likelihood
-        bic_all = n_free * np.log(max(n_data, 1)) - 2.0 * log_likelihood
         bic_physical = n_physical * np.log(max(n_data, 1)) - 2.0 * log_likelihood
         return {
-            "log_likelihood": float(log_likelihood),
-            "log_probability": log_probability_value,
-            "log_prior_and_penalties": float(log_prior_and_penalties),
-            "chi2": chi2,
-            "reduced_chi2": float(chi2 / dof),
-            # ``bic`` now intentionally means the comparison-oriented
-            # physical BIC.  Retain the formal full-dimensional value too.
-            "bic": float(bic_physical),
-            "bic_physical": float(bic_physical),
-            "bic_all": float(bic_all),
+            "log_likelihood_median": float(log_likelihood),
+            "log_probability_median": log_probability_value,
+            "log_prior_and_penalties_median": float(log_prior_and_penalties),
+            "chi2_median": chi2,
+            "reduced_chi2_median": float(chi2 / dof),
+            "bic_physical_median": float(bic_physical),
             "n_data_pixels": n_data,
             "n_free_parameters": n_free,
             "n_physical_parameters": n_physical,
