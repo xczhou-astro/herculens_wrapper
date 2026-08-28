@@ -366,7 +366,7 @@ def resolve_init_run_dir(init_params_path, verbose=True, config_dir=None):
                     continue
                 metrics = run_info.get('metrics', run_info)
                 ll = None
-                for k in ('LOG_LIKELIHOOD', 'log_likelihood', 'log_like', 'LOGLIKE'):
+                for k in ('LOG_LIKELIHOOD', 'log_likelihood', 'log_like', 'LOGLIKE', 'LOG_LIKELIHOOD_MEDIAN', 'log_likelihood_median'):
                     if k in metrics:
                         ll = float(metrics[k])
                         break
@@ -403,7 +403,7 @@ def resolve_init_run_dir(init_params_path, verbose=True, config_dir=None):
                     try:
                         with open(m_file) as f:
                             m_data = json.load(f)
-                        ll = float(m_data.get('LOG_LIKELIHOOD', -float('inf')))
+                        ll = float(m_data.get('LOG_LIKELIHOOD', m_data.get('LOG_LIKELIHOOD_MEDIAN', -float('inf'))))
                         if ll > best_ll:
                             best_ll = ll
                             best_key = sd
