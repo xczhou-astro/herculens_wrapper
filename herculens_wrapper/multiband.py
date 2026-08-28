@@ -146,9 +146,16 @@ def create_multiband_prob_model(
                     )
             for index, light_model in enumerate(param_list.get('lens_light_params_list', [])):
                 if isinstance(light_model, dict):
-                    order.extend(
-                        f'{prefix}lens_light_{key}_{index}' for key in light_model
-                    )
+                    if band['type_list']['lens_light_type_list'][index] == 'PIXELATED':
+                        order.extend(
+                            f'{prefix}{key}_lens_light_grid_{index}' for key in (
+                                'n', 'rho', 'sigma', 'pixels_wn',
+                            )
+                        )
+                    else:
+                        order.extend(
+                            f'{prefix}lens_light_{key}_{index}' for key in light_model
+                        )
 
             source_types = band['type_list'].get('source_light_type_list', [])
             if source_types == ['PIXELATED']:
@@ -284,7 +291,14 @@ def _create_fully_shared_multidata_prob_model(
                 order.extend(f'lens_{key}_{index}' for key in mass_model)
         for index, light_model in enumerate(reference_param_list.get('lens_light_params_list', [])):
             if isinstance(light_model, dict):
-                order.extend(f'lens_light_{key}_{index}' for key in light_model)
+                if reference_type_list['lens_light_type_list'][index] == 'PIXELATED':
+                    order.extend(
+                        f'{key}_lens_light_grid_{index}' for key in (
+                            'n', 'rho', 'sigma', 'pixels_wn',
+                        )
+                    )
+                else:
+                    order.extend(f'lens_light_{key}_{index}' for key in light_model)
         if reference_type_list.get('source_light_type_list') == ['PIXELATED']:
             order.extend(('n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'pixels_wn_source_grid'))
         else:

@@ -385,6 +385,47 @@ class PowerSpectrum:
             param_name=param_name,
         )
 
+    @staticmethod
+    def fit_power_spectrum_init_from_parametric_lens_light(
+        lens_image,
+        init_params_path,
+        k_values,
+        pixelated_prior,
+        *,
+        seed=42,
+        max_iterations=2000,
+        learning_rate=0.01,
+        progress_bar=True,
+        lens_light_index=0,
+    ):
+        """Fit pixelated-lens-light Matérn latents to an analytic/MGE result."""
+        if not init_params_path:
+            return {}
+        init_info = load_kwargs_init_json(init_params_path)
+        analytic = init_info.get('kwargs_lens_light', [])
+        if lens_light_index >= len(analytic) or not isinstance(analytic[lens_light_index], dict):
+            raise ValueError(
+                "The initialization result has no lens-light component at "
+                f"index {lens_light_index}."
+            )
+        # A saved pixelated run already contains its exact latent coefficients
+        # and should be restored directly by kwargs2params(), not refitted.
+        if analytic[lens_light_index].get('pixels_wn') is not None:
+            return {}
+        lens_light_image = _project_analytic_kwargs_to_pixel_lens_light(
+            lens_image, analytic,
+        )
+        return PowerSpectrum.fit_power_spectrum_init(
+            lens_light_image,
+            k_values,
+            pixelated_prior,
+            seed=seed,
+            max_iterations=max_iterations,
+            learning_rate=learning_rate,
+            progress_bar=progress_bar,
+            param_name=f'lens_light_grid_{lens_light_index}',
+        )
+
 def _is_correlated_param(param):
     """
     Flexible correlation syntax:
@@ -1317,6 +1358,38 @@ def _project_analytic_kwargs_to_pixel_source(
     return jnp.asarray(sb, dtype=jnp.float64) * pa
 
 
+def _infer_analytic_light_types(kwargs_light):
+    """Infer native analytic LightModel types from saved result kwargs."""
+    types = []
+    for index, values in enumerate(kwargs_light):
+        if not isinstance(values, dict):
+            raise TypeError(f'kwargs_lens_light[{index}] must be a dict.')
+        if 'pixels' in values:
+            raise ValueError(
+                'Cannot project an already pixelated lens-light result as an analytic warm start.'
+            )
+        if any(key in values for key in ('R_sersic', 'R_sersic', 'n_sersic')):
+            types.append('SERSIC_ELLIPSE')
+        elif 'sigma' in values:
+            types.append('GAUSSIAN_ELLIPSE' if ('e1' in values or 'e2' in values) else 'GAUSSIAN')
+        else:
+            raise ValueError(
+                f'Cannot infer lens-light type for kwargs_lens_light[{index}] '
+                f'(keys: {sorted(values)}).'
+            )
+    return types
+
+
+def _project_analytic_kwargs_to_pixel_lens_light(lens_image, kwargs_lens_light):
+    """Render analytic/MGE lens light as pixel flux on the lens-light grid."""
+    light_model = LightModel(_infer_analytic_light_types(kwargs_lens_light))
+    x_grid, y_grid = lens_image.LensLightModel.pixel_grid.pixel_coordinates
+    sb = light_model.surface_brightness(x_grid, y_grid, kwargs_lens_light)
+    return jnp.asarray(sb, dtype=jnp.float64) * jnp.asarray(
+        lens_image.Grid.pixel_area, dtype=jnp.float64,
+    )
+
+
 def kwargs2params(
     param_list,
     kwargs,
@@ -2096,6 +2169,23 @@ def validate_param_list(type_list, param_list):
         type_list.get("lens_mass_type_list", []),
         param_list.get("lens_mass_params_list", []),
     )):
+        if profile_type == "INCLINED_EXPONENTIAL_DISK":
+            if "n_gaussians" not in params:
+                raise ValueError(
+                    f"INCLINED_EXPONENTIAL_DISK mass component {index} requires a fixed "
+                    "n_gaussians value of 5, 7, or 9."
+                )
+            n_gaussians = params["n_gaussians"]
+            if (
+                isinstance(n_gaussians, (list, tuple))
+                or int(n_gaussians) != n_gaussians
+                or n_gaussians not in (5, 7, 9)
+            ):
+                raise ValueError(
+                    f"INCLINED_EXPONENTIAL_DISK mass component {index} requires fixed "
+                    "n_gaussians to be one of 5, 7, or 9; it cannot be sampled."
+                )
+            continue
         if profile_type != "MPPL":
             continue
         if "m" not in params:

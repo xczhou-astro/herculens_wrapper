@@ -926,10 +926,15 @@ def run_svi(
         init_params=init_params,
     )
     median = guide.median(result.params)
-    for k, v in result.params.items():
-        if k not in median:
-            median[k] = v
-    
+    # ``result.params`` also contains AutoGuide internals (``auto_loc``,
+    # covariance factors, ...).  They are variational parameters, not model
+    # parameters.  ``guide.median`` additionally contains model
+    # deterministics.  Keep exactly the constrained sample sites supplied by
+    # the API initialization, so neither category leaks into FitResult, BIC,
+    # or saved kwargs.
+    if init_params:
+        median = {name: value for name, value in median.items() if name in init_params}
+
     return median, {
         'loss_history': np.asarray(result.losses).tolist(),
         'result': result,

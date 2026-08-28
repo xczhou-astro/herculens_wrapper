@@ -308,6 +308,26 @@ class SingleBandModel:
             self.data.likelihood_noise, likelihood_mask=self.data.likelihood_mask,
             args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
         )
+
+    def _declared_pixelated_lens_light_path(self) -> Path | None:
+        """Return the one explicit analytic/pixelated lens-light warm-start file."""
+        collection = self.profiles.lens_light
+        if collection is None:
+            return None
+        paths = {
+            str(profile._initialization["path"])
+            for profile in collection
+            if profile.profile_type == "PIXELATED"
+            and hasattr(profile, "pixelated_prior")
+            and profile._initialization is not None
+            and profile._initialization["component"] == "lens_light"
+        }
+        if len(paths) > 1:
+            raise ValueError(
+                "Pixelated lens-light profiles currently require one common "
+                "initialize_from(.../kwargs_result.json) file."
+            )
+        return Path(next(iter(paths))).expanduser() if paths else None
     def initialize(
         self,
         *,
@@ -337,6 +357,9 @@ class SingleBandModel:
             # NumPyro discovers its sample sites.
             self.definition = self.profiles.as_definition()
             self._build()
+        declared_lens_light_path = self._declared_pixelated_lens_light_path()
+        if init_params_path is None and declared_lens_light_path is not None:
+            init_params_path = declared_lens_light_path
         _, _, get_init_params, _ = _model_backend()
         if init_params_path is None:
             self.initialization_path = None
@@ -422,6 +445,45 @@ class SingleBandModel:
                     if "source" in name or "pixels_wn" in name:
                         initial[name] = value
                 print("[svi-warmup] Pixelated-source image-match warmup complete.")
+            pixelated_lens_indices = [
+                index for index, profile_type in enumerate(type_list.get("lens_light_type_list", []))
+                if profile_type == "PIXELATED"
+            ]
+            if pixelated_lens_indices:
+                from ..models import PowerSpectrum, load_kwargs_init_json
+
+                saved = load_kwargs_init_json(self.initialization_path)
+                saved_lens_light = saved.get("kwargs_lens_light", [])
+                iterations = num_iterations_warmup or 2_000
+                if not isinstance(iterations, int) or iterations <= 0:
+                    raise ValueError(
+                        "num_iterations_warmup must be positive for pixelated lens-light matching."
+                    )
+                for index in pixelated_lens_indices:
+                    saved_values = (
+                        saved_lens_light[index]
+                        if index < len(saved_lens_light) and isinstance(saved_lens_light[index], Mapping)
+                        else None
+                    )
+                    if saved_values is not None and saved_values.get("pixels_wn") is not None:
+                        # get_init_params() already restored the saved latent.
+                        continue
+                    pixelated_prior = param_list["lens_light_params_list"][index].get("pixelated_prior", {})
+                    ny, nx = self.lens_image.LensLightModel.pixel_grid.num_pixel_axes
+                    print(
+                        f"[pixelated-init: lens-light] Fitting Matérn parameters "
+                        f"({iterations} iterations) from inherited analytic/MGE lens light..."
+                    )
+                    power_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_lens_light(
+                        self.lens_image, str(self.initialization_path),
+                        PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
+                        seed=seed + 17863 + index, max_iterations=iterations,
+                        lens_light_index=index,
+                    )
+                    for name, value in power_values.items():
+                        if name in initial:
+                            initial[name] = value
+                print("[pixelated-init: lens-light] Lens-light-matched initialization complete.")
         self.definition.update_values(initial); self.initial_parameters = initial
         return initial
 

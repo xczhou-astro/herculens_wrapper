@@ -473,9 +473,9 @@ class MultiBandModel:
                 raise ValueError(f"{result_path}: missing inherited band(s) {sorted(missing)}.")
             self._apply_inherited_parametric_kwargs(kwargs_by_band)
             source_kind = "pixelated SVI" if any(
-                values.get("kwargs_source", [{}])
-                and isinstance(values["kwargs_source"][0], Mapping)
-                and "pixels_wn" in values["kwargs_source"][0]
+                (source_values := values.get("kwargs_source", []))
+                and isinstance(source_values[0], Mapping)
+                and "pixels_wn" in source_values[0]
                 for values in kwargs_by_band.values()
             ) else "parametric SVI"
             print(f"[Init] Loaded {source_kind} result from {self.initialization_path}")
@@ -490,7 +490,76 @@ class MultiBandModel:
                 self._warmup_pixelated_source(
                     kwargs_by_band, seed=seed, num_iterations=num_iterations_warmup,
                 )
+            self._initialize_pixelated_lens_light_from_parametric(
+                kwargs_by_band, seed=seed,
+                num_iterations=num_iterations_warmup or 2_000,
+            )
         return self.initial_parameters
+
+    def _initialize_pixelated_lens_light_from_parametric(
+        self,
+        kwargs_by_band: Mapping[str, Any],
+        *,
+        seed: int,
+        num_iterations: int,
+    ) -> None:
+        """Map each band analytic/MGE lens-light fit to its pixelated GP start."""
+        from ..models import PowerSpectrum, _project_analytic_kwargs_to_pixel_lens_light
+        import jax.numpy as jnp
+
+        if not isinstance(num_iterations, int) or num_iterations <= 0:
+            raise ValueError("num_iterations_warmup must be positive for pixelated lens-light matching.")
+        initial = dict(self.initial_parameters)
+        matched = False
+        for band_index, band in enumerate(self.bands):
+            pixelated_indices = [
+                index for index, profile_type in enumerate(band["type_list"].get("lens_light_type_list", []))
+                if profile_type == "PIXELATED"
+            ]
+            if not pixelated_indices:
+                continue
+            inherited = kwargs_by_band[band["name"]].get("kwargs_lens_light", [])
+            if not inherited:
+                raise ValueError(
+                    f"{band['name']}: pixelated lens light needs inherited analytic/MGE "
+                    "kwargs_lens_light for initialization."
+                )
+            for profile_index in pixelated_indices:
+                saved = inherited[profile_index] if profile_index < len(inherited) else None
+                prefix = f"{band['site_prefix']}/"
+                pixel_site = f"{prefix}pixels_wn_lens_light_grid_{profile_index}"
+                if isinstance(saved, Mapping) and isinstance(saved.get("pixels_wn"), Mapping):
+                    file_path = self.initialization_path / band["name"] / saved["pixels_wn"]["file"]
+                    if not file_path.is_file():
+                        raise FileNotFoundError(f"Missing saved pixelated lens-light coefficients: {file_path}")
+                    initial[pixel_site] = jnp.asarray(np.load(file_path))
+                    for key in ("n", "rho", "sigma"):
+                        value = saved.get(f"{key}_lens_light_grid")
+                        site = f"{prefix}{key}_lens_light_grid_{profile_index}"
+                        if value is not None and site in initial:
+                            initial[site] = jnp.atleast_1d(value)
+                    continue
+                pixelated_prior = band["param_list"]["lens_light_params_list"][profile_index].get("pixelated_prior", {})
+                ny, nx = band["lens_image"].LensLightModel.pixel_grid.num_pixel_axes
+                print(
+                    f"[pixelated-init: lens-light] {band['name']}: fitting Matérn parameters "
+                    f"({num_iterations} iterations) from inherited analytic/MGE lens light..."
+                )
+                target = _project_analytic_kwargs_to_pixel_lens_light(band["lens_image"], inherited)
+                fitted = PowerSpectrum.fit_power_spectrum_init(
+                    target, PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
+                    seed=seed + 17863 + 101 * band_index + profile_index,
+                    max_iterations=num_iterations,
+                    param_name=f"lens_light_grid_{profile_index}",
+                )
+                for key, value in fitted.items():
+                    site = f"{prefix}{key}"
+                    if site in initial:
+                        initial[site] = value
+                matched = True
+        if matched:
+            print("[pixelated-init: lens-light] Multiband lens-light-matched initialization complete.")
+        self.initial_parameters = initial
 
     def _apply_inherited_parametric_kwargs(self, kwargs_by_band: Mapping[str, Any]) -> None:
         """Map saved physical kwargs onto the joint NumPyro site names."""

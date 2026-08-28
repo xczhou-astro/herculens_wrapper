@@ -9,7 +9,7 @@ from pprint import pformat
 from typing import Any, Sequence
 
 from .parameters import LightProfile, MassProfile, PointSourceProfile, Profile, ProfileCollection
-from .types import ComponentName
+from .models import ComponentName
 
 
 class LensProfileCollection:

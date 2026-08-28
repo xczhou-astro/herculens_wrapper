@@ -3,12 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Mapping, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
 from .parameters import LightProfile, MassProfile, Parameter, PointSourceProfile, Profile, ProfileCollection
-from .types import ComponentName, PARAM_KEYS, TYPE_KEYS
+
+# Shared API model vocabulary and its legacy-wrapper key mapping live beside
+# ModelDefinition, their only substantive consumer.
+ComponentName = Literal["lens_mass", "lens_light", "source_light", "point_source"]
+SamplerName = Literal["optax", "svi", "hmc"]
+TYPE_KEYS = {
+    "lens_mass": "lens_mass_type_list",
+    "lens_light": "lens_light_type_list",
+    "source_light": "source_light_type_list",
+    "point_source": "point_source_type_list",
+}
+PARAM_KEYS = {
+    "lens_mass": "lens_mass_params_list",
+    "lens_light": "lens_light_params_list",
+    "source_light": "source_light_params_list",
+    "point_source": "point_source_params_list",
+}
 
 
 def is_pixelated_latent_site(name: str) -> bool:

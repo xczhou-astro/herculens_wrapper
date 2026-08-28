@@ -10,7 +10,7 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any, Mapping
 import numpy as np
-from .types import SamplerName
+from .models import SamplerName
 
 @dataclass
 class SamplerConfig:
@@ -548,7 +548,7 @@ class SingleBandResultsCombination:
     def __post_init__(self) -> None:
         self.results = list(self.results)
         if not self.results:
-            raise ValueError("ResultsCombination requires at least one FitResult.")
+            raise ValueError("SingleBandResultsCombination requires at least one FitResult.")
 
     def output(
         self,
