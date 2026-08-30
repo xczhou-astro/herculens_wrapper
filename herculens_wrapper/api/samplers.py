@@ -52,6 +52,7 @@ class SamplerConfig:
         chain_method: str = "auto",
         progress_bar: bool = True,
         init_max_retries: int = 100,
+        disable_gibbs: bool = False,
         random_seed: int = 42,
     ) -> "SamplerConfig":
         """Configure NumPyro NUTS/HMC sampling for an SVI-warm-started model."""
@@ -68,6 +69,8 @@ class SamplerConfig:
             raise ValueError("init_max_retries must be a non-negative integer.")
         if chain_method not in {"auto", "parallel", "vectorized", "sequential"}:
             raise ValueError("chain_method must be 'auto', 'parallel', 'vectorized', or 'sequential'.")
+        if not isinstance(disable_gibbs, bool):
+            raise TypeError("disable_gibbs must be a boolean.")
         return cls("hmc", random_seed=random_seed, options={
             "num_warmup_hmc_numpyro": num_warmup,
             "num_samples_hmc_numpyro": num_samples,
@@ -76,6 +79,7 @@ class SamplerConfig:
             "chain_method_hmc_numpyro": chain_method,
             "progress_bar_hmc_numpyro": progress_bar,
             "hmc_init_max_retries": init_max_retries,
+            "disable_gibbs": disable_gibbs,
         })
     def to_namespace(self) -> SimpleNamespace:
         defaults = {"sampler": self.name, "random_seed": self.random_seed, "algorithm_optax": "adabelief", "max_iterations_optax": 2000, "init_learning_rate_optax": 1e-2, "schedule_learning_rate_optax": True, "stop_at_loss_increase_optax": False, "progress_bar_optax": True, "max_iterations_svi": 10000, "init_learning_rate_svi": 1e-2, "init_scale_svi": 0.1, "loss_kind_svi": "trace_elbo", "num_particles_svi": 10, "num_warmup_hmc_numpyro": 1000, "num_samples_hmc_numpyro": 1000, "num_chains_hmc_numpyro": 1, "checkpoint_interval_hmc_numpyro": 250, "chain_method_hmc_numpyro": "auto", "progress_bar_hmc_numpyro": True, "hmc_init_max_retries": 100, "likelihood_scale": 1.0}
