@@ -634,7 +634,7 @@ def create_prob_model(
                     isinstance(ks, list) and len(ks) > 0
                     and isinstance(ks[0], dict)
                     and isinstance(ks[0].get('pixels'), dict)
-                    and ks[0]['pixels'].get('_format') == 'pixelated_pixels_npy'
+                    and ks[0]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
                 ):
                     init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
                         os.path.abspath(str(init_params_path))
@@ -642,11 +642,12 @@ def create_prob_model(
                     npy_name = ks[0]['pixels'].get('file')
                     npy_path = os.path.join(init_dir, npy_name)
                     ks0 = dict(ks[0])
-                    ks0['pixels'] = np.load(npy_path)
-                    if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+                    from herculens_wrapper.utils import load_array_file
+                    ks0['pixels'] = load_array_file(npy_path)
+                    if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
                         npy_wn_name = ks0['pixels_wn'].get('file')
                         npy_wn_path = os.path.join(init_dir, npy_wn_name)
-                        ks0['pixels_wn'] = np.load(npy_wn_path)
+                        ks0['pixels_wn'] = load_array_file(npy_wn_path)
                     ks = list(ks)
                     ks[0] = ks0
                     init_info['kwargs_source'] = ks
@@ -1297,11 +1298,12 @@ def load_kwargs_init_json(init_params_path):
             continue
         for key in ('pixels', 'pixels_wn'):
             stub = values.get(key)
-            if isinstance(stub, dict) and stub.get('_format') == 'pixelated_pixels_npy':
+            if isinstance(stub, dict) and stub.get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
                 filename = stub.get('file')
                 if not filename:
                     raise ValueError(f"Pixelated lens-light {key!r} stub has no file entry in {path!r}.")
-                values[key] = np.load(os.path.join(run_dir, filename))
+                from herculens_wrapper.utils import load_array_file
+                values[key] = load_array_file(os.path.join(run_dir, filename))
     return result
 
 
@@ -1314,7 +1316,7 @@ def _infer_analytic_source_light_types(kwargs_source):
             raise TypeError(f'kwargs_source[{i}] must be a dict, got {type(kw).__name__}.')
         if 'pixels' in kw:
             raise ValueError(
-                "kwargs_source contains 'pixels'; load the pixel .npy stub directly."
+                "kwargs_source contains 'pixels'; load the pixel FITS stub directly."
             )
         if any(k in kw for k in ('R_sersic', 'n_sersic')):
             types.append('SERSIC_ELLIPSE')
@@ -1559,16 +1561,17 @@ def get_init_params(
                 isinstance(ks, list) and len(ks) > 0
                 and isinstance(ks[0], dict)
                 and isinstance(ks[0].get('pixels'), dict)
-                and ks[0]['pixels'].get('_format') == 'pixelated_pixels_npy'
+                and ks[0]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
             ):
                 npy_name = ks[0]['pixels'].get('file')
                 npy_path = os.path.join(init_dir, npy_name)
                 ks0 = dict(ks[0])
-                ks0['pixels'] = np.load(npy_path)
-                if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+                from herculens_wrapper.utils import load_array_file
+                ks0['pixels'] = load_array_file(npy_path)
+                if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
                     npy_wn_name = ks0['pixels_wn'].get('file')
                     npy_wn_path = os.path.join(init_dir, npy_wn_name)
-                    ks0['pixels_wn'] = np.load(npy_wn_path)
+                    ks0['pixels_wn'] = load_array_file(npy_wn_path)
                 ks = list(ks)
                 ks[0] = ks0
                 init_info['kwargs_source'] = ks
@@ -1602,7 +1605,8 @@ def get_init_params(
                     if has_pixel_array:
                         pixels_proj = jnp.asarray(ks[0]['pixels'], dtype=jnp.float64)
                     else:
-                        pixels_proj = np.load(os.path.join(init_dir, ks[0]['pixels'].get('file')))
+                        from herculens_wrapper.utils import load_array_file
+                        pixels_proj = load_array_file(os.path.join(init_dir, ks[0]['pixels'].get('file')))
                     
                     prior_type = getattr(prob_model, 'prior_type', 'matern')
                     if prior_type == 'wavelet_sparsity':
@@ -1749,15 +1753,16 @@ def resolve_fixed_kwargs(init_params_path, component):
             fixed_copy = list(fixed)
             fixed_copy[0] = dict(kw)
             
-            if isinstance(kw.get('pixels'), dict) and kw['pixels'].get('_format') == 'pixelated_pixels_npy':
+            if isinstance(kw.get('pixels'), dict) and kw['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
                 npy_name = kw['pixels'].get('file')
                 npy_path = os.path.join(init_dir, npy_name)
-                fixed_copy[0]['pixels'] = np.load(npy_path)
+                from herculens_wrapper.utils import load_array_file
+                fixed_copy[0]['pixels'] = load_array_file(npy_path)
                 
-            if isinstance(kw.get('pixels_wn'), dict) and kw['pixels_wn'].get('_format') == 'pixelated_pixels_npy':
+            if isinstance(kw.get('pixels_wn'), dict) and kw['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
                 npy_wn_name = kw['pixels_wn'].get('file')
                 npy_wn_path = os.path.join(init_dir, npy_wn_name)
-                fixed_copy[0]['pixels_wn'] = np.load(npy_wn_path)
+                fixed_copy[0]['pixels_wn'] = load_array_file(npy_wn_path)
                 
             fixed = fixed_copy
             

@@ -613,10 +613,68 @@ def pytree_flat_param_labels(params_pytree):
     return labels
 
 
+def save_array_fits(path, values, *, extname=None):
+    """Write one numerical array as a FITS primary image."""
+    from astropy.io import fits
+    array = np.asarray(values)
+    header = fits.Header()
+    if array.dtype == bool:
+        header['ORIGTYPE'] = ('bool', 'Original NumPy dtype')
+        array = array.astype(np.uint8)
+    hdu = fits.PrimaryHDU(data=array, header=header)
+    if extname is not None:
+        hdu.header['EXTNAME'] = str(extname)
+    hdu.writeto(path, overwrite=True)
+
+
+def load_array_file(path):
+    """Load a new FITS array or a legacy ``.npy`` array."""
+    path = str(path)
+    if path.lower().endswith(('.fits', '.fit', '.fts')):
+        from astropy.io import fits
+        with fits.open(path, memmap=False) as hdul:
+            data = np.asarray(hdul[0].data)
+            if hdul[0].header.get('ORIGTYPE') == 'bool':
+                data = data.astype(bool)
+            return data
+    return np.load(path)
+
+
+def save_named_arrays_fits(path, arrays):
+    """Write named numerical arrays as FITS image extensions."""
+    from astropy.io import fits
+    hdus = [fits.PrimaryHDU()]
+    for name, values in arrays.items():
+        if values is None:
+            continue
+        array = np.asarray(values)
+        header = fits.Header()
+        if array.dtype == bool:
+            header['ORIGTYPE'] = ('bool', 'Original NumPy dtype')
+            array = array.astype(np.uint8)
+        hdus.append(fits.ImageHDU(data=array, header=header, name=str(name).upper()[:68]))
+    fits.HDUList(hdus).writeto(path, overwrite=True)
+
+
+def load_named_arrays_fits(path):
+    """Return a mapping of FITS extension name to its numerical array."""
+    from astropy.io import fits
+    arrays = {}
+    with fits.open(path, memmap=False) as hdul:
+        for hdu in hdul[1:]:
+            if hdu.data is None:
+                continue
+            data = np.asarray(hdu.data)
+            if hdu.header.get('ORIGTYPE') == 'bool':
+                data = data.astype(bool)
+            arrays[hdu.name.lower()] = data
+    return arrays
+
+
 def kwargs_best_to_json_pixelated_npy(
     kwargs_best, save_path, type_list, 
-    pixels_filename='kwargs_source_pixels.npy',
-    pixels_wn_filename='kwargs_source_pixels_wn.npy',
+    pixels_filename='kwargs_source_pixels.fits',
+    pixels_wn_filename='kwargs_source_pixels_wn.fits',
     lens_light_pixels_prefix='kwargs_lens_light_pixels',
     save_pixel_arrays=True,
 ):
@@ -629,16 +687,16 @@ def kwargs_best_to_json_pixelated_npy(
             if 'pixels' in ks0 and ks0['pixels'] is not None:
                 if save_pixel_arrays:
                     pixels = np.asarray(ks0['pixels'])
-                    np.save(os.path.join(save_path, pixels_filename), pixels)
+                    save_array_fits(os.path.join(save_path, pixels_filename), pixels)
                     ks0['pixels'] = {
-                        '_format': 'pixelated_pixels_npy',
+                        '_format': 'pixelated_pixels_fits',
                         'file': pixels_filename,
                         '_unit': 'pixel_flux',
                         '_pixel_area_reference': 'image_data_pixel',
                     }
                 else:
                     ks0['pixels'] = {
-                        '_format': 'pixelated_pixels_npy',
+                        '_format': 'pixelated_pixels_fits',
                         'file': pixels_filename,
                         '_unit': 'pixel_flux',
                         '_pixel_area_reference': 'image_data_pixel',
@@ -647,10 +705,10 @@ def kwargs_best_to_json_pixelated_npy(
             if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
                 if save_pixel_arrays:
                     pixels_wn = np.asarray(ks0['pixels_wn'])
-                    np.save(os.path.join(save_path, pixels_wn_filename), pixels_wn)
-                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename}
+                    save_array_fits(os.path.join(save_path, pixels_wn_filename), pixels_wn)
+                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_fits', 'file': pixels_wn_filename}
                 else:
-                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_npy', 'file': pixels_wn_filename, '_save_disabled': True}
+                    ks0['pixels_wn'] = {'_format': 'pixelated_pixels_fits', 'file': pixels_wn_filename, '_save_disabled': True}
             ks = list(ks)
             ks[0] = ks0
             out['kwargs_source'] = ks
@@ -668,11 +726,11 @@ def kwargs_best_to_json_pixelated_npy(
             for key, suffix in (("pixels", ""), ("pixels_wn", "_wn")):
                 if values.get(key) is None:
                     continue
-                filename = f"{lens_light_pixels_prefix}_{index}{suffix}.npy"
+                filename = f"{lens_light_pixels_prefix}_{index}{suffix}.fits"
                 if save_pixel_arrays:
-                    np.save(os.path.join(save_path, filename), np.asarray(values[key]))
+                    save_array_fits(os.path.join(save_path, filename), np.asarray(values[key]))
                 values[key] = {
-                    '_format': 'pixelated_pixels_npy',
+                    '_format': 'pixelated_pixels_fits',
                     'file': filename,
                     **({'_unit': 'pixel_flux', '_pixel_area_reference': 'image_data_pixel'} if key == 'pixels' else {}),
                     **({} if save_pixel_arrays else {'_save_disabled': True}),

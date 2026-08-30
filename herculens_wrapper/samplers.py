@@ -437,8 +437,8 @@ def save_hmc_diagnostics(
         import os
         import numpy as np
 
-        # Diagnostics intentionally focus on lens-mass parameters. Matérn
-        # hyperparameters remain in the saved posterior but are omitted here.
+        # Prefer lens-mass parameters, but lens mass may legitimately be
+        # fixed when fitting conditional lens light/source models.
         def local_site_name(key):
             return key.rsplit('/', 1)[-1]
 
@@ -451,6 +451,31 @@ def save_hmc_diagnostics(
         ]
 
         if not target_keys:
+            # Fall back to all low-dimensional latent sites.  Pixel Fourier
+            # coefficients are deliberately excluded: their high dimension
+            # makes ArviZ trace/density panels unusable.
+            for key, values in samples.items():
+                local = local_site_name(key)
+                values = np.asarray(values)
+                if local.startswith('pixels_wn_') or local in {
+                    'source_pixels', 'source_scales', 'source_coarse',
+                }:
+                    continue
+                if values.ndim == 1 or (values.ndim == 2 and values.shape[1] <= 32):
+                    target_keys.append(key)
+
+        if not target_keys:
+            # A pixels-only model has no sensible scalar trace plot.  Still
+            # write sampler health so a successful HMC output remains
+            # inspectable rather than silently omitting diagnostics.
+            health_report = _hmc_health_report(
+                hmc_extra_fields, num_chains, max_tree_depth=max_tree_depth,
+            )
+            summary_path = os.path.join(target_dir, f"mcmc_summary_{suffix}.txt")
+            with open(summary_path, 'w') as stream:
+                stream.write('No scalar free parameters available for ArviZ diagnostics.\n\n')
+                stream.write(health_report)
+            print(f"[hmc] Saved sampler-health summary to {summary_path}")
             return
 
         # Joint multi-band models provide their complete configured order.
@@ -569,6 +594,7 @@ def _save_hmc_pixels_wn_summary(
         return
     try:
         import matplotlib.pyplot as plt
+        from herculens_wrapper.utils import save_array_fits
 
         arr = np.asarray(samples[key])
         if arr.ndim < 2:
@@ -580,11 +606,11 @@ def _save_hmc_pixels_wn_summary(
         upper = p84 - median
 
         if median_filename is not None:
-            np.save(os.path.join(save_path, median_filename), median)
+            save_array_fits(os.path.join(save_path, median_filename), median)
         if lower_filename is not None:
-            np.save(os.path.join(save_path, lower_filename), lower)
+            save_array_fits(os.path.join(save_path, lower_filename), lower)
         if upper_filename is not None:
-            np.save(os.path.join(save_path, upper_filename), upper)
+            save_array_fits(os.path.join(save_path, upper_filename), upper)
 
         fig, axes = plt.subplots(1, 3, figsize=(18, 5))
         panels = [
@@ -664,10 +690,11 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
         upper_src = p84_src - median_src
 
         if save_npy and save_path is not None:
-            np.save(os.path.join(save_path, 'kwargs_source_pixels.npy'), median_src)
-            np.save(os.path.join(save_path, 'kwargs_source_pixels_lower.npy'), lower_src)
-            np.save(os.path.join(save_path, 'kwargs_source_pixels_upper.npy'), upper_src)
-            print(f"[hmc] Saved kwargs_source_pixels.npy (sample median), kwargs_source_pixels_lower.npy, kwargs_source_pixels_upper.npy to {save_path}")
+            from herculens_wrapper.utils import save_array_fits
+            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels.fits'), median_src)
+            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels_lower.fits'), lower_src)
+            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels_upper.fits'), upper_src)
+            print(f"[hmc] Saved source-pixel median and 1-sigma FITS arrays to {save_path}")
 
         return median_src, lower_src, upper_src
     except Exception as e:
@@ -1359,10 +1386,28 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             
     init_fun = partial(init_to_value_or_defer, values=init_params)
     
-    disable_gibbs = bool(getattr(args, 'disable_gibbs', False))
-    
-    if disable_gibbs:
-        print("[hmc] Gibbs sampling is disabled. Running joint NUTS sampler...")
+    if not init_params:
+        raise ValueError(
+            "HMC requires at least one free sampling parameter; all declared "
+            "parameters are fixed or linked."
+        )
+
+    # Gibbs needs two non-empty conditional blocks.  With a fixed lens mass
+    # there is only the light/source block, for which ordinary joint NUTS is
+    # the correct and simpler kernel.
+    use_joint_nuts = (
+        bool(getattr(args, 'disable_gibbs', False))
+        or not vars_mass
+        or not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other)
+    )
+
+    if use_joint_nuts:
+        if not vars_mass:
+            print("[hmc] Lens mass is fixed; running joint NUTS for remaining free parameters.")
+        elif not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other):
+            print("[hmc] Only lens-mass parameters are free; running joint NUTS.")
+        else:
+            print("[hmc] Gibbs sampling is disabled. Running joint NUTS sampler...")
         dense_mass_blocks = []
         if vars_power:
             dense_mass_blocks.append(tuple(vars_power))
@@ -1614,7 +1659,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     for batch_offset, size in enumerate(batch_sizes):
         i = start_batch_idx + batch_offset
             
-        if disable_gibbs:
+        if use_joint_nuts:
             print(f"[hmc] Running joint NUTS batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
         else:
             print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
@@ -1650,7 +1695,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 chain_method=chain_method,
             )
             mcmc.post_warmup_state = last_state
-            if disable_gibbs:
+            if use_joint_nuts:
                 rng_key_to_pass = last_state.rng_key
             else:
                 rng_key_to_pass = last_state.rng_key[..., 0, :]

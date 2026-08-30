@@ -1664,8 +1664,8 @@ def display_init(
     if save_path is not None and type_list is not None:
         kwargs_init_json = kwargs_best_to_json_pixelated_npy(
             kwargs_init, save_path, type_list,
-            pixels_filename='kwargs_source_pixels_init.npy',
-            pixels_wn_filename='kwargs_source_pixels_wn_init.npy'
+            pixels_filename='kwargs_source_pixels_init.fits',
+            pixels_wn_filename='kwargs_source_pixels_wn_init.fits'
         )
         with open(os.path.join(save_path, 'kwargs_init.json'), 'w') as f:
             json.dump(kwargs_init_json, f, indent=4, default=json_serializer)
@@ -2340,19 +2340,20 @@ def recreate_best_fit_plots_for_run(run_dir):
     """Recreate best_fit_model_linear.png and best_fit_model_log.png from an existing run directory."""
     import os
     import json
-    npz_path = os.path.join(run_dir, 'modeling_result.npz')
-    if not os.path.exists(npz_path):
-        print(f"Error: {npz_path} does not exist.")
+    fits_path = os.path.join(run_dir, 'modeling_result.fits')
+    if not os.path.exists(fits_path):
+        print(f"Error: {fits_path} does not exist.")
         return False
         
     try:
-        data = np.load(npz_path)
+        from herculens_wrapper.utils import load_named_arrays_fits
+        data = load_named_arrays_fits(fits_path)
     except Exception as e:
-        print(f"Error loading {npz_path}: {e}")
+        print(f"Error loading {fits_path}: {e}")
         return False
         
     if 'best_fit_model' not in data or 'image_data' not in data or 'noise_map' not in data:
-        print(f"Error: {npz_path} does not contain required arrays.")
+        print(f"Error: {fits_path} does not contain required arrays.")
         return False
         
     best_fit_model = data['best_fit_model']

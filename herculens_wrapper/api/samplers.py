@@ -467,8 +467,8 @@ class FitResult:
                 sigma_kwargs = model.prob_model.params2kwargs(sigma_parameters)
                 sigma_json = kwargs_best_to_json_pixelated_npy(
                     sigma_kwargs, str(directory), type_list,
-                    pixels_filename="kwargs_source_pixels_sigma.npy",
-                    pixels_wn_filename="kwargs_source_pixels_wn_sigma.npy",
+                    pixels_filename="kwargs_source_pixels_sigma.fits",
+                    pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
                     lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
                 )
                 with (directory / "kwargs_sigma.json").open("w") as stream:
@@ -517,15 +517,16 @@ class FitResult:
         except Exception as error:
             skipped["diagnostic_plots"] = str(error)
 
-        np.savez_compressed(
-            directory / "modeling_result.npz", best_fit_model=best_fit_model,
-            image_data=np.asarray(model.data.likelihood_image), noise_map=np.asarray(model.data.likelihood_noise),
-            source_arc_mask=np.asarray(model.data.source_arc_mask) if model.data.source_arc_mask is not None else None,
-            contaminate_mask=np.asarray(model.data.contaminate_mask) if model.data.contaminate_mask is not None else None,
-            fit_mask_bool=np.asarray(model.data.likelihood_mask) if model.data.likelihood_mask is not None else None,
-            image_unit=np.asarray("pixel_flux"), noise_unit=np.asarray("pixel_flux"),
-        )
-        files["modeling_result"] = directory / "modeling_result.npz"
+        from ..utils import save_named_arrays_fits
+        save_named_arrays_fits(directory / "modeling_result.fits", {
+            "best_fit_model": best_fit_model,
+            "image_data": model.data.likelihood_image,
+            "noise_map": model.data.likelihood_noise,
+            "source_arc_mask": model.data.source_arc_mask,
+            "contaminate_mask": model.data.contaminate_mask,
+            "fit_mask_bool": model.data.likelihood_mask,
+        })
+        files["modeling_result"] = directory / "modeling_result.fits"
         _write_parameter_shifts(directory, kwargs_best, type_list)
         files["parameter_shifts"] = directory / "parameter_shifts.txt"
         for filename in directory.iterdir():

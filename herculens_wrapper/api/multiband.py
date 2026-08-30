@@ -305,7 +305,8 @@ class MultiBandFitResult:
         with (root / "kwargs_lens_shared.json").open("w") as stream:
             json.dump({"kwargs_lens": shared_lens}, stream, indent=2, default=json_serializer)
         with (root / "metrics.json").open("w") as stream: json.dump(metrics, stream, indent=2, default=json_serializer)
-        np.savez_compressed(root / "modeling_result.npz", **arrays)
+        from ..utils import save_named_arrays_fits
+        save_named_arrays_fits(root / "modeling_result.fits", arrays)
         if self.loss_history is not None:
             with (root / "svi_loss_history.json").open("w") as stream: json.dump({"loss_history": self.loss_history.tolist()}, stream)
             try: plot_loss_curve(self.loss_history, str(root))
@@ -325,8 +326,8 @@ class MultiBandFitResult:
                     name = band["name"]
                     initial_json_by_band[name] = kwargs_best_to_json_pixelated_npy(
                         initial_by_band[name], str(root / name), band["type_list"],
-                        pixels_filename="kwargs_source_pixels_init.npy",
-                        pixels_wn_filename="kwargs_source_pixels_wn_init.npy",
+                        pixels_filename="kwargs_source_pixels_init.fits",
+                        pixels_wn_filename="kwargs_source_pixels_wn_init.fits",
                         lens_light_pixels_prefix="kwargs_lens_light_pixels_init",
                     )
                 with (root / "kwargs_init.json").open("w") as stream:
@@ -366,8 +367,8 @@ class MultiBandFitResult:
                     name, directory = band["name"], root / band["name"]
                     sigma_json = kwargs_best_to_json_pixelated_npy(
                         sigma_by_band[name], str(directory), band["type_list"],
-                        pixels_filename="kwargs_source_pixels_sigma.npy",
-                        pixels_wn_filename="kwargs_source_pixels_wn_sigma.npy",
+                        pixels_filename="kwargs_source_pixels_sigma.fits",
+                        pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
                         lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
                     )
                     with (directory / "kwargs_sigma.json").open("w") as stream:
@@ -409,7 +410,7 @@ class MultiBandFitResult:
                 )
             except Exception as error:
                 skipped["hmc_corner"] = str(error)
-        files.update({"metrics": root / "metrics.json", "kwargs_result": root / "kwargs_result.json", "modeling_result": root / "modeling_result.npz"})
+        files.update({"metrics": root / "metrics.json", "kwargs_result": root / "kwargs_result.json", "modeling_result": root / "modeling_result.fits"})
         return {"directory": root, "files": files, "skipped": skipped, "metrics": metrics}
 
 
@@ -551,7 +552,8 @@ class MultiBandModel:
                     file_path = self.initialization_path / band["name"] / saved["pixels_wn"]["file"]
                     if not file_path.is_file():
                         raise FileNotFoundError(f"Missing saved pixelated lens-light coefficients: {file_path}")
-                    initial[pixel_site] = jnp.asarray(np.load(file_path))
+                    from ..utils import load_array_file
+                    initial[pixel_site] = jnp.asarray(load_array_file(file_path))
                     for key in ("n", "rho", "sigma"):
                         value = saved.get(f"{key}_lens_light_grid")
                         site = f"{prefix}{key}_lens_light_grid_{profile_index}"
@@ -623,7 +625,8 @@ class MultiBandModel:
                         pixel_path = self.initialization_path / name / pixels_wn["file"]
                     if not pixel_path.is_file():
                         raise FileNotFoundError(f"Missing saved pixelated source coefficients: {pixel_path}")
-                    initial[site] = jnp.asarray(np.load(pixel_path))
+                    from ..utils import load_array_file
+                    initial[site] = jnp.asarray(load_array_file(pixel_path))
         self.initial_parameters = initial
 
     def _warmup_pixelated_source(
