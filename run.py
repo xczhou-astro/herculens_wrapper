@@ -430,7 +430,10 @@ def build_and_run(config_path=None):
     print(f'Source light type list: {source_light_type_list}')
     print(f'Point source type list: {point_source_type_list}')
 
-    kwargs_numerics_fit = {'supersampling_factor': args.supersampling_factor}
+    kwargs_numerics_fit = {
+        'supersampling_factor': args.supersampling_factor,
+        'supersampling_convolution': bool(getattr(args, 'supersampling_convolution', False)),
+    }
     kwargs_lens_equation_solver_model = {
         'nsolutions': args.ps_nsolutions,
         'niter': args.ps_niter,
@@ -465,6 +468,7 @@ def build_and_run(config_path=None):
                         noise_map=noise_map,
                         psf_data=psf_data,
                         pixel_scale=args.pixel_scale,
+                        psf_supersampling_factor=getattr(args, 'psf_supersampling_factor', 1),
                         kwargs_numerics=kwargs_numerics_fit,
                         kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
                         source_arc_mask=source_arc_mask,
@@ -497,6 +501,7 @@ def build_and_run(config_path=None):
         noise_map=noise_map,
         psf_data=psf_data,
         pixel_scale=args.pixel_scale,
+        psf_supersampling_factor=getattr(args, 'psf_supersampling_factor', 1),
         kwargs_numerics=kwargs_numerics_fit,
         kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
         source_arc_mask=source_arc_mask,

@@ -124,11 +124,13 @@ def export_wrapper_config(
         "save_path": str(Path(save_path).expanduser()),
         "random_seed": sampler.random_seed,
         "pixel_scale": model.data.pixel_scale,
+        "psf_supersampling_factor": model.data.psf_supersampling_factor,
         "crop_size": model.data.crop_size,
         "background_subtract_corner": model.data.background_subtract["num_pixels"],
         "background_subtract_which_corner": wrapper_corner,
         "residual_vis_max": residual_vis_max,
         "supersampling_factor": model.numerics.get("supersampling_factor", 1),
+        "supersampling_convolution": model.numerics.get("supersampling_convolution", False),
         "sampler": sampler.name,
         # initialize(..., init_params_path=...) already establishes this on
         # the model.  An explicit argument remains useful for export before

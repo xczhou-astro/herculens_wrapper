@@ -12,6 +12,7 @@ class SingleBandData:
     noise: np.ndarray
     psf: np.ndarray
     pixel_scale: float
+    psf_supersampling_factor: int = 1
     crop_size: int | None = None
     background_subtract: dict[str, Any] = field(
         default_factory=lambda: {"num_pixels": 0, "corner": "upper left"}
@@ -30,6 +31,11 @@ class SingleBandData:
             object.__setattr__(self, name, float(value))
             if "_source_arc_mask" in self.__dict__ and self.source_arc_mask_path is None:
                 object.__setattr__(self, "_source_arc_mask", None)
+            return
+        if name == "psf_supersampling_factor":
+            if not isinstance(value, (int, np.integer)) or isinstance(value, bool) or value < 1:
+                raise ValueError("psf_supersampling_factor must be a positive integer.")
+            object.__setattr__(self, name, int(value))
             return
         if name == "source_arc_mask_radius":
             if value is not None and not isinstance(value, dict):
@@ -97,13 +103,15 @@ class SingleBandData:
 
     @classmethod
     def from_fits(cls, image_path: str | Path, noise_path: str | Path, psf_path: str | Path, *, pixel_scale: float,
+                  psf_supersampling_factor: int = 1,
                   crop_size: int | None = None, background_subtract: dict[str, Any] | None = None,
                   source_arc_mask_path: str | None = None, source_arc_mask_radius: dict | None = None,
                   contaminate_mask_path: str | None = None) -> "SingleBandData":
         from astropy.io import fits
         instance = cls(
             image=fits.getdata(image_path), noise=fits.getdata(noise_path), psf=fits.getdata(psf_path),
-            pixel_scale=pixel_scale, crop_size=crop_size, background_subtract=(
+            pixel_scale=pixel_scale, psf_supersampling_factor=psf_supersampling_factor,
+            crop_size=crop_size, background_subtract=(
                 {"num_pixels": 0, "corner": "upper left"} if background_subtract is None else background_subtract
             ), source_arc_mask_path=source_arc_mask_path, source_arc_mask_radius=source_arc_mask_radius,
             contaminate_mask_path=contaminate_mask_path,
@@ -140,7 +148,14 @@ class SingleBandData:
         arrays = {"image": self.image, "noise": self.noise, "psf": self.psf}
         output = {key: directory / name for key, name in names.items()}
         for key, filename in output.items():
-            fits.writeto(filename, np.asarray(arrays[key]), overwrite=True)
+            header = None
+            if key == "psf":
+                header = fits.Header()
+                header["PSFSSAMP"] = (
+                    self.psf_supersampling_factor,
+                    "PSF kernel supersampling factor relative to image pixels",
+                )
+            fits.writeto(filename, np.asarray(arrays[key]), header=header, overwrite=True)
         if self.source_arc_mask is not None:
             source_name = self._input_paths.get(
                 "source_arc_mask", Path("source_arc_mask.fits"),

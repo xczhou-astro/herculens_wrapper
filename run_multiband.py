@@ -69,6 +69,8 @@ _PER_BAND_SETTING_NAMES = (
     'pixel_scale',
     'crop_size',
     'supersampling_factor',
+    'psf_supersampling_factor',
+    'supersampling_convolution',
     'likelihood_scale',
     'source_grid_scale',
 )
@@ -76,6 +78,8 @@ _PER_BAND_SETTING_DEFAULTS = {
     'pixel_scale': 0.08,
     'crop_size': None,
     'supersampling_factor': 1,
+    'psf_supersampling_factor': 1,
+    'supersampling_convolution': False,
     'likelihood_scale': 1.0,
     'source_grid_scale': 1.0,
 }
@@ -1042,6 +1046,8 @@ def build_and_run_multiband(config_path=None):
             f'[{band_name}] Data shape: {image_data.shape}; active source-mask pixels: '
             f'{int(source_arc_mask.sum())}; pixel_scale={band_args.pixel_scale}; '
             f'crop_size={band_args.crop_size}; supersampling_factor={band_args.supersampling_factor}; '
+            f'psf_supersampling_factor={band_args.psf_supersampling_factor}; '
+            f'supersampling_convolution={band_args.supersampling_convolution}; '
             f'likelihood_scale={band_args.likelihood_scale}; '
             f'source_grid_scale={band_args.source_grid_scale}'
         )
@@ -1051,7 +1057,11 @@ def build_and_run_multiband(config_path=None):
         print(f'[{band_name}] Point source type list: {point_types}')
         lens_image = create_lens_image(
             param_list, type_list, image_data, noise_map, psf_data, band_args.pixel_scale,
-            kwargs_numerics={'supersampling_factor': band_args.supersampling_factor},
+            psf_supersampling_factor=band_args.psf_supersampling_factor,
+            kwargs_numerics={
+                'supersampling_factor': band_args.supersampling_factor,
+                'supersampling_convolution': bool(band_args.supersampling_convolution),
+            },
             kwargs_lens_equation_solver=kwargs_lens_equation_solver_model,
             source_arc_mask=source_arc_mask,
             source_grid_scale=float(getattr(band_args, 'source_grid_scale', 1.0)),
@@ -1234,6 +1244,7 @@ def build_and_run_multiband(config_path=None):
                 'kwargs_numerics_fit_by_band': {
                     band['name']: {
                         'supersampling_factor': band['supersampling_factor'],
+                        'supersampling_convolution': band['supersampling_convolution'],
                     }
                     for band in bands
                 },

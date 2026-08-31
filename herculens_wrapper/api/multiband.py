@@ -454,8 +454,13 @@ class MultiBandModel:
         for index, (name, data) in enumerate(self.observations.items()):
             types, params = definitions[name]; validate_param_list(types, params)
             if shared_types is None: shared_types, shared_params = types["lens_mass_type_list"], params["lens_mass_params_list"]
-            lens_image = create_lens_image(params, types, data.likelihood_image, data.likelihood_noise, data.psf, data.pixel_scale,
-                kwargs_numerics=self.numerics, source_arc_mask=data.source_arc_mask, source_grid_scale=self.source_grid_scale)
+            lens_image = create_lens_image(
+                params, types, data.likelihood_image, data.likelihood_noise,
+                data.psf, data.pixel_scale,
+                psf_supersampling_factor=data.psf_supersampling_factor,
+                kwargs_numerics=self.numerics, source_arc_mask=data.source_arc_mask,
+                source_grid_scale=self.source_grid_scale,
+            )
             bands.append({"name": name, "site_prefix": band_site_prefix(index, name), "lens_image": lens_image,
                 "image_data": data.likelihood_image, "noise_map": data.likelihood_noise, "fit_mask_bool": data.likelihood_mask,
                 "param_list": params, "type_list": types, "args": SimpleNamespace(likelihood_scale=self.likelihood_scale)})

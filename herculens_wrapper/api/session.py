@@ -349,7 +349,13 @@ class SingleBandModel:
         """Create the backend model from the declared profiles and numerics."""
         create_lens_image, create_prob_model, _, validate_param_list = _model_backend()
         type_list, param_list = self.definition.as_dicts(); validate_param_list(type_list, param_list)
-        self.lens_image = create_lens_image(param_list, type_list, self.data.likelihood_image, self.data.likelihood_noise, self.data.psf, self.data.pixel_scale, kwargs_numerics=self.numerics, source_arc_mask=self.data.source_arc_mask, source_grid_scale=self.source_grid_scale)
+        self.lens_image = create_lens_image(
+            param_list, type_list, self.data.likelihood_image,
+            self.data.likelihood_noise, self.data.psf, self.data.pixel_scale,
+            psf_supersampling_factor=self.data.psf_supersampling_factor,
+            kwargs_numerics=self.numerics, source_arc_mask=self.data.source_arc_mask,
+            source_grid_scale=self.source_grid_scale,
+        )
         self.prob_model = create_prob_model(
             param_list, type_list, self.lens_image, self.data.likelihood_image,
             self.data.likelihood_noise, likelihood_mask=self.data.likelihood_mask,

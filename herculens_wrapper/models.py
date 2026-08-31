@@ -2077,6 +2077,7 @@ def create_lens_image(
     noise_map,
     psf_data,
     pixel_scale,
+    psf_supersampling_factor=1,
     kwargs_numerics=None,
     kwargs_lens_equation_solver=None,
     source_arc_mask=None,
@@ -2084,7 +2085,23 @@ def create_lens_image(
     conjugate_points=None,
 ):
     num_pixels = image_data.shape[0]
-    psf = PSF(psf_type='PIXEL', kernel_point_source=psf_data, pixel_size=pixel_scale)
+    if not isinstance(psf_supersampling_factor, (int, np.integer)) or isinstance(psf_supersampling_factor, bool) or psf_supersampling_factor < 1:
+        raise ValueError("psf_supersampling_factor must be a positive integer.")
+    psf_supersampling_factor = int(psf_supersampling_factor)
+    if kwargs_numerics and kwargs_numerics.get('supersampling_convolution', False):
+        model_supersampling_factor = int(kwargs_numerics.get('supersampling_factor', 1))
+        if psf_supersampling_factor > 1 and psf_supersampling_factor != model_supersampling_factor:
+            raise ValueError(
+                "With supersampling_convolution=True, psf_supersampling_factor "
+                f"({psf_supersampling_factor}) must match supersampling_factor "
+                f"({model_supersampling_factor})."
+            )
+    psf = PSF(
+        psf_type='PIXEL',
+        kernel_point_source=psf_data,
+        pixel_size=pixel_scale,
+        kernel_supersampling_factor=psf_supersampling_factor,
+    )
     noise = Noise(nx=num_pixels, ny=num_pixels, noise_map=noise_map)
     pixel_grid, ps_grid = create_pixel_grids(num_pixels, pixel_scale)
 

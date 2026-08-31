@@ -50,10 +50,22 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--residual-vis-max", type=float, default=3.0)
     parser.add_argument("--crop-size", type=int, default=80)
     parser.add_argument("--pixel-scale", type=float, default=0.08)
+    parser.add_argument(
+        "--psf-supersampling-factor",
+        type=int,
+        default=1,
+        help="Sampling factor of the supplied PSF kernel relative to image pixels.",
+    )
     parser.add_argument("--supersampling-factor", type=int, default=2)
+    parser.add_argument(
+        "--supersampling-convolution",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Convolve on the supersampled model grid before binning to the data grid.",
+    )
     parser.add_argument("--source-grid-scale", type=float, default=0.8)
     args = parser.parse_args()
-    for name in ("svi_runs", "svi_iterations", "pixelated_warmup", "hmc_warmup", "hmc_samples", "hmc_chains", "checkpoint_interval"):
+    for name in ("svi_runs", "svi_iterations", "pixelated_warmup", "hmc_warmup", "hmc_samples", "hmc_chains", "checkpoint_interval", "psf_supersampling_factor"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
     if args.stage == "single" and (args.sampler is None or args.source_method is None):
@@ -65,7 +77,9 @@ def make_data(args: argparse.Namespace):
     from herculens_wrapper.api import SingleBandData
     return SingleBandData.from_fits(
         DATA_DIR / "sim_sl.fits", DATA_DIR / "sim_sl_noise.fits", DATA_DIR / "sim_sl_psf.fits",
-        pixel_scale=args.pixel_scale, crop_size=args.crop_size,
+        pixel_scale=args.pixel_scale,
+        psf_supersampling_factor=args.psf_supersampling_factor,
+        crop_size=args.crop_size,
         source_arc_mask_radius={"inner": 0.8, "outer": 2.5},
     )
 
@@ -109,7 +123,11 @@ def make_model(args: argparse.Namespace, source_method: str):
     from herculens_wrapper.api import SingleBandModel
     return SingleBandModel(
         profiles=make_profiles(source_method, args.pixel_scale, args.crop_size), observation=make_data(args),
-        numerics={"supersampling_factor": args.supersampling_factor}, source_grid_scale=args.source_grid_scale,
+        numerics={
+            "supersampling_factor": args.supersampling_factor,
+            "supersampling_convolution": args.supersampling_convolution,
+        },
+        source_grid_scale=args.source_grid_scale,
     )
 
 
