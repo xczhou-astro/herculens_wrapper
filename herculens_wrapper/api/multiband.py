@@ -390,6 +390,24 @@ class MultiBandFitResult:
                         site_order=self._joint_corner_site_order(),
                     )
             except Exception as error: skipped["corner"] = str(error)
+        elif self.samples is not None:
+            try:
+                from .samplers import hmc_one_sigma_kwargs
+
+                for band in self._model.bands:
+                    name, directory = band["name"], root / band["name"]
+                    sigma_json = hmc_one_sigma_kwargs(
+                        self._model.prob_model, self.samples, self.parameters,
+                        band["type_list"], directory,
+                        kwargs_from_params=lambda params, band_name=name: (
+                            self._model.prob_model.params2kwargs_by_band(params)[band_name]
+                        ),
+                    )
+                    with (directory / "kwargs_sigma.json").open("w") as stream:
+                        json.dump(sigma_json, stream, indent=2, default=json_serializer)
+                    files[f"{name}_kwargs_sigma"] = directory / "kwargs_sigma.json"
+            except Exception as error:
+                skipped["kwargs_sigma"] = str(error)
         if self.samples is not None and include_corner:
             try:
                 samples = {key: np.asarray(value) for key, value in self.samples.items()}

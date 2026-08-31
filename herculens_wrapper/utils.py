@@ -2,6 +2,8 @@ import filecmp
 import json
 import os
 import shutil
+from collections.abc import Mapping
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -57,6 +59,28 @@ def json_serializer(obj):
     if hasattr(obj, '__dict__'):
         return obj.__dict__
     return str(obj)
+
+
+def save_config(args, save_path, *, filename='config.json'):
+    """Save argparse arguments (or a mapping) as a JSON configuration file.
+
+    ``save_path`` may be a directory, in which case ``filename`` is used, or
+    an explicit ``.json`` path.  ``Path``, NumPy, and JAX values are converted
+    through :func:`json_serializer`.
+    """
+    if isinstance(args, Mapping):
+        payload = dict(args)
+    elif hasattr(args, '__dict__'):
+        payload = vars(args).copy()
+    else:
+        raise TypeError("args must be an argparse.Namespace, SimpleNamespace, or mapping.")
+    output = Path(save_path).expanduser()
+    if output.suffix.lower() != '.json':
+        output = output / filename
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open('w', encoding='utf-8') as stream:
+        json.dump(payload, stream, indent=4, default=json_serializer)
+    return output
 
 
 def center_crop(image, crop_size):

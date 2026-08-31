@@ -12,6 +12,76 @@ from typing import Any, Mapping
 import numpy as np
 from .models import SamplerName
 
+
+def _nested_difference(reference: Any, bound: Any, *, upper: bool) -> Any:
+    """Return non-negative ``bound - reference`` or ``reference - bound``."""
+    if isinstance(reference, Mapping) and isinstance(bound, Mapping):
+        return {
+            key: _nested_difference(reference[key], bound[key], upper=upper)
+            for key in reference if key in bound
+        }
+    if isinstance(reference, list) and isinstance(bound, list):
+        return [_nested_difference(a, b, upper=upper) for a, b in zip(reference, bound)]
+    try:
+        delta = np.asarray(bound) - np.asarray(reference) if upper else np.asarray(reference) - np.asarray(bound)
+        return np.maximum(delta, 0.0)
+    except (TypeError, ValueError):
+        return reference
+
+
+def _pack_asymmetric_one_sigma(lower: Any, upper: Any) -> Any:
+    """Pack scalar errors as ``[lower, upper]`` and arrays as one RMS map."""
+    if isinstance(lower, Mapping) and isinstance(upper, Mapping):
+        return {
+            key: _pack_asymmetric_one_sigma(lower[key], upper[key])
+            for key in lower if key in upper
+        }
+    if isinstance(lower, list) and isinstance(upper, list):
+        return [_pack_asymmetric_one_sigma(a, b) for a, b in zip(lower, upper)]
+    try:
+        lower_array, upper_array = np.asarray(lower), np.asarray(upper)
+        if lower_array.ndim == 0 and upper_array.ndim == 0:
+            return [float(lower_array), float(upper_array)]
+        # FITS image stubs represent one array.  Use the RMS of the unequal
+        # lower/upper credible errors, analogous to a conventional sigma map.
+        return np.sqrt(0.5 * (np.square(lower_array) + np.square(upper_array)))
+    except (TypeError, ValueError):
+        return lower
+
+
+def hmc_one_sigma_kwargs(
+    prob_model: Any,
+    samples: Mapping[str, Any],
+    median_parameters: Mapping[str, Any],
+    type_list: Mapping[str, list[str]],
+    directory: str | Path,
+    kwargs_from_params: Any | None = None,
+) -> dict[str, Any]:
+    """Build one-sigma HMC uncertainties in the legacy kwargs-sigma layout."""
+    from ..utils import kwargs_best_to_json_pixelated_npy
+
+    root = Path(directory)
+    kwargs_from_params = prob_model.params2kwargs if kwargs_from_params is None else kwargs_from_params
+    reference_kwargs = kwargs_from_params(median_parameters)
+    lower_params, upper_params = dict(median_parameters), dict(median_parameters)
+    for name, values in samples.items():
+        if name not in median_parameters:
+            continue
+        lower_params[name] = np.percentile(np.asarray(values), 15.865525, axis=0)
+        upper_params[name] = np.percentile(np.asarray(values), 84.134475, axis=0)
+    lower_kwargs = kwargs_from_params(lower_params)
+    upper_kwargs = kwargs_from_params(upper_params)
+    one_sigma = _pack_asymmetric_one_sigma(
+        _nested_difference(reference_kwargs, lower_kwargs, upper=False),
+        _nested_difference(reference_kwargs, upper_kwargs, upper=True),
+    )
+    return kwargs_best_to_json_pixelated_npy(
+        one_sigma, str(root), type_list,
+        pixels_filename="kwargs_sigma_pixels.fits",
+        pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
+        lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
+    )
+
 @dataclass
 class SamplerConfig:
     name: SamplerName = "optax"
@@ -474,6 +544,17 @@ class FitResult:
                     pixels_filename="kwargs_source_pixels_sigma.fits",
                     pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
                     lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
+                )
+                with (directory / "kwargs_sigma.json").open("w") as stream:
+                    json.dump(sigma_json, stream, indent=4, default=json_serializer)
+                files["kwargs_sigma"] = directory / "kwargs_sigma.json"
+            except Exception as error:
+                skipped["kwargs_sigma"] = str(error)
+        elif self.samples is not None:
+            try:
+                sigma_json = hmc_one_sigma_kwargs(
+                    model.prob_model, self.samples, self.parameters,
+                    type_list, directory,
                 )
                 with (directory / "kwargs_sigma.json").open("w") as stream:
                     json.dump(sigma_json, stream, indent=4, default=json_serializer)
