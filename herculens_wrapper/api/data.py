@@ -291,6 +291,69 @@ class SingleBandData:
                 )
         return self._source_arc_mask
 
+    def set_source_arc_mask_from_snr(
+        self,
+        *,
+        threshold: float = 2.0,
+        smoothing_sigma_pixels: float = 0.0,
+        image: np.ndarray | None = None,
+        dilate_pixels: int = 0,
+        min_pixels: int = 8,
+        save_path: str | Path | None = None,
+    ) -> np.ndarray:
+        """Create and activate a source-arc mask from a (possibly residual) SNR map.
+
+        RTU grids should be guided by pixels containing lensed source light,
+        rather than by a broad geometrical annulus.  ``image`` may therefore
+        be a lens-light-subtracted image.  When omitted, the processed science
+        image is used.  ``smoothing_sigma_pixels`` smooths the SNR map before
+        thresholding; values around 10--15 reproduce the construction used in
+        Enzi et al. (2026) for large, well-resolved data.
+
+        The generated in-memory mask takes precedence over either previously
+        configured mask mechanism.  Optionally it is also written as a FITS
+        image, ready to be reused through ``source_arc_mask_path``.
+        """
+        if not np.isfinite(threshold):
+            raise ValueError("threshold must be finite.")
+        if not np.isfinite(smoothing_sigma_pixels) or smoothing_sigma_pixels < 0:
+            raise ValueError("smoothing_sigma_pixels must be finite and non-negative.")
+        if not isinstance(dilate_pixels, int) or isinstance(dilate_pixels, bool) or dilate_pixels < 0:
+            raise ValueError("dilate_pixels must be a non-negative integer.")
+        if not isinstance(min_pixels, int) or isinstance(min_pixels, bool) or min_pixels < 1:
+            raise ValueError("min_pixels must be a positive integer.")
+
+        source_image = self.image if image is None else np.asarray(image, dtype=float)
+        if source_image.shape != self.image.shape:
+            raise ValueError("image must have the same shape as the processed data image.")
+        if not np.all(np.isfinite(source_image)):
+            raise ValueError("image must contain finite values.")
+        with np.errstate(divide="ignore", invalid="ignore"):
+            snr = np.where(self.noise > 0, source_image / self.noise, 0.0)
+        if smoothing_sigma_pixels > 0:
+            from scipy.ndimage import gaussian_filter
+            snr = gaussian_filter(snr, sigma=float(smoothing_sigma_pixels))
+        mask = np.asarray(snr >= threshold, dtype=bool)
+        if dilate_pixels:
+            from scipy.ndimage import binary_dilation
+            mask = binary_dilation(mask, iterations=dilate_pixels)
+        if int(mask.sum()) < min_pixels:
+            raise ValueError(
+                f"SNR mask contains {int(mask.sum())} pixels; require at least {min_pixels}. "
+                "Lower threshold or use a less aggressive smoothing scale."
+            )
+
+        self.source_arc_mask_path = None
+        self.source_arc_mask_radius = None
+        self._source_arc_mask = mask
+        if save_path is not None:
+            from astropy.io import fits
+            destination = Path(save_path).expanduser()
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            fits.writeto(destination, mask.astype(np.uint8), overwrite=True)
+            self._input_paths["source_arc_mask"] = destination
+        return mask
+
     @property
     def contaminate_mask(self) -> np.ndarray | None:
         """Boolean mask of contaminant pixels excluded from the likelihood."""

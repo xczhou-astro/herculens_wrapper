@@ -2228,7 +2228,14 @@ def create_lens_image(
         source_kwargs_pixelated = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
         if source_kwargs_pixelated.get('grid_kind', 'uniform') == 'ray_transformed_uniform':
             rtu_source_settings = source_kwargs_pixelated
-        pixel_adaptive_grid = source_kwargs_pixelated.get('pixel_adaptive_grid', False)
+        # RTU itself performs the adaptive mapping before evaluating the
+        # profile.  Once in (u, v) coordinates the Pixelated profile lives on
+        # a fixed regular grid, so it must not enter Herculens' separate
+        # adaptive-grid interpolation path a second time.
+        pixel_adaptive_grid = (
+            False if rtu_source_settings is not None
+            else source_kwargs_pixelated.get('pixel_adaptive_grid', False)
+        )
         if pixel_adaptive_grid:
             pixel_grid_shape = int(source_kwargs_pixelated.get('pixel_grid_shape', 100))
             source_light_model = LightModel(
@@ -2236,6 +2243,20 @@ def create_lens_image(
                 pixel_adaptive_grid=True,
                 pixel_interpol=source_kwargs_pixelated.get('pixel_interpol', 'fast_bilinear'),
                 kwargs_pixelated={'num_pixels': pixel_grid_shape}
+            )
+        elif rtu_source_settings is not None:
+            # LensImage needs an initial PixelGrid during construction, but
+            # LensImageExtension replaces it immediately with the fixed RTU
+            # [0, 1]^2 grid.  Pass only Herculens' native grid-size option:
+            # forwarding the complete API dictionary would incorrectly send
+            # e.g. ``grid_kind`` to ``PixelGrid.create_model_grid``.  Keeping
+            # the requested size here is essential because the extension reads
+            # it before replacing the physical coordinates by the RTU grid.
+            source_light_model = LightModel(
+                src_types,
+                kwargs_pixelated={
+                    'num_pixels': int(source_kwargs_pixelated.get('pixel_grid_shape', 100)),
+                },
             )
         else:
             source_light_model = LightModel(src_types, kwargs_pixelated=source_kwargs_pixelated)
