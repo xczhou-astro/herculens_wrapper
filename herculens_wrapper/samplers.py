@@ -690,11 +690,22 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
         upper_src = p84_src - median_src
 
         if save_npy and save_path is not None:
-            from herculens_wrapper.utils import save_array_fits
-            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels.fits'), median_src)
-            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels_lower.fits'), lower_src)
-            save_array_fits(os.path.join(save_path, 'kwargs_source_pixels_upper.fits'), upper_src)
-            print(f"[hmc] Saved source-pixel median and 1-sigma FITS arrays to {save_path}")
+            from herculens_wrapper.utils import append_array_fits, save_array_fits
+            source_path = os.path.join(save_path, 'kwargs_source_pixels.fits')
+            # Keep all posterior source summaries together.  LOWER and UPPER
+            # are the asymmetric 16th/84th-percentile offsets from PRIMARY,
+            # rather than a lossy symmetrised ``SIGMA`` map.
+            save_array_fits(source_path, median_src)
+            append_array_fits(source_path, lower_src, extension_name='LOWER')
+            append_array_fits(source_path, upper_src, extension_name='UPPER')
+            for legacy_name in (
+                'kwargs_source_pixels_lower.fits',
+                'kwargs_source_pixels_upper.fits',
+            ):
+                legacy_path = os.path.join(save_path, legacy_name)
+                if os.path.isfile(legacy_path):
+                    os.remove(legacy_path)
+            print(f"[hmc] Saved source-pixel median/lower/upper FITS extensions to {source_path}")
 
         return median_src, lower_src, upper_src
     except Exception as e:

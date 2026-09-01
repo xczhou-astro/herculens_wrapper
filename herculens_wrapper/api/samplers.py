@@ -13,6 +13,31 @@ import numpy as np
 from .models import SamplerName
 
 
+_SVI_COMPLETION_FILES = (
+    "kwargs_result.json",
+    "metrics.json",
+    "modeling_result.fits",
+    "parameter_shifts.txt",
+    "svi_loss_history.json",
+    "svi_guide_params.pkl",
+)
+
+
+def is_completed_svi_run(save_path: str | Path) -> bool:
+    """Return whether a standard API SVI run was exported successfully.
+
+    Plot files are intentionally not required: they can be legitimately absent
+    when a diagnostic does not apply.  A missing result, guide, or model FITS
+    means the run was incomplete.  Incomplete SVI runs are restarted from
+    their configured initialisation; unlike HMC, SVI has no saved optimizer
+    state to continue an individual iteration sequence.
+    """
+    directory = Path(save_path).expanduser()
+    return directory.is_dir() and all(
+        (directory / filename).is_file() for filename in _SVI_COMPLETION_FILES
+    )
+
+
 def _nested_difference(reference: Any, bound: Any, *, upper: bool) -> Any:
     """Return non-negative ``bound - reference`` or ``reference - bound``."""
     if isinstance(reference, Mapping) and isinstance(bound, Mapping):
@@ -75,21 +100,48 @@ def hmc_one_sigma_kwargs(
         _nested_difference(reference_kwargs, lower_kwargs, upper=False),
         _nested_difference(reference_kwargs, upper_kwargs, upper=True),
     )
+    # Physical source-pixel errors are intrinsically asymmetric.  Their
+    # actual 16th/84th-percentile offsets are saved as LOWER/UPPER extensions
+    # by ``evaluate_mcmc_source_pixels_summary``; do not replace them here by
+    # a parameter-wise RMS approximation.
     source = (one_sigma.get("kwargs_source") or [{}])[0]
-    if source.get("pixels") is not None:
-        append_array_fits(root / "kwargs_source_pixels.fits", source["pixels"])
-    if source.get("pixels_wn") is not None:
-        append_array_fits(root / "kwargs_source_pixels_wn.fits", source["pixels_wn"])
-    return kwargs_best_to_json_pixelated_npy(
+    if isinstance(source, Mapping):
+        source.pop("pixels", None)
+        # ``pixels_wn`` is an internal latent field, not a physical source
+        # reconstruction.  Its conventional symmetric sigma map is retained.
+        if source.get("pixels_wn") is not None:
+            append_array_fits(
+                root / "kwargs_source_pixels_wn.fits",
+                source["pixels_wn"],
+                extension_name="SIGMA",
+            )
+    sigma_json = kwargs_best_to_json_pixelated_npy(
         one_sigma, str(root), type_list,
         pixels_filename="kwargs_source_pixels.fits",
         pixels_wn_filename="kwargs_source_pixels_wn.fits",
         lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
         save_pixel_arrays=False,
         references_already_saved=True,
-        pixels_hdu="SIGMA",
         pixels_wn_hdu="SIGMA",
     )
+    source_json = (sigma_json.get("kwargs_source") or [{}])[0]
+    if isinstance(source_json, dict):
+        source_json.pop("pixels", None)
+        source_json["pixels_lower"] = {
+            "_format": "pixelated_pixels_fits",
+            "file": "kwargs_source_pixels.fits",
+            "hdu": "LOWER",
+            "_unit": "pixel_flux",
+            "_pixel_area_reference": "image_data_pixel",
+        }
+        source_json["pixels_upper"] = {
+            "_format": "pixelated_pixels_fits",
+            "file": "kwargs_source_pixels.fits",
+            "hdu": "UPPER",
+            "_unit": "pixel_flux",
+            "_pixel_area_reference": "image_data_pixel",
+        }
+    return sigma_json
 
 @dataclass
 class SamplerConfig:
@@ -561,6 +613,22 @@ class FitResult:
                 )
             except Exception as error:
                 skipped["rtu_source_fits"] = str(error)
+
+        # HMC evaluates every physical source reconstruction before taking its
+        # pixel-wise posterior summary.  Preserve the asymmetric intervals in
+        # the same FITS file as the median source instead of writing an RMS
+        # ``SIGMA`` extension.
+        if self.samples is not None:
+            source_lower = self.derived.get("source_plane_lower")
+            source_upper = self.derived.get("source_plane_upper")
+            if source_lower is not None and source_upper is not None:
+                try:
+                    from ..utils import append_array_fits
+                    source_path = directory / "kwargs_source_pixels.fits"
+                    append_array_fits(source_path, source_lower, extension_name="LOWER")
+                    append_array_fits(source_path, source_upper, extension_name="UPPER")
+                except Exception as error:
+                    skipped["hmc_source_intervals"] = str(error)
 
         metrics = self.metrics()
         save_metrics(

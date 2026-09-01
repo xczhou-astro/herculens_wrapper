@@ -188,7 +188,9 @@ def prepare_stage(model, args: argparse.Namespace, directory: Path) -> None:
 
 
 def run_svi(args: argparse.Namespace, source_method: str, directory: Path, init_path: Path | None) -> None:
-    from herculens_wrapper.api import SamplerConfig, SingleBandResultsCombination
+    from herculens_wrapper.api import (
+        SamplerConfig, SingleBandResultsCombination, is_completed_svi_run,
+    )
 
     directory.mkdir(parents=True, exist_ok=True)
     with stage_logging(directory):
@@ -199,6 +201,11 @@ def run_svi(args: argparse.Namespace, source_method: str, directory: Path, init_
         for run_id in range(args.svi_runs):
             run_dir = directory / f"run_{run_id}"
             run_dir.mkdir(parents=True, exist_ok=True)
+            if is_completed_svi_run(run_dir):
+                print(f"[svi] Run {run_id} is complete; loading it and continuing.")
+                model.load(run_dir, seed=args.seed + run_id)
+                results.append(model.get_results(random_seed=args.seed + run_id))
+                continue
             initial = model.initialize(
                 seed=args.seed + run_id, run_id=run_id, init_params_path=init_path,
                 pixelated_init_match="image",
