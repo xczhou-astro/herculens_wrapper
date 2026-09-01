@@ -735,10 +735,21 @@ def plot_composite_2x3_panel(
         and isinstance(kwargs_result['kwargs_source'][0], dict)
         and 'pixels' in kwargs_result['kwargs_source'][0]
     )
+    is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
 
     if is_pixelated:
         source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
-        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+        if is_rtu:
+            x_src_corners, y_src_corners = lens_image.get_rtu_source_plane_grid(
+                kwargs_result.get('kwargs_lens', None),
+            )
+            x_src_corners = np.asarray(x_src_corners)
+            y_src_corners = np.asarray(y_src_corners)
+            extent_src = [
+                float(x_src_corners.min()), float(x_src_corners.max()),
+                float(y_src_corners.min()), float(y_src_corners.max()),
+            ]
+        elif getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             kwargs_lens = kwargs_result.get('kwargs_lens', None)
             npix_src = source_for_plot.shape[0]
             _, _, extent_src = lens_image.get_source_coordinates(
@@ -764,17 +775,18 @@ def plot_composite_2x3_panel(
 
     # Caustics
     caustics = []
-    try:
-        _, caustics = model_util.critical_lines_caustics(
-            lens_image, kwargs_result['kwargs_lens'], supersampling=5,
-        )
-        caustics = _filter_caustics(caustics)
-    except Exception:
-        pass
+    if not is_rtu:
+        try:
+            _, caustics = model_util.critical_lines_caustics(
+                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+            )
+            caustics = _filter_caustics(caustics)
+        except Exception:
+            pass
 
     # Ray-trace outer ring boundary to source plane
     mapped_ring_contours = []
-    if mask is not None:
+    if mask is not None and not is_rtu:
         try:
             mask_arr = np.asarray(mask).astype(bool)
             if np.any(mask_arr) and not np.all(mask_arr):
@@ -814,7 +826,7 @@ def plot_composite_2x3_panel(
     inside_mask = None
     xx_src_grid = None
     yy_src_grid = None
-    if mapped_ring_contours:
+    if mapped_ring_contours and not is_rtu:
         try:
             from matplotlib.path import Path
             inside_mask = np.zeros(source_for_plot.shape, dtype=bool)
@@ -886,12 +898,18 @@ def plot_composite_2x3_panel(
     axes[1, 1].set_title('Lensed Source')
 
     # Panel (1, 2): Source (Source Plane, Linear scale, no colorbar)
-    axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
+    if is_rtu:
+        axes[1, 2].pcolormesh(
+            x_src_corners, y_src_corners, source_for_plot,
+            shading='flat', cmap='twilight', norm=norm_src_plane,
+        )
+    else:
+        axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
     axes[1, 2].axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     axes[1, 2].axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     
     # Draw diagonal stripes (hatching) in the outside region
-    if mapped_ring_contours and inside_mask is not None:
+    if mapped_ring_contours and inside_mask is not None and not is_rtu:
         try:
             axes[1, 2].contourf(
                 xx_src_grid, yy_src_grid, inside_mask.astype(float),
@@ -908,7 +926,7 @@ def plot_composite_2x3_panel(
             axes[1, 2].plot(beta_x_b, beta_y_b, color='orange', lw=1.5, ls='--', alpha=0.95)
     axes[1, 2].set_xlim(extent_src[0], extent_src[1])
     axes[1, 2].set_ylim(extent_src[2], extent_src[3])
-    axes[1, 2].set_title('Source')
+    axes[1, 2].set_title('Source (RTU physical grid)' if is_rtu else 'Source')
 
     for a in axes.ravel():
         a.set_xlabel('arcsec')
