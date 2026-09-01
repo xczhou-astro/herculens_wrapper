@@ -2,10 +2,10 @@
 
 Examples
 --------
-python sersic_modelling.py --stage pipeline
-python sersic_modelling.py --stage pixelated_svi
-python sersic_modelling.py --stage parametric_hmc
-python sersic_modelling.py --stage single --sampler svi --source-method parametric
+python herculens_modelling.py --data-dir /path/to/data --stage pipeline
+python herculens_modelling.py --data-dir /path/to/data --stage pixelated_svi --pixelated-grid-kind ray_transformed_uniform
+python herculens_modelling.py --data-dir /path/to/data --stage parametric_hmc
+python herculens_modelling.py --data-dir /path/to/data --stage single --sampler svi --source-method parametric
 """
 from __future__ import annotations
 
@@ -21,7 +21,6 @@ import numpy as np
 
 SCRIPT_PATH = Path(__file__).resolve()
 SCRIPT_DIR = SCRIPT_PATH.parent
-DATA_DIR = SCRIPT_DIR.parent / "simulation_sersic_no_lens_light_finer"
 LOCAL_WRAPPER = SCRIPT_DIR.parents[1] / "herculens_wrapper"
 if LOCAL_WRAPPER.is_dir() and str(LOCAL_WRAPPER) not in sys.path:
     sys.path.insert(0, str(LOCAL_WRAPPER))
@@ -34,6 +33,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--stage", choices=("pipeline", "parametric_svi", "parametric_hmc", "pixelated_svi", "pixelated_hmc", "single"), default="pipeline")
     parser.add_argument("--sampler", choices=("svi", "hmc"), default=None)
     parser.add_argument("--source-method", choices=("parametric", "pixelated"), default=None)
+    parser.add_argument(
+        "--data-dir", type=Path, required=True,
+        help="Directory containing sim_sl.fits, sim_sl_noise.fits, and sim_sl_psf.fits.",
+    )
     parser.add_argument("--output-root", type=Path, default=SCRIPT_DIR)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--gpus", default=None, help="CUDA_VISIBLE_DEVICES value; omitted leaves the environment unchanged.")
@@ -45,8 +48,6 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--hmc-chains", type=int, default=4)
     parser.add_argument("--checkpoint-interval", type=int, default=1_000)
     parser.add_argument("--init-params-path", type=Path, default=None, help="Warm start for a single selected stage.")
-    parser.add_argument("--pixelated-init-path", type=Path, default=None, help="Parametric-SVI warm start in pipeline mode.")
-    parser.add_argument("--hmc-init-path", type=Path, default=None, help="Pixelated-SVI warm start in pipeline mode.")
     parser.add_argument("--residual-vis-max", type=float, default=3.0)
     parser.add_argument("--crop-size", type=int, default=80)
     parser.add_argument("--pixel-scale", type=float, default=0.08)
@@ -64,19 +65,32 @@ def parse_arguments() -> argparse.Namespace:
         help="Convolve on the supersampled model grid before binning to the data grid.",
     )
     parser.add_argument("--source-grid-scale", type=float, default=0.8)
+    parser.add_argument(
+        "--pixelated-grid-kind",
+        choices=("uniform", "ray_transformed_uniform"),
+        default="uniform",
+        help="Pixelated-source grid: legacy uniform grid or the RTU adaptive physical grid.",
+    )
+    parser.add_argument(
+        "--rtu-polynomial-order", type=int, default=11,
+        help="Odd inverse-CDF polynomial order used only by the RTU source grid.",
+    )
     args = parser.parse_args()
     for name in ("svi_runs", "svi_iterations", "pixelated_warmup", "hmc_warmup", "hmc_samples", "hmc_chains", "checkpoint_interval", "psf_supersampling_factor"):
         if getattr(args, name) < 1:
             parser.error(f"--{name.replace('_', '-')} must be positive.")
     if args.stage == "single" and (args.sampler is None or args.source_method is None):
         parser.error("--stage single requires both --sampler and --source-method.")
+    if args.rtu_polynomial_order < 3 or args.rtu_polynomial_order % 2 == 0:
+        parser.error("--rtu-polynomial-order must be an odd integer of at least 3.")
     return args
 
 
 def make_data(args: argparse.Namespace):
     from herculens_wrapper.api import SingleBandData
+    data_dir = args.data_dir.expanduser().resolve()
     return SingleBandData.from_fits(
-        DATA_DIR / "sim_sl.fits", DATA_DIR / "sim_sl_noise.fits", DATA_DIR / "sim_sl_psf.fits",
+        data_dir / "sim_sl.fits", data_dir / "sim_sl_noise.fits", data_dir / "sim_sl_psf.fits",
         pixel_scale=args.pixel_scale,
         psf_supersampling_factor=args.psf_supersampling_factor,
         crop_size=args.crop_size,
@@ -84,8 +98,15 @@ def make_data(args: argparse.Namespace):
     )
 
 
-def make_profiles(source_method: str, pixel_scale: float, crop_size: int):
-    from herculens_wrapper.api import LensProfileCollection, LightProfile, MassProfile
+def make_profiles(
+    source_method: str,
+    pixel_scale: float,
+    crop_size: int,
+    *,
+    pixelated_grid_kind: str = "uniform",
+    rtu_polynomial_order: int = 11,
+):
+    from herculens_wrapper.api import LensProfileCollection, LightProfile, MassProfile, PixelatedSource
     lens_mass = MassProfile(["SIE", "SHEAR"], prior=[
         {"theta_E": [1.0, 2.0], "center_x": [0.0, 0.1, -0.3, 0.3],
          "center_y": [0.0, 0.1, -0.3, 0.3], "e1": [-0.5, 0.5], "e2": [-0.5, 0.5]},
@@ -105,15 +126,17 @@ def make_profiles(source_method: str, pixel_scale: float, crop_size: int):
             "center_x": [0.0, 0.1, -0.3, 0.3], "center_y": [0.0, 0.1, -0.3, 0.3],
         })
     elif source_method == "pixelated":
-        source_light = LightProfile("PIXELATED", prior={
-            "pixel_grid": {"pixel_adaptive_grid": True, "pixel_grid_shape": 80,
-                           "pixel_interpol": "fast_bilinear", "pixel_scale_factor": 0.5,
-                           "grid_center": (0.0, 0.0), "grid_shape": (2.0, 2.0)},
-            "pixelated_prior": {"prior_type": "matern", "regul_strengths": (3.0, 3.0),
-                                 "k_zero": 0.0, "n_value_low": 1e-4, "n_value_high": 100.0,
-                                 "sigma_low": 1e-5, "sigma_high": 10.0,
-                                 "rho_low": None, "rho_high": None, "positive": True},
-        })
+        source_light = PixelatedSource(
+            pixel_grid={"grid_kind": pixelated_grid_kind,
+                        "rtu_polynomial_order": rtu_polynomial_order,
+                        "pixel_adaptive_grid": True, "pixel_grid_shape": 80,
+                        "pixel_interpol": "fast_bilinear", "pixel_scale_factor": 0.5,
+                        "grid_center": (0.0, 0.0), "grid_shape": (2.0, 2.0)},
+            pixelated_prior={"prior_type": "matern", "regul_strengths": (3.0, 3.0),
+                              "k_zero": 0.0, "n_value_low": 1e-4, "n_value_high": 100.0,
+                              "sigma_low": 1e-5, "sigma_high": 10.0,
+                              "rho_low": None, "rho_high": None, "positive": True},
+        )
     else:
         raise ValueError(f"Unsupported source method {source_method!r}.")
     return LensProfileCollection(lens_mass=lens_mass, lens_light=None, source_light=source_light)
@@ -122,7 +145,12 @@ def make_profiles(source_method: str, pixel_scale: float, crop_size: int):
 def make_model(args: argparse.Namespace, source_method: str):
     from herculens_wrapper.api import SingleBandModel
     return SingleBandModel(
-        profiles=make_profiles(source_method, args.pixel_scale, args.crop_size), observation=make_data(args),
+        profiles=make_profiles(
+            source_method, args.pixel_scale, args.crop_size,
+            pixelated_grid_kind=args.pixelated_grid_kind,
+            rtu_polynomial_order=args.rtu_polynomial_order,
+        ),
+        observation=make_data(args),
         numerics={
             "supersampling_factor": args.supersampling_factor,
             "supersampling_convolution": args.supersampling_convolution,
@@ -247,10 +275,10 @@ def main() -> None:
     }
     if args.stage == "pipeline":
         if args.sampler is not None or args.source_method is not None or args.init_params_path is not None:
-            raise ValueError("For pipeline warm starts use --pixelated-init-path and --hmc-init-path.")
+            raise ValueError("--stage pipeline chooses its preceding-stage outputs automatically; do not set sampler, source-method, or init-params-path.")
         run_svi(args, "parametric", paths["parametric_svi"], None)
-        run_svi(args, "pixelated", paths["pixelated_svi"], args.pixelated_init_path or paths["parametric_svi"])
-        run_hmc(args, paths["pixelated_hmc"], args.hmc_init_path or paths["pixelated_svi"], "pixelated")
+        run_svi(args, "pixelated", paths["pixelated_svi"], paths["parametric_svi"])
+        run_hmc(args, paths["pixelated_hmc"], paths["pixelated_svi"], "pixelated")
         return
     sampler, source = requested_pair(args)
     directory = paths.get(f"{source}_{sampler}", root / f"{source}_{sampler}")

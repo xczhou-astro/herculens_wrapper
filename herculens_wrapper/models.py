@@ -1802,9 +1802,13 @@ class LensImageExtension(LensImage):
         source_arc_mask=None,
         source_grid_scale=1.0,
         conjugate_points=None,
+        rtu_source_settings=None,
         kwargs_numerics=None,
         kwargs_lens_equation_solver=None,
     ):
+        rtu_source_settings = dict(rtu_source_settings or {})
+        if rtu_source_settings and source_arc_mask is None:
+            raise ValueError("A source_arc_mask is required for a ray-transformed-uniform source grid.")
         if source_arc_mask is None:
             nx, ny = grid_class.num_pixel_axes
             source_arc_mask = np.ones([nx, ny], dtype=bool)
@@ -1827,6 +1831,7 @@ class LensImageExtension(LensImage):
         )
         self._source_grid_scale = source_grid_scale
         self.conjugate_points = conjugate_points
+        self._rtu_grid_source = bool(rtu_source_settings)
 
         ssf = self.ImageNumerics.grid_supersampling_factor
         s_ones = np.ones([ssf, ssf])
@@ -1836,6 +1841,31 @@ class LensImageExtension(LensImage):
         self._source_arc_mask_outline_flat = (
             self.source_arc_mask_ss - scipy.ndimage.binary_erosion(self.source_arc_mask_ss)
         ).flatten().astype(bool)
+        if self._rtu_grid_source:
+            if not self.SourceModel.has_pixels:
+                raise ValueError("A ray-transformed-uniform source grid requires a PIXELATED source profile.")
+            self._rtu_mask_flat = np.asarray(source_arc_mask, dtype=bool).ravel()
+            x_native, y_native = grid_class.pixel_coordinates
+            self._rtu_image_x = jnp.asarray(np.asarray(x_native).ravel()[self._rtu_mask_flat])
+            self._rtu_image_y = jnp.asarray(np.asarray(y_native).ravel()[self._rtu_mask_flat])
+            if self._rtu_image_x.size < 8:
+                raise ValueError("source_arc_mask must contain at least eight native image pixels for RTU fitting.")
+            self._rtu_polynomial_order = int(rtu_source_settings.get("rtu_polynomial_order", 11))
+            n_pix_x, n_pix_y = self.SourceModel.pixel_grid.num_pixel_axes
+            if n_pix_x != n_pix_y:
+                raise ValueError("The ray-transformed-uniform source grid must be square.")
+            # The GP lives on this fixed uniform coordinate system.  The
+            # RTU transform maps physical source-plane rays into it at every
+            # forward evaluation.
+            buffer = 1e-5
+            pixel_width = (1.0 - 2.0 * buffer) / n_pix_x
+            uniform_grid = PixelGrid(
+                n_pix_x, n_pix_y, pixel_width * np.eye(2),
+                ra_at_xy_0=buffer + 0.5 * pixel_width,
+                dec_at_xy_0=buffer + 0.5 * pixel_width,
+            )
+            self.SourceModel.set_pixel_grid(uniform_grid, self.Grid.pixel_area)
+            self._rtu_uniform_x, self._rtu_uniform_y = uniform_grid.pixel_axes
 
     def source_surface_brightness(
         self,
@@ -1853,6 +1883,29 @@ class LensImageExtension(LensImage):
                 return jnp.zeros_like(x_grid_img)
 
         x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+        if self._rtu_grid_source:
+            from herculens_wrapper.rtu import ray_transformed_uniform_coordinates
+
+            mask_x, mask_y = self.MassModel.ray_shooting(
+                self._rtu_image_x, self._rtu_image_y, kwargs_lens, k=k_lens,
+            )
+            if de_lensed:
+                x_grid_src, y_grid_src = x_grid_img, y_grid_img
+            else:
+                x_grid_src, y_grid_src = self.MassModel.ray_shooting(
+                    x_grid_img, y_grid_img, kwargs_lens, k=k_lens,
+                )
+            x_rtu, y_rtu = ray_transformed_uniform_coordinates(
+                mask_x, mask_y, x_grid_src, y_grid_src,
+                polynomial_order=self._rtu_polynomial_order,
+            )
+            source_light = self.SourceModel.surface_brightness(
+                x_rtu, y_rtu, kwargs_source, k=k,
+                pixels_x_coord=self._rtu_uniform_x,
+                pixels_y_coord=self._rtu_uniform_y,
+            )
+            outside = (x_rtu <= 0.0) | (x_rtu >= 1.0) | (y_rtu <= 0.0) | (y_rtu >= 1.0)
+            return jnp.where(outside, 0.0, source_light)
         if (self._src_adaptive_grid) or (not de_lensed):
             x_grid_src, y_grid_src = self.MassModel.ray_shooting(
                 x_grid_img,
@@ -1921,7 +1974,7 @@ class LensImageExtension(LensImage):
                 k=k_source,
                 k_lens=k_lens,
             )
-            if self._source_arc_mask_flat is not None:
+            if self._source_arc_mask_flat is not None and not self._rtu_grid_source:
                 source_model *= self._source_arc_mask_flat
             model += source_model
         if lens_light_add is True:
@@ -2007,6 +2060,12 @@ class LensImageExtension(LensImage):
         source_grid_scale=1.0,
         k_lens=None,
     ):
+        if self._rtu_grid_source:
+            # RTU source pixels are represented in transformed-uniform
+            # coordinates.  Physical source-plane cell edges are non-uniform
+            # and are exposed separately by future RTU diagnostics.
+            x_grid, y_grid = self.SourceModel.pixel_grid.pixel_coordinates
+            return x_grid, y_grid, self.SourceModel.pixel_grid.extent
         if (not self._src_adaptive_grid) and (self.SourceModel.pixel_grid is not None):
             x_grid, y_grid = self.SourceModel.pixel_grid.pixel_coordinates
             extent = self.SourceModel.pixel_grid.extent
@@ -2026,6 +2085,26 @@ class LensImageExtension(LensImage):
                 source_grid_scale=source_grid_scale,
             )
         return x_grid, y_grid, extent
+
+    def get_rtu_source_plane_grid(self, kwargs_lens, k_lens=None):
+        """Return physical RTU source-cell corners for ``kwargs_lens``.
+
+        Brightness coefficients are stored on the regular RTU array, whereas
+        these ``(ny + 1, nx + 1)`` arrays specify their physical source-plane
+        cell corners in arcsec.
+        """
+        if not self._rtu_grid_source:
+            raise RuntimeError("get_rtu_source_plane_grid() is only available for an RTU source grid.")
+        from herculens_wrapper.rtu import ray_transformed_uniform_physical_grid
+
+        mask_x, mask_y = self.MassModel.ray_shooting(
+            self._rtu_image_x, self._rtu_image_y, kwargs_lens, k=k_lens,
+        )
+        nx, ny = self.SourceModel.pixel_grid.num_pixel_axes
+        return ray_transformed_uniform_physical_grid(
+            mask_x, mask_y, nx=nx, ny=ny,
+            polynomial_order=self._rtu_polynomial_order,
+        )
 
 
 
@@ -2085,6 +2164,22 @@ def create_lens_image(
     conjugate_points=None,
 ):
     num_pixels = image_data.shape[0]
+
+    # ``MULTI_GAUSSIAN_ELLIPSE`` is supplied by jax-lensing-profiles and is
+    # registered with Herculens through that package's import side effect.
+    # Keep the ordinary built-in-profile path dependency-free.
+    light_types = (
+        list(type_list.get('lens_light_type_list', []))
+        + list(type_list.get('source_light_type_list', []))
+    )
+    if 'MULTI_GAUSSIAN_ELLIPSE' in {str(profile_type).upper() for profile_type in light_types}:
+        try:
+            import jax_lensing_profiles  # noqa: F401
+        except ImportError as error:
+            raise ImportError(
+                "MULTI_GAUSSIAN_ELLIPSE requires the optional "
+                "'jax-lensing-profiles' package."
+            ) from error
     if not isinstance(psf_supersampling_factor, (int, np.integer)) or isinstance(psf_supersampling_factor, bool) or psf_supersampling_factor < 1:
         raise ValueError("psf_supersampling_factor must be a positive integer.")
     psf_supersampling_factor = int(psf_supersampling_factor)
@@ -2127,9 +2222,12 @@ def create_lens_image(
     else:
         lens_light_model = LightModel(lens_light_types)
     src_types = type_list['source_light_type_list']
+    rtu_source_settings = None
     if src_types == ['PIXELATED']:
         kwargs_pixelated = param_list['source_light_params_list'][0]
         source_kwargs_pixelated = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
+        if source_kwargs_pixelated.get('grid_kind', 'uniform') == 'ray_transformed_uniform':
+            rtu_source_settings = source_kwargs_pixelated
         pixel_adaptive_grid = source_kwargs_pixelated.get('pixel_adaptive_grid', False)
         if pixel_adaptive_grid:
             pixel_grid_shape = int(source_kwargs_pixelated.get('pixel_grid_shape', 100))
@@ -2164,6 +2262,7 @@ def create_lens_image(
         source_arc_mask=source_arc_mask,
         source_grid_scale=source_grid_scale,
         conjugate_points=conjugate_points,
+        rtu_source_settings=rtu_source_settings,
         kwargs_numerics=kwargs_numerics,
         kwargs_lens_equation_solver=kwargs_lens_equation_solver,
     )

@@ -265,6 +265,37 @@ class FitResult:
             raise RuntimeError("Call build() before creating result visualizations.")
         return model.prob_model.params2kwargs(self.parameters)
 
+    def get_source_plane(self) -> dict[str, Any]:
+        """Return reconstructed source pixels and their source-plane geometry.
+
+        For an RTU source, ``x_corners`` and ``y_corners`` are physical arcsec
+        cell corners of shape ``(ny + 1, nx + 1)``.  They can be passed to
+        ``matplotlib.pyplot.pcolormesh`` together with ``pixels``.  Ordinary
+        uniform grids instead return their regular ``x``/``y`` coordinates.
+        """
+        model = self._require_model()
+        kwargs = self.derived.get("kwargs") or self._kwargs_result()
+        sources = kwargs.get("kwargs_source", [])
+        if not sources or "pixels" not in sources[0]:
+            raise RuntimeError("This result does not contain a pixelated source reconstruction.")
+        pixels = np.asarray(self.derived.get("source_plane", sources[0]["pixels"]))
+        if getattr(model.lens_image, "_rtu_grid_source", False):
+            x_corners, y_corners = model.lens_image.get_rtu_source_plane_grid(kwargs.get("kwargs_lens"))
+            return {
+                "grid_kind": "ray_transformed_uniform",
+                "pixels": pixels,
+                "x_corners": np.asarray(x_corners),
+                "y_corners": np.asarray(y_corners),
+            }
+        x, y, extent = model.lens_image.get_source_coordinates(kwargs.get("kwargs_lens"))
+        return {
+            "grid_kind": "uniform",
+            "pixels": pixels,
+            "x": np.asarray(x),
+            "y": np.asarray(y),
+            "extent": np.asarray(extent),
+        }
+
     def _legacy_plot_result(self, callback, save_path: str | Path | None, default_name: str, **kwargs: Any) -> Path:
         directory, filename, output = self._plot_destination(save_path, default_name)
         callback(directory, filename, **kwargs)
@@ -473,7 +504,10 @@ class FitResult:
             raise ValueError("output(save_path) expects a directory, not a filename.")
         directory.mkdir(parents=True, exist_ok=True)
         from ..samplers import kwargs_with_deterministics, model_image_from_deterministics, save_metrics
-        from ..utils import fit_dof_and_reduced_chi2, json_serializer, kwargs_best_to_json_pixelated_npy
+        from ..utils import (
+            fit_dof_and_reduced_chi2, json_serializer, kwargs_best_to_json_pixelated_npy,
+            save_rtu_source_fits,
+        )
         from ..visualizations import display_init, generate_run_plots
 
         model = self._require_model()
@@ -493,6 +527,7 @@ class FitResult:
         if components is not None:
             best_fit_model = np.asarray(components["total"])
         kwargs_for_plots = kwargs_best
+        skipped: dict[str, str] = {}
         source_plane = self.derived.get("source_plane") if self.samples is not None else None
         if source_plane is not None and kwargs_best.get("kwargs_source"):
             kwargs_for_plots = deepcopy(kwargs_best)
@@ -501,6 +536,22 @@ class FitResult:
         kwargs_result_path = directory / "kwargs_result.json"
         with kwargs_result_path.open("w") as stream:
             json.dump(kwargs_json, stream, indent=4, default=json_serializer)
+
+        # Keep the conventional source-pixel filename, but make RTU outputs
+        # self-contained: its physical, non-uniform source-plane cell corners
+        # live beside the primary brightness array in the same FITS file.
+        if getattr(model.lens_image, "_rtu_grid_source", False) and kwargs_for_plots.get("kwargs_source"):
+            try:
+                x_corners, y_corners = model.lens_image.get_rtu_source_plane_grid(
+                    kwargs_for_plots.get("kwargs_lens"),
+                )
+                save_rtu_source_fits(
+                    directory / "kwargs_source_pixels.fits",
+                    kwargs_for_plots["kwargs_source"][0]["pixels"], x_corners, y_corners,
+                    polynomial_order=getattr(model.lens_image, "_rtu_polynomial_order", None),
+                )
+            except Exception as error:
+                skipped["rtu_source_fits"] = str(error)
 
         metrics = self.metrics()
         save_metrics(
@@ -516,7 +567,6 @@ class FitResult:
             "metrics": directory / "metrics.json",
             "kwargs_result": kwargs_result_path,
         }
-        skipped: dict[str, str] = {}
 
         history = self.loss_history
         if history is not None:

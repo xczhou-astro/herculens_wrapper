@@ -452,11 +452,16 @@ def plot_source_plane(
         and isinstance(kwargs_result['kwargs_source'][0], dict)
         and 'pixels' in kwargs_result['kwargs_source'][0]
     )
+    is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
 
     is_adaptive = False
     if is_pixelated:
         source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
-        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+        if is_rtu:
+            xx, yy = lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens', None))
+            xx, yy = np.asarray(xx), np.asarray(yy)
+            extent = [float(xx.min()), float(xx.max()), float(yy.min()), float(yy.max())]
+        elif getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             is_adaptive = True
             kwargs_lens = kwargs_result.get('kwargs_lens', None)
             npix_src = source_for_plot.shape[0]
@@ -474,11 +479,14 @@ def plot_source_plane(
             extent = list(lens_image.SourceModel.pixel_grid.extent)
             xx, yy = lens_image.SourceModel.pixel_grid.pixel_coordinates
         
-        # Compute and print pixel scale
+        # RTU pixels are uniform in transformed coordinates but non-uniform
+        # in physical source-plane coordinates, so no single arcsec/pixel
+        # scale exists.
         grid_width = extent[1] - extent[0]
         npix = source_for_plot.shape[0]
         adapted_pixel_scale = grid_width / npix
-        print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
+        if not is_rtu:
+            print(f"[plot_source_plane] Source pixel scale: {adapted_pixel_scale:.6f} arcsec/pixel")
     else:
         try:
             ny, nx = lens_image.Grid.num_pixel_axes
@@ -505,7 +513,7 @@ def plot_source_plane(
         ring_mask = getattr(lens_image, 'source_arc_mask', None)
 
     mapped_ring_contours = []
-    if ring_mask is not None:
+    if ring_mask is not None and not is_rtu:
         try:
             mask_arr = np.asarray(ring_mask).astype(bool)
             if np.any(mask_arr) and not np.all(mask_arr):
@@ -568,7 +576,7 @@ def plot_source_plane(
 
     ra_source_list = []
     dec_source_list = []
-    if 'kwargs_point_source' in kwargs_result:
+    if 'kwargs_point_source' in kwargs_result and not is_rtu:
         beta_x, beta_y = lens_image.PointSourceModel.get_source_plane_points(
             kwargs_result['kwargs_point_source'],
             kwargs_lens=kwargs_result['kwargs_lens'],
@@ -578,7 +586,7 @@ def plot_source_plane(
         dec_source_list = [np.atleast_1d(np.asarray(d)) for d in beta_y]
 
     caustics = []
-    if plot_caustics:
+    if plot_caustics and not is_rtu:
         try:
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
@@ -590,20 +598,29 @@ def plot_source_plane(
     colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-    scale_suffix = f" ({adapted_pixel_scale:.5f}\"/pix)" if is_pixelated else ""
+    scale_suffix = (
+        " (RTU physical grid)" if is_rtu
+        else f" ({adapted_pixel_scale:.5f}\"/pix)" if is_pixelated else ""
+    )
 
     for ax in axes:
         ax.axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
         ax.axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
 
-    im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
+    if is_rtu:
+        im0 = axes[0].pcolormesh(xx, yy, source_for_plot, shading='flat', cmap='twilight', norm=norm)
+    else:
+        im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title(f'Extended Source{scale_suffix}')
     source_flux_label = 'Pixel flux'
     if cbar_label == 'log':
         source_flux_label += ' (log scale)'
     plt.colorbar(im0, ax=axes[0], label=source_flux_label)
 
-    im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
+    if is_rtu:
+        im1 = axes[1].pcolormesh(xx, yy, source_for_plot, shading='flat', cmap='twilight', norm=norm)
+    else:
+        im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
         axes[1].scatter(ras, decs, s=30, marker='*', color=colors[i], label=f'PS {i + 1}')
     for caust_x, caust_y in caustics:

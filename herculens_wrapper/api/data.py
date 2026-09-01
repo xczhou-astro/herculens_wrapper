@@ -127,6 +127,90 @@ class SingleBandData:
             instance._input_paths["contaminate_mask"] = Path(contaminate_mask_path).expanduser()
         return instance
 
+    @classmethod
+    def from_fits_hdus(
+        cls,
+        fits_path: str | Path,
+        *,
+        pixel_scale: float,
+        image_hdu: str | int = 0,
+        noise_hdu: str | int = "NOISE",
+        psf_hdu: str | int = "PSF",
+        source_arc_mask_hdu: str | int | None = None,
+        contaminate_mask_hdu: str | int | None = None,
+        psf_supersampling_factor: int = 1,
+        crop_size: int | None = None,
+        background_subtract: dict[str, Any] | None = None,
+        source_arc_mask_radius: dict | None = None,
+    ) -> "SingleBandData":
+        """Load image products stored as HDUs in one FITS container.
+
+        Each ``*_hdu`` may be an integer HDU index or an extension name.  By
+        default the science image is read from the primary HDU, and ``NOISE``
+        and ``PSF`` extensions are used.  Masks are optional; an in-memory
+        mask from an HDU takes precedence over ``source_arc_mask_radius``.
+
+        Unlike :meth:`from_fits`, this constructor does not retain individual
+        input filenames because all products originate from one container.
+        Consequently :meth:`save` writes the usual separate ``image.fits``,
+        ``noise.fits``, etc. processed products.
+        """
+        from astropy.io import fits
+
+        container = Path(fits_path).expanduser()
+        if not container.is_file():
+            raise FileNotFoundError(f"FITS container not found: {container}")
+
+        def read_hdu(hdul, selector: str | int, role: str) -> np.ndarray:
+            try:
+                data = hdul[selector].data
+            except (KeyError, IndexError, TypeError) as error:
+                available = ", ".join(
+                    f"{index}:{hdu.name}" for index, hdu in enumerate(hdul)
+                )
+                raise ValueError(
+                    f"Could not find {role} HDU {selector!r} in {container}. "
+                    f"Available HDUs: {available}."
+                ) from error
+            if data is None:
+                raise ValueError(f"{role} HDU {selector!r} in {container} contains no image data.")
+            return np.asarray(data)
+
+        with fits.open(container, memmap=False) as hdul:
+            image = read_hdu(hdul, image_hdu, "image")
+            noise = read_hdu(hdul, noise_hdu, "noise")
+            psf = read_hdu(hdul, psf_hdu, "PSF")
+            source_mask = (
+                None if source_arc_mask_hdu is None
+                else read_hdu(hdul, source_arc_mask_hdu, "source-arc mask")
+            )
+            contaminate_mask = (
+                None if contaminate_mask_hdu is None
+                else read_hdu(hdul, contaminate_mask_hdu, "contaminate mask")
+            )
+
+        instance = cls(
+            image=image, noise=noise, psf=psf, pixel_scale=pixel_scale,
+            psf_supersampling_factor=psf_supersampling_factor,
+            crop_size=crop_size,
+            background_subtract=(
+                {"num_pixels": 0, "corner": "upper left"}
+                if background_subtract is None else background_subtract
+            ),
+            source_arc_mask_radius=source_arc_mask_radius,
+        )
+        # A mask held in the container must receive exactly the same crop as
+        # the data, but should not be re-read as a primary-HDU FITS file.
+        if source_mask is not None:
+            instance._source_arc_mask = instance._coerce_mask_array(
+                source_mask, "source arc mask", binary=False,
+            )
+        if contaminate_mask is not None:
+            instance._contaminate_mask = instance._coerce_mask_array(
+                contaminate_mask, "contaminate mask", binary=True,
+            )
+        return instance
+
     def save(self, save_path: str | Path) -> dict[str, Path]:
         """Save processed data and any active masks as FITS files.
 
@@ -153,7 +237,7 @@ class SingleBandData:
                 header = fits.Header()
                 header["PSFSSAMP"] = (
                     self.psf_supersampling_factor,
-                    "PSF kernel supersampling factor relative to image pixels",
+                    "PSF supersampling relative to image pixels",
                 )
             fits.writeto(filename, np.asarray(arrays[key]), header=header, overwrite=True)
         if self.source_arc_mask is not None:
@@ -178,7 +262,11 @@ class SingleBandData:
 
     def _load_mask(self, path: str, role: str, *, binary: bool) -> np.ndarray:
         from astropy.io import fits
-        mask = np.asarray(fits.getdata(path))
+        return self._coerce_mask_array(fits.getdata(path), role, binary=binary)
+
+    def _coerce_mask_array(self, mask, role: str, *, binary: bool) -> np.ndarray:
+        """Apply data preprocessing and validation to a loaded mask array."""
+        mask = np.asarray(mask)
         if self.crop_size is not None:
             from herculens_wrapper.utils import center_crop
             mask = center_crop(mask, self.crop_size)

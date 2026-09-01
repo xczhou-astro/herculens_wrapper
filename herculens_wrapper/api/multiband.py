@@ -248,7 +248,7 @@ class MultiBandFitResult:
     def output(self, save_path: str | Path, *, residual_vis_max: float = 0.0,
                include_corner: bool = True) -> dict[str, Any]:
         """Write wrapper-style per-band diagnostics and joint SVI products."""
-        from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy
+        from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy, save_rtu_source_fits
         from ..visualizations import generate_run_plots, plot_corner_traced_params, plot_loss_curve, plot_multiband_composite
         root = Path(save_path).expanduser(); root.mkdir(parents=True, exist_ok=True)
         kwargs_by_band, metrics, files, skipped = self.kwargs_by_band(), self.metrics(), {}, {}
@@ -273,6 +273,18 @@ class MultiBandFitResult:
             kwargs_json_by_band[name] = kwargs_json
             with (directory / "kwargs_result.json").open("w") as stream:
                 json.dump(kwargs_json, stream, indent=2, default=json_serializer)
+            if getattr(band["lens_image"], "_rtu_grid_source", False) and kwargs_for_plots.get("kwargs_source"):
+                try:
+                    x_corners, y_corners = band["lens_image"].get_rtu_source_plane_grid(
+                        kwargs_for_plots.get("kwargs_lens"),
+                    )
+                    save_rtu_source_fits(
+                        directory / "kwargs_source_pixels.fits",
+                        kwargs_for_plots["kwargs_source"][0]["pixels"], x_corners, y_corners,
+                        polynomial_order=getattr(band["lens_image"], "_rtu_polynomial_order", None),
+                    )
+                except Exception as error:
+                    skipped[f"{name}_rtu_source_fits"] = str(error)
             with (directory / "kwargs_lens_shared.json").open("w") as stream:
                 json.dump({"kwargs_lens": shared_lens}, stream, indent=2, default=json_serializer)
             try:

@@ -357,6 +357,18 @@ class LightProfile(Profile):
         value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
         **initial_values: Any,
     ):
+        # Keep the historical ``LightProfile('PIXELATED', prior=...)``
+        # spelling, but canonicalize it to the dedicated source declaration.
+        # Explicit fixed values retain the generic path for backwards
+        # compatibility with manually constructed backend kwargs.
+        if (
+            cls is LightProfile
+            and isinstance(profile_type, str)
+            and profile_type.upper() == "PIXELATED"
+            and value is None
+            and not initial_values
+        ):
+            return object.__new__(PixelatedSource)
         if isinstance(profile_type, (list, tuple)):
             names = list(profile_type)
             if not names:
@@ -378,6 +390,61 @@ class LightProfile(Profile):
     def __init__(self, profile_type: str, **kwargs: Any) -> None:
         super().__init__(str(profile_type).upper(), **kwargs)
 
+    @classmethod
+    def multi_gaussian_ellipse(
+        cls,
+        n_gauss: int,
+        sigma_lims: tuple[float, float] | list[float],
+        *,
+        amp_prior: tuple[float, float] | list[float] = (0.0, 3.0),
+        ellipticity_prior: tuple[float, float, float, float] | list[float] = (0.0, 0.2, -0.5, 0.5),
+        center_prior: tuple[float, float, float, float] | list[float] = (0.0, 0.2, -0.5, 0.5),
+    ) -> "ProfileCollection":
+        """Create an MGE as ordered ``GAUSSIAN_ELLIPSE`` components.
+
+        The Gaussian widths occupy non-overlapping logarithmic intervals
+        between ``sigma_lims``.  This mirrors the useful part of Tian's MGE
+        parameterization while keeping every component independently visible
+        to the API, parameter-link system, and :class:`StellarMassMGE`.
+
+        ``amp_prior`` follows the ordinary API amplitude convention
+        ``[log_loc, log_scale]`` (a LogNormal).  ``ellipticity_prior`` and
+        ``center_prior`` use ``[mean, std, lower, upper]`` (a
+        TruncatedNormal).
+        """
+        if not isinstance(n_gauss, int) or isinstance(n_gauss, bool) or n_gauss < 1:
+            raise ValueError("n_gauss must be a positive integer.")
+        if len(sigma_lims) != 2:
+            raise ValueError("sigma_lims must contain [minimum, maximum].")
+        sigma_min, sigma_max = map(float, sigma_lims)
+        if not np.isfinite(sigma_min) or not np.isfinite(sigma_max) or sigma_min <= 0 or sigma_max <= sigma_min:
+            raise ValueError("sigma_lims must satisfy 0 < minimum < maximum.")
+        if len(amp_prior) != 2:
+            raise ValueError("amp_prior must be [log_loc, log_scale].")
+        if float(amp_prior[1]) <= 0:
+            raise ValueError("amp_prior log_scale must be positive.")
+        for name, prior in {
+            "ellipticity_prior": ellipticity_prior,
+            "center_prior": center_prior,
+        }.items():
+            if len(prior) != 4 or float(prior[3]) <= float(prior[2]) or float(prior[1]) <= 0:
+                raise ValueError(f"{name} must be [mean, std, lower, upper] with std > 0 and upper > lower.")
+
+        sigma_edges = np.geomspace(sigma_min, sigma_max, n_gauss + 1)
+        profiles = []
+        for index, (sigma_low, sigma_high) in enumerate(zip(sigma_edges[:-1], sigma_edges[1:])):
+            profiles.append(cls("GAUSSIAN_ELLIPSE", prior={
+                "amp": list(amp_prior),
+                "sigma": [float(sigma_low), float(sigma_high)],
+                "e1": list(ellipticity_prior),
+                "e2": list(ellipticity_prior),
+                "center_x": list(center_prior),
+                "center_y": list(center_prior),
+            }))
+        return ProfileCollection(profiles)
+
+    mge = multi_gaussian_ellipse
+
 
 class PixelatedSource(LightProfile):
     """A pixelated source-light declaration for SVI or HMC reconstruction.
@@ -389,12 +456,14 @@ class PixelatedSource(LightProfile):
     """
 
     _grid_defaults = {
+        "grid_kind": "uniform",
         "pixel_adaptive_grid": True,
         "pixel_grid_shape": 80,
         "pixel_interpol": "fast_bilinear",
         "pixel_scale_factor": 0.5,
         "grid_center": (0.0, 0.0),
         "grid_shape": (2.0, 2.0),
+        "rtu_polynomial_order": 11,
     }
     _prior_defaults = {
         "prior_type": "matern",
@@ -409,19 +478,51 @@ class PixelatedSource(LightProfile):
         "positive": True,
     }
 
-    def __new__(cls, **kwargs: Any):
+    def __new__(cls, *args: Any, **kwargs: Any):
         return object.__new__(cls)
 
     def __init__(
         self,
+        profile_type: str | None = None,
         *,
         pixel_grid: Mapping[str, Any] | None = None,
         pixelated_prior: Mapping[str, Any] | None = None,
+        prior: Mapping[str, Any] | None = None,
     ) -> None:
+        """Declare a canonical pixelated source.
+
+        The ``profile_type`` and ``prior`` arguments accept the historical
+        ``LightProfile('PIXELATED', prior={...})`` form.  New code should use
+        the explicit ``pixel_grid=...`` and ``pixelated_prior=...`` keywords.
+        """
+        if profile_type is not None and str(profile_type).upper() != "PIXELATED":
+            raise ValueError("PixelatedSource only represents the 'PIXELATED' profile.")
+        legacy = dict(prior or {})
+        unsupported = set(legacy) - {"pixel_grid", "pixelated_prior"}
+        if unsupported:
+            raise ValueError(
+                "PixelatedSource prior accepts only 'pixel_grid' and "
+                f"'pixelated_prior'; got {sorted(unsupported)}."
+            )
+        if pixel_grid is not None and "pixel_grid" in legacy:
+            raise TypeError("Specify pixel_grid either directly or inside legacy prior, not both.")
+        if pixelated_prior is not None and "pixelated_prior" in legacy:
+            raise TypeError("Specify pixelated_prior either directly or inside legacy prior, not both.")
+        pixel_grid = legacy.get("pixel_grid", pixel_grid)
+        pixelated_prior = legacy.get("pixelated_prior", pixelated_prior)
         grid = {**self._grid_defaults, **dict(pixel_grid or {})}
         prior = {**self._prior_defaults, **dict(pixelated_prior or {})}
         if int(grid["pixel_grid_shape"]) <= 0:
             raise ValueError("pixel_grid['pixel_grid_shape'] must be positive.")
+        if grid["grid_kind"] not in {"uniform", "ray_transformed_uniform"}:
+            raise ValueError("pixel_grid['grid_kind'] must be 'uniform' or 'ray_transformed_uniform'.")
+        if (
+            not isinstance(grid["rtu_polynomial_order"], int)
+            or isinstance(grid["rtu_polynomial_order"], bool)
+            or grid["rtu_polynomial_order"] < 3
+            or grid["rtu_polynomial_order"] % 2 == 0
+        ):
+            raise ValueError("pixel_grid['rtu_polynomial_order'] must be an odd integer of at least 3.")
         if prior["prior_type"] not in {"matern", "wavelet_sparsity", "wavelet_penalty"}:
             raise ValueError("pixelated_prior['prior_type'] must be 'matern', 'wavelet_sparsity', or 'wavelet_penalty'.")
         super().__init__("PIXELATED", prior={"pixel_grid": grid, "pixelated_prior": prior})

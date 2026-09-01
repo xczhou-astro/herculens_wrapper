@@ -680,6 +680,34 @@ def save_named_arrays_fits(path, arrays):
     fits.HDUList(hdus).writeto(path, overwrite=True)
 
 
+def save_rtu_source_fits(path, pixels, x_corners, y_corners, *, polynomial_order=None):
+    """Write a self-contained RTU source reconstruction FITS file.
+
+    The primary HDU is the regular ``(ny, nx)`` RTU brightness array.  The
+    ``X_CORNERS`` and ``Y_CORNERS`` image extensions hold matching physical
+    source-plane cell corners in arcsec, each of shape ``(ny + 1, nx + 1)``.
+    """
+    source = np.asarray(pixels)
+    x_corners, y_corners = np.asarray(x_corners), np.asarray(y_corners)
+    expected = (source.shape[0] + 1, source.shape[1] + 1)
+    if source.ndim != 2 or x_corners.shape != expected or y_corners.shape != expected:
+        raise ValueError(
+            "RTU FITS requires 2-D pixels and matching (ny + 1, nx + 1) physical corner arrays."
+        )
+    header = fits.Header()
+    header['GRIDKIND'] = ('ray_transformed_uniform', 'Source-grid coordinate system')
+    header['BUNIT'] = ('pixel_flux', 'Source brightness unit')
+    header['XEXT'] = ('X_CORNERS', 'Physical source x-cell corners [arcsec]')
+    header['YEXT'] = ('Y_CORNERS', 'Physical source y-cell corners [arcsec]')
+    if polynomial_order is not None:
+        header['RTUORDER'] = (int(polynomial_order), 'RTU inverse-CDF polynomial order')
+    fits.HDUList([
+        fits.PrimaryHDU(data=source, header=header),
+        fits.ImageHDU(data=x_corners, name='X_CORNERS'),
+        fits.ImageHDU(data=y_corners, name='Y_CORNERS'),
+    ]).writeto(path, overwrite=True)
+
+
 def load_named_arrays_fits(path):
     """Return a mapping of FITS extension name to its numerical array."""
     from astropy.io import fits
