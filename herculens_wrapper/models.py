@@ -42,6 +42,7 @@ def _patched_surface_brightness(self, x, y, kwargs_list, k=None, **kwargs):
                 clean_kw = {key: val for key, val in kw.items()
                             if key not in [
                                 'pixels_wn', 'n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'rho_soure_grid',
+                                'pow_lam_source_grid', 'scale_lam_source_grid',
                                 'pixels_wn_lens_light_grid_0', 'n_lens_light_grid',
                                 'rho_lens_light_grid', 'sigma_lens_light_grid',
                             ]}
@@ -228,6 +229,8 @@ class PowerSpectrum:
         n_low=0.0001,
         rho_low=None,
         rho_high=None,
+        nonlinear_brightness=False,
+        nonlinear_terms=1,
     ):
         with numpyro.plate(f'{plate_name} power spectrum params - [1]', 1):
             if n_value is None:
@@ -260,12 +263,51 @@ class PowerSpectrum:
             norm='ortho',
         )
         if positive:
-            gp = jax.nn.softplus(100 * gp) / 100.0
+            gp = jax.nn.softplus(100 * gp) / 100.0 + 1e-30
+        if nonlinear_brightness and positive:
+            nonlinear_terms = int(nonlinear_terms)
+            if nonlinear_terms < 1:
+                raise ValueError("nonlinear_terms must be a positive integer.")
+            powers = jnp.sort(numpyro.sample(
+                f'pow_lam_{param_name}',
+                dist.Uniform(
+                    0.5 * jnp.ones((nonlinear_terms,)),
+                    2.0 * jnp.ones((nonlinear_terms,)),
+                ),
+            ))
+            amplitudes = numpyro.sample(
+                f'scale_lam_{param_name}',
+                dist.LogUniform(
+                    1e-2 * jnp.ones((nonlinear_terms,)),
+                    1e2 * jnp.ones((nonlinear_terms,)),
+                ),
+            )
+            gp = PowerSpectrum.nonlinear_brightness_transform(gp, powers, amplitudes)
         pixels = numpyro.deterministic(f'pixels_{param_name}', gp)
         return {'pixels': pixels}
 
     @staticmethod
-    def pixels_from_params(params, param_name, k_values, *, positive=True, n_value=None, k_zero=None):
+    def nonlinear_brightness_transform(pixels, powers, amplitudes):
+        """Combine positive GP brightness with sampled power-law components.
+
+        ``powers`` and ``amplitudes`` have one value per component, producing
+        ``sum_i amplitudes[i] * pixels ** powers[i]`` over the image grid.
+        """
+        powers = jnp.asarray(powers, dtype=jnp.float64).reshape((-1, 1, 1))
+        amplitudes = jnp.asarray(amplitudes, dtype=jnp.float64).reshape((-1, 1, 1))
+        return jnp.sum(amplitudes * jnp.power(pixels[None, :, :], powers), axis=0)
+
+    @staticmethod
+    def pixels_from_params(
+        params,
+        param_name,
+        k_values,
+        *,
+        positive=True,
+        n_value=None,
+        k_zero=None,
+        nonlinear_brightness=False,
+    ):
         pixel_key = f'pixels_{param_name}'
         if pixel_key in params:
             return jnp.asarray(params[pixel_key], dtype=jnp.float64)
@@ -283,11 +325,26 @@ class PowerSpectrum:
         scale = jnp.sqrt(PowerSpectrum.P_Matern(k_values, n, sigma, rho, k_zero=k_zero))
         pixels = jnp.fft.irfft2(PowerSpectrum.pack_fft_values(pixels_wn * scale), s=scale.shape, norm='ortho')
         if positive:
-            pixels = jax.nn.softplus(100 * pixels) / 100.0
+            pixels = jax.nn.softplus(100 * pixels) / 100.0 + 1e-30
+        if nonlinear_brightness and positive:
+            pixels = PowerSpectrum.nonlinear_brightness_transform(
+                pixels,
+                params[f'pow_lam_{param_name}'],
+                params[f'scale_lam_{param_name}'],
+            )
         return pixels
 
     @staticmethod
-    def params2kwargs_power_spectrum(params, param_name, k_values, *, positive=True, n_value=None, k_zero=None):
+    def params2kwargs_power_spectrum(
+        params,
+        param_name,
+        k_values,
+        *,
+        positive=True,
+        n_value=None,
+        k_zero=None,
+        nonlinear_brightness=False,
+    ):
         return {
             'pixels': PowerSpectrum.pixels_from_params(
                 params,
@@ -296,6 +353,7 @@ class PowerSpectrum:
                 positive=positive,
                 n_value=n_value,
                 k_zero=k_zero,
+                nonlinear_brightness=nonlinear_brightness,
             )
         }
 
@@ -328,6 +386,8 @@ class PowerSpectrum:
                 rho_low=safe_float(pixelated_prior.get('rho_low'), None),
                 rho_high=safe_float(pixelated_prior.get('rho_high'), None),
                 positive=bool(pixelated_prior.get('positive', True)),
+                nonlinear_brightness=bool(pixelated_prior.get('nonlinear_brightness', False)),
+                nonlinear_terms=int(pixelated_prior.get('nonlinear_terms', 1)),
             )
             numpyro.sample('obs', dist.Normal(source['pixels'], noise_level).to_event(2), obs=image_obs)
 
@@ -851,6 +911,8 @@ def create_prob_model(
                                 rho_low=safe_float(pixelated_prior.get('rho_low'), None),
                                 rho_high=safe_float(pixelated_prior.get('rho_high'), None),
                                 positive=bool(pixelated_prior.get('positive', True)),
+                                nonlinear_brightness=bool(pixelated_prior.get('nonlinear_brightness', False)),
+                                nonlinear_terms=int(pixelated_prior.get('nonlinear_terms', 1)),
                             )
                             prior_source_light = [{'pixels': res['pixels']}]
             else:
@@ -1164,6 +1226,7 @@ def create_prob_model(
                                 k_zero=pixelated_prior.get('k_zero', None),
                                 n_value=pixelated_prior.get('n_value', None),
                                 positive=bool(pixelated_prior.get('positive', True)),
+                                nonlinear_brightness=bool(pixelated_prior.get('nonlinear_brightness', False)),
                             )
                             n_val = params.get('n_source_grid', pixelated_prior.get('n_value', None))
                             rho_val = params.get('rho_source_grid', None)
@@ -1182,6 +1245,8 @@ def create_prob_model(
                                 'n_source_grid': n_val,
                                 'rho_source_grid': rho_val,
                                 'sigma_source_grid': sigma_val,
+                                'pow_lam_source_grid': params.get('pow_lam_source_grid'),
+                                'scale_lam_source_grid': params.get('scale_lam_source_grid'),
                             }]
             else:
                 kwargs_source = []

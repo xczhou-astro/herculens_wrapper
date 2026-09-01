@@ -476,6 +476,8 @@ class PixelatedSource(LightProfile):
         "rho_low": None,
         "rho_high": None,
         "positive": True,
+        "nonlinear_brightness": False,
+        "nonlinear_terms": 1,
     }
 
     def __new__(cls, *args: Any, **kwargs: Any):
@@ -525,6 +527,18 @@ class PixelatedSource(LightProfile):
             raise ValueError("pixel_grid['rtu_polynomial_order'] must be an odd integer of at least 3.")
         if prior["prior_type"] not in {"matern", "wavelet_sparsity", "wavelet_penalty"}:
             raise ValueError("pixelated_prior['prior_type'] must be 'matern', 'wavelet_sparsity', or 'wavelet_penalty'.")
+        if not isinstance(prior["nonlinear_brightness"], (bool, np.bool_)):
+            raise TypeError("pixelated_prior['nonlinear_brightness'] must be a boolean.")
+        if (
+            not isinstance(prior["nonlinear_terms"], (int, np.integer))
+            or isinstance(prior["nonlinear_terms"], bool)
+            or int(prior["nonlinear_terms"]) < 1
+        ):
+            raise ValueError("pixelated_prior['nonlinear_terms'] must be a positive integer.")
+        if prior["nonlinear_brightness"] and prior["prior_type"] != "matern":
+            raise ValueError("nonlinear_brightness is currently available only with prior_type='matern'.")
+        if prior["nonlinear_brightness"] and not prior["positive"]:
+            raise ValueError("nonlinear_brightness requires positive=True.")
         super().__init__("PIXELATED", prior={"pixel_grid": grid, "pixelated_prior": prior})
 
 

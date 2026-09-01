@@ -37,6 +37,7 @@ def is_pixelated_latent_site(name: str) -> bool:
         or site.endswith("source_pixels")
         or any(token in site for token in (
             "n_source_grid", "rho_source_grid", "sigma_source_grid",
+            "pow_lam_source_grid", "scale_lam_source_grid",
             "source_scales", "source_coarse", "source_pixels",
         ))
         or any(token in site for token in (

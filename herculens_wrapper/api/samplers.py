@@ -58,7 +58,7 @@ def hmc_one_sigma_kwargs(
     kwargs_from_params: Any | None = None,
 ) -> dict[str, Any]:
     """Build one-sigma HMC uncertainties in the legacy kwargs-sigma layout."""
-    from ..utils import kwargs_best_to_json_pixelated_npy
+    from ..utils import append_array_fits, kwargs_best_to_json_pixelated_npy
 
     root = Path(directory)
     kwargs_from_params = prob_model.params2kwargs if kwargs_from_params is None else kwargs_from_params
@@ -75,11 +75,20 @@ def hmc_one_sigma_kwargs(
         _nested_difference(reference_kwargs, lower_kwargs, upper=False),
         _nested_difference(reference_kwargs, upper_kwargs, upper=True),
     )
+    source = (one_sigma.get("kwargs_source") or [{}])[0]
+    if source.get("pixels") is not None:
+        append_array_fits(root / "kwargs_source_pixels.fits", source["pixels"])
+    if source.get("pixels_wn") is not None:
+        append_array_fits(root / "kwargs_source_pixels_wn.fits", source["pixels_wn"])
     return kwargs_best_to_json_pixelated_npy(
         one_sigma, str(root), type_list,
-        pixels_filename="kwargs_sigma_pixels.fits",
-        pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
+        pixels_filename="kwargs_source_pixels.fits",
+        pixels_wn_filename="kwargs_source_pixels_wn.fits",
         lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
+        save_pixel_arrays=False,
+        references_already_saved=True,
+        pixels_hdu="SIGMA",
+        pixels_wn_hdu="SIGMA",
     )
 
 @dataclass
@@ -589,11 +598,21 @@ class FitResult:
                     lambda value: np.asarray(value).std(axis=0), posterior,
                 )
                 sigma_kwargs = model.prob_model.params2kwargs(sigma_parameters)
+                sigma_source = (sigma_kwargs.get("kwargs_source") or [{}])[0]
+                from ..utils import append_array_fits
+                if sigma_source.get("pixels") is not None:
+                    append_array_fits(directory / "kwargs_source_pixels.fits", sigma_source["pixels"])
+                if sigma_source.get("pixels_wn") is not None:
+                    append_array_fits(directory / "kwargs_source_pixels_wn.fits", sigma_source["pixels_wn"])
                 sigma_json = kwargs_best_to_json_pixelated_npy(
                     sigma_kwargs, str(directory), type_list,
-                    pixels_filename="kwargs_source_pixels_sigma.fits",
-                    pixels_wn_filename="kwargs_source_pixels_wn_sigma.fits",
+                    pixels_filename="kwargs_source_pixels.fits",
+                    pixels_wn_filename="kwargs_source_pixels_wn.fits",
                     lens_light_pixels_prefix="kwargs_lens_light_pixels_sigma",
+                    save_pixel_arrays=False,
+                    references_already_saved=True,
+                    pixels_hdu="SIGMA",
+                    pixels_wn_hdu="SIGMA",
                 )
                 with (directory / "kwargs_sigma.json").open("w") as stream:
                     json.dump(sigma_json, stream, indent=4, default=json_serializer)

@@ -26,6 +26,8 @@ _MATERN_HYPERPARAMETER_SITES = frozenset({
     'n_source_grid',
     'rho_source_grid',
     'sigma_source_grid',
+    'pow_lam_source_grid',
+    'scale_lam_source_grid',
 })
 
 
