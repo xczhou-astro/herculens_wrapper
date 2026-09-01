@@ -709,10 +709,20 @@ def _write_parameter_shifts(directory: Path, kwargs: Mapping[str, Any], type_lis
             lines.append(f"     {name}:")
             suffix = f"_{index}" if len(components) > 1 else ""
             for parameter, value in component.items():
+                # Pixelated profiles keep some optional hyperparameters as
+                # ``None`` (for example a fixed/unused Matérn n value).  They
+                # are valid entries in kwargs_result, but are not numerical
+                # parameter shifts and cannot be formatted as a float.
+                if value is None:
+                    continue
                 array = np.asarray(value)
                 if parameter == "pixels" or array.ndim != 0:
                     continue
-                lines.append(f"            {parameter}{suffix}: null -> {float(array):.3f}")
+                try:
+                    numeric_value = float(array)
+                except (TypeError, ValueError):
+                    continue
+                lines.append(f"            {parameter}{suffix}: null -> {numeric_value:.3f}")
     (directory / "parameter_shifts.txt").write_text("\n".join(lines) + "\n")
 
 
