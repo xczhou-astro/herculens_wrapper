@@ -30,7 +30,15 @@ def _svi_many_worker(spec, run_id, device):
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = device
     from .samplers import is_completed_svi_run
-    model = SingleBandModel(**spec["model"])
+    # Profile classes intentionally use custom ``__new__`` methods to offer
+    # the convenient ``MassProfile([ ... ])`` spelling.  They cannot be
+    # copied with Python's generic deepcopy; ``with_fixed()`` without
+    # selections is the API-level declaration clone and also restores links.
+    model_spec = dict(spec["model"])
+    model_spec["profiles"] = spec["model"]["profiles"].with_fixed()
+    model_spec["observation"] = deepcopy(spec["model"]["observation"])
+    model_spec["numerics"] = deepcopy(spec["model"]["numerics"])
+    model = SingleBandModel(**model_spec)
     run_dir = Path(spec["directory"]) / f"run_{run_id}"
     run_dir.mkdir(parents=True, exist_ok=True)
     if is_completed_svi_run(run_dir):
@@ -799,7 +807,7 @@ class SingleBandModel:
         # touches a GPU.
         spec = {
             "model": {
-                "profiles": deepcopy(self.profiles),
+                "profiles": self.profiles.with_fixed(),
                 "observation": deepcopy(self.observation),
                 "numerics": deepcopy(self.numerics),
                 "source_grid_scale": self.source_grid_scale,
@@ -851,7 +859,11 @@ class SingleBandModel:
         # identical resumable behaviour.
         results: list[FitResult] = []
         for run_id in range(n_runs):
-            restored = SingleBandModel(**deepcopy(spec["model"]))
+            restored_spec = dict(spec["model"])
+            restored_spec["profiles"] = spec["model"]["profiles"].with_fixed()
+            restored_spec["observation"] = deepcopy(spec["model"]["observation"])
+            restored_spec["numerics"] = deepcopy(spec["model"]["numerics"])
+            restored = SingleBandModel(**restored_spec)
             run_dir = directory / f"run_{run_id}"
             restored.load(run_dir, seed=int(sampler.random_seed) + run_id)
             results.append(restored.get_results(random_seed=int(sampler.random_seed) + run_id))
