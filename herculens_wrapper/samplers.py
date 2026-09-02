@@ -203,7 +203,7 @@ def evaluate_parameter_components(prob_model, params, *, rng_seed=0):
 def evaluate_mcmc_component_medians(
     prob_model,
     samples,
-    batch_size=500,
+    batch_size=1000,
     active_sites=None,
     kwargs_lens_from_params=None,
     lens_image_override=None,
@@ -320,7 +320,7 @@ def evaluate_mcmc_component_medians(
     return result
 
 
-def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=500):
+def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=1000):
     """
     Evaluates model images for all MCMC samples using fast vectorized JAX vmap
     and computes the pixel-by-pixel median across all samples.
@@ -673,7 +673,9 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
         vmap_fn = jax.jit(jax.vmap(single_source_pixels))
 
         n_samples_total = len(p_wn_arr)
-        batch_size = 200
+        # Fewer, larger transfers reduce JAX dispatch and GPU-to-CPU overhead
+        # while remaining modest for the supported ~100x100 source grids.
+        batch_size = 1000
         all_rec_sources = []
         for b in range(0, n_samples_total, batch_size):
             b_end = min(b + batch_size, n_samples_total)

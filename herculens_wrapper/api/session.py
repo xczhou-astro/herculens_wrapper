@@ -3,10 +3,12 @@ from __future__ import annotations
 from copy import deepcopy
 import hashlib
 import json
+import multiprocessing as mp
+import os
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import numpy as np
 from .collections import LensProfileCollection
 from .data import SingleBandData
@@ -21,6 +23,31 @@ def _model_backend():
 def _sampler_backend():
     from ..samplers import run_hmc, run_optax, run_svi
     return run_hmc, run_optax, run_svi
+
+
+def _svi_many_worker(spec, run_id, device):
+    """Spawn worker for one independent SVI run (sets CUDA before JAX use)."""
+    if device is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = device
+    from .samplers import is_completed_svi_run
+    model = SingleBandModel(**spec["model"])
+    run_dir = Path(spec["directory"]) / f"run_{run_id}"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    if is_completed_svi_run(run_dir):
+        return
+    sampler = SamplerConfig("svi", random_seed=spec["seed"] + run_id, options=dict(spec["options"]))
+    initial = model.initialize(
+        seed=sampler.random_seed, run_id=run_id, init_params_path=spec["init_path"],
+        pixelated_init_match=spec["pixelated_init_match"], num_iterations_warmup=spec["warmup"],
+    )
+    model.plot_initial_model(
+        scale="linear", save_path=run_dir / "initial_guess_model.png",
+        residual_vis_max=spec["residual_vis_max"],
+    )
+    source_types = model.definition.as_dicts()[0].get("source_light_type_list", [])
+    if any("PIXELATED" in str(profile_type).upper() for profile_type in source_types):
+        model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
+    model.run(sampler, init_params=initial).output(run_dir, residual_vis_max=spec["residual_vis_max"])
 
 class SingleBandModel:
     """Config-free, immediately built controller for a single band."""
@@ -639,9 +666,41 @@ class SingleBandModel:
         # the Markov chains.
         initial = {name: np.asarray(values)[-1] for name, values in archived_samples.items()}
         return self.run(sampler, init_params=initial, save_path=output)
-    def run(self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
-            save_path: str | Path | None = None) -> FitResult:
-        """Run inference from supplied or automatically initialized parameters."""
+    def run(
+        self,
+        sampler: SamplerConfig,
+        *,
+        init_params: Mapping[str, Any] | None = None,
+        save_path: str | Path | None = None,
+        n_runs: int = 1,
+        parallel: bool = False,
+        gpus: str | Sequence[str] | None = None,
+        pixelated_init_match: str = "image",
+        num_iterations_warmup: int = 0,
+        residual_vis_max: float = 0.0,
+    ) -> FitResult | "SingleBandResultsCombination":
+        """Run inference from supplied or automatically initialized parameters.
+
+        ``n_runs > 1`` launches independent SVI restarts and returns a
+        :class:`SingleBandResultsCombination`.  With ``parallel=True``, each
+        selected entry in ``gpus`` is used by at most one spawned SVI process
+        at a time; entries may be CUDA indices or MIG UUIDs.  This is distinct
+        from HMC's within-run chain parallelism (``chain_method='parallel'``).
+        """
+        if not isinstance(n_runs, int) or n_runs < 1:
+            raise ValueError("n_runs must be a positive integer.")
+        if n_runs > 1:
+            return self._run_svi_many(
+                sampler,
+                save_path=save_path,
+                n_runs=n_runs,
+                parallel=parallel,
+                gpus=gpus,
+                init_params=init_params,
+                pixelated_init_match=pixelated_init_match,
+                num_iterations_warmup=num_iterations_warmup,
+                residual_vis_max=residual_vis_max,
+            )
         if init_params is not None:
             initial = dict(init_params)
         elif self.initial_parameters is not None:
@@ -689,6 +748,110 @@ class SingleBandModel:
             derived=derived, _model=self,
         )
         return self.result
+
+    def _run_svi_many(
+        self,
+        sampler: SamplerConfig,
+        *,
+        save_path: str | Path | None,
+        n_runs: int,
+        parallel: bool,
+        gpus: str | Sequence[str] | None,
+        init_params: Mapping[str, Any] | None,
+        pixelated_init_match: str,
+        num_iterations_warmup: int,
+        residual_vis_max: float,
+    ) -> "SingleBandResultsCombination":
+        """Run independent SVI restarts, optionally one process per CUDA/MIG device."""
+        if sampler.name != "svi":
+            raise ValueError("n_runs > 1 is currently supported only for independent SVI runs.")
+        if save_path is None:
+            raise ValueError("Multi-run SVI requires save_path for run_i outputs and resuming.")
+        if init_params is not None:
+            raise ValueError(
+                "Pass no init_params when n_runs > 1: each SVI restart must be initialized "
+                "from its own seed.  Call model.initialize(init_params_path=...) first to "
+                "set a previous-stage initialization path."
+            )
+        if num_iterations_warmup < 0:
+            raise ValueError("num_iterations_warmup must be non-negative.")
+        if residual_vis_max < 0:
+            raise ValueError("residual_vis_max must be non-negative.")
+
+        if gpus is None:
+            devices: list[str] = []
+        elif isinstance(gpus, str):
+            devices = [item.strip() for item in gpus.split(",") if item.strip()]
+        else:
+            devices = [str(item).strip() for item in gpus if str(item).strip()]
+        if parallel and not devices:
+            raise ValueError("parallel=True requires one or more CUDA/MIG identifiers in gpus.")
+
+        directory = Path(save_path).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        # A self-contained worker specification deliberately copies the API
+        # declarations, rather than the already-built JAX backend.  Spawned
+        # children can therefore set CUDA_VISIBLE_DEVICES before JAX first
+        # touches a GPU.
+        spec = {
+            "model": {
+                "profiles": deepcopy(self.profiles),
+                "observation": deepcopy(self.observation),
+                "numerics": deepcopy(self.numerics),
+                "source_grid_scale": self.source_grid_scale,
+                "likelihood_scale": self.likelihood_scale,
+            },
+            "directory": str(directory),
+            "seed": int(sampler.random_seed),
+            "options": deepcopy(sampler.options),
+            "init_path": None if self.initialization_path is None else str(self.initialization_path),
+            "pixelated_init_match": pixelated_init_match,
+            "warmup": int(num_iterations_warmup),
+            "residual_vis_max": float(residual_vis_max),
+        }
+        from .samplers import SingleBandResultsCombination, is_completed_svi_run
+
+        pending = [run_id for run_id in range(n_runs)
+                   if not is_completed_svi_run(directory / f"run_{run_id}")]
+        if pending:
+            if parallel:
+                print(
+                    f"Starting {len(pending)} independent SVI run(s) across "
+                    f"{len(devices)} CUDA/MIG device(s): {directory}"
+                )
+                context = mp.get_context("spawn")
+                for first in range(0, len(pending), len(devices)):
+                    batch_ids = pending[first:first + len(devices)]
+                    workers = [
+                        context.Process(
+                            target=_svi_many_worker,
+                            args=(spec, run_id, devices[index]),
+                        )
+                        for index, run_id in enumerate(batch_ids)
+                    ]
+                    for worker in workers:
+                        worker.start()
+                    for worker in workers:
+                        worker.join()
+                    failures = [worker.exitcode for worker in workers if worker.exitcode]
+                    if failures:
+                        raise RuntimeError(f"One or more parallel SVI runs failed (exit codes: {failures}).")
+            else:
+                for run_id in pending:
+                    _svi_many_worker(spec, run_id, None)
+        else:
+            print(f"All {n_runs} SVI runs are already complete; reloading outputs from {directory}.")
+
+        # Process-local result objects are intentionally reconstructed from
+        # disk after workers exit.  This also gives serial and parallel paths
+        # identical resumable behaviour.
+        results: list[FitResult] = []
+        for run_id in range(n_runs):
+            restored = SingleBandModel(**deepcopy(spec["model"]))
+            run_dir = directory / f"run_{run_id}"
+            restored.load(run_dir, seed=int(sampler.random_seed) + run_id)
+            results.append(restored.get_results(random_seed=int(sampler.random_seed) + run_id))
+        return SingleBandResultsCombination(results)
     def model_image(self, parameters: Mapping[str, Any] | None = None) -> np.ndarray:
         if self.prob_model is None or self.lens_image is None: raise RuntimeError("The backend model is unavailable.")
         if parameters is None:

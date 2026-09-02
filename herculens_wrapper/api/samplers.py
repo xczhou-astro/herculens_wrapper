@@ -38,6 +38,208 @@ def is_completed_svi_run(save_path: str | Path) -> bool:
     )
 
 
+_TRUTH_COMPONENTS = {
+    "lens_mass": ("kwargs_lens", "lens_"),
+    "lens_light": ("kwargs_lens_light", "lens_light_"),
+    "source_light": ("kwargs_source", "source_"),
+    "point_source": ("kwargs_point_source", "ps_"),
+}
+_TRUTH_COMPONENT_ALIASES = {
+    "lens mass": "lens_mass",
+    "lens light": "lens_light",
+    "source light": "source_light",
+    "point source": "point_source",
+    "ps": "point_source",
+}
+
+
+def _normalise_truth_components(components: list[str] | tuple[str, ...]) -> list[str]:
+    if not isinstance(components, (list, tuple)) or not components:
+        raise ValueError("components must be a non-empty list, e.g. ['lens_mass', 'lens_light'].")
+    result = []
+    for component in components:
+        canonical = _TRUTH_COMPONENT_ALIASES.get(str(component).strip().lower(), str(component).strip().lower())
+        if canonical not in _TRUTH_COMPONENTS:
+            allowed = ", ".join(_TRUTH_COMPONENTS)
+            raise ValueError(f"Unknown truth-comparison component {component!r}; choose from {allowed}.")
+        if canonical not in result:
+            result.append(canonical)
+    return result
+
+
+def _truth_mapping(truth: Mapping[str, Any] | str | Path) -> dict[str, Any]:
+    if isinstance(truth, (str, Path)):
+        path = Path(truth).expanduser()
+        if not path.is_file():
+            raise FileNotFoundError(f"Truth JSON does not exist: {path}")
+        with path.open() as stream:
+            loaded = json.load(stream)
+        if not isinstance(loaded, Mapping):
+            raise ValueError(f"Truth JSON must contain a dictionary: {path}")
+        return dict(loaded)
+    if isinstance(truth, Mapping):
+        return dict(truth)
+    raise TypeError("truth must be a mapping or a path to a JSON file.")
+
+
+def _parse_single_band_site(name: str) -> tuple[str, str, int] | None:
+    """Map a single-band NumPyro site to component, parameter, profile index."""
+    local = str(name).rsplit("/", 1)[-1]
+    # Order matters because ``lens_light_`` begins with ``lens_``.
+    for component, prefix in (
+        ("lens_light", "lens_light_"),
+        ("lens_mass", "lens_"),
+        ("source_light", "source_"),
+        ("point_source", "ps_"),
+    ):
+        if not local.startswith(prefix):
+            continue
+        remainder = local[len(prefix):]
+        if "_" not in remainder:
+            return None
+        parameter, index = remainder.rsplit("_", 1)
+        if parameter and index.isdigit():
+            return component, parameter, int(index)
+    return None
+
+
+def compare_hmc_truth(
+    hmc_samples: str | Path,
+    truth: Mapping[str, Any] | str | Path,
+    *,
+    components: list[str] | tuple[str, ...],
+    save_path: str | Path,
+    max_samples: int = 15_000,
+) -> dict[str, Any]:
+    """Plot selected HMC posterior parameters against simulation truth.
+
+    This standalone utility needs no declared data, profiles, or model.  Pass
+    either a HMC run directory or its ``hmc_samples.h5`` file, plus a truth
+    ``params.json``/mapping using the standard ``kwargs_*`` structure.
+    """
+    if not isinstance(max_samples, int) or max_samples < 1:
+        raise ValueError("max_samples must be a positive integer.")
+    selected_components = _normalise_truth_components(components)
+    archive = Path(hmc_samples).expanduser()
+    if archive.is_dir():
+        archive = archive / "hmc_samples.h5"
+    if archive.name != "hmc_samples.h5" or not archive.is_file():
+        raise FileNotFoundError("hmc_samples must be a run directory or an existing hmc_samples.h5 file.")
+    from ..samplers import _load_hmc_samples_hdf5
+
+    samples, _ = _load_hmc_samples_hdf5(str(archive))
+    if not samples:
+        raise ValueError(f"HMC archive contains no posterior samples: {archive}")
+    truth_data = _truth_mapping(truth)
+    directory = Path(save_path).expanduser()
+    directory.mkdir(parents=True, exist_ok=True)
+
+    values: list[np.ndarray] = []
+    true_values: list[float] = []
+    labels: list[str] = []
+    skipped: list[str] = []
+    for site, site_values in samples.items():
+        parsed = _parse_single_band_site(site)
+        if parsed is None:
+            continue
+        component, parameter, profile_index = parsed
+        if component not in selected_components:
+            continue
+        kwargs_key, _ = _TRUTH_COMPONENTS[component]
+        truth_profiles = truth_data.get(kwargs_key)
+        if truth_profiles is None and component == "point_source":
+            truth_profiles = truth_data.get("kwargs_ps")
+        if not isinstance(truth_profiles, list) or profile_index >= len(truth_profiles):
+            skipped.append(f"{site}: missing {kwargs_key}[{profile_index}] in truth")
+            continue
+        truth_profile = truth_profiles[profile_index]
+        if not isinstance(truth_profile, Mapping) or parameter not in truth_profile:
+            skipped.append(f"{site}: missing truth parameter {parameter!r}")
+            continue
+        posterior = np.asarray(site_values)
+        if posterior.ndim == 1:
+            posterior = posterior[:, None]
+        elif posterior.ndim != 2:
+            # Pixel fields and other high-dimensional nuisance variables are
+            # intentionally not suitable for a parameter recovery corner plot.
+            continue
+        truth_value = np.asarray(truth_profile[parameter]).reshape(-1)
+        if posterior.shape[1] != truth_value.size:
+            skipped.append(f"{site}: posterior/truth shape mismatch")
+            continue
+        for element in range(posterior.shape[1]):
+            draws = np.asarray(posterior[:, element], dtype=float)
+            true_value = float(truth_value[element])
+            finite = np.isfinite(draws)
+            if finite.sum() < 2 or not np.isfinite(true_value):
+                skipped.append(f"{site}: non-finite posterior or truth")
+                continue
+            suffix = "" if posterior.shape[1] == 1 else f"[{element}]"
+            labels.append(f"{component}[{profile_index}].{parameter}{suffix}")
+            values.append(draws[finite])
+            true_values.append(true_value)
+    if not values:
+        raise ValueError("No comparable scalar sites found for the requested components.")
+
+    import matplotlib.pyplot as plt
+
+    summary: dict[str, dict[str, float]] = {}
+    ncols = min(3, len(values))
+    nrows = int(np.ceil(len(values) / ncols))
+    figure, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 3.6 * nrows), squeeze=False)
+    for index, (label, draws, true_value) in enumerate(zip(labels, values, true_values)):
+        axis = axes.flat[index]
+        median, p16, p84 = np.percentile(draws, [50.0, 16.0, 84.0])
+        summary[label] = {
+            "truth": true_value, "median": float(median),
+            "lower_1sigma": float(median - p16), "upper_1sigma": float(p84 - median),
+        }
+        axis.hist(draws, bins="auto", density=True, histtype="stepfilled", color="tab:blue", alpha=0.55)
+        axis.axvspan(p16, p84, color="tab:blue", alpha=0.16, label="posterior 1σ")
+        axis.axvline(median, color="tab:blue", lw=1.7, label="posterior median")
+        axis.axvline(true_value, color="tab:red", lw=1.8, ls="--", label="truth")
+        axis.set(title=label, xlabel="parameter value", ylabel="posterior density")
+        axis.legend(fontsize=8)
+    for axis in axes.flat[len(values):]:
+        axis.remove()
+    figure.suptitle("HMC posterior versus truth", y=1.01)
+    figure.tight_layout()
+    one_d_path = directory / "posterior_truth_1d.png"
+    figure.savefig(one_d_path, dpi=180, bbox_inches="tight")
+    plt.close(figure)
+
+    corner_path: Path | None = None
+    if len(values) >= 2:
+        try:
+            import corner
+        except ImportError as error:
+            raise ImportError("compare_hmc_truth() needs the optional 'corner' package for its 2D plot.") from error
+        n_draws = min(len(draws) for draws in values)
+        matrix = np.column_stack([draws[:n_draws] for draws in values])
+        if n_draws > max_samples:
+            matrix = matrix[np.random.default_rng(42).choice(n_draws, size=max_samples, replace=False)]
+        # For a 2D Gaussian these enclosed-probability levels correspond to
+        # the familiar nested 1σ, 2σ, and 3σ contours.
+        figure = corner.corner(
+            matrix, labels=labels, truths=true_values, truth_color="tab:red",
+            quantiles=[0.16, 0.5, 0.84], levels=[0.393, 0.865, 0.989],
+            show_titles=True, title_fmt=".4g",
+        )
+        corner_path = directory / "posterior_truth_corner.png"
+        figure.savefig(corner_path, dpi=180, bbox_inches="tight")
+        plt.close(figure)
+
+    summary_path = directory / "posterior_truth_summary.json"
+    summary_path.write_text(json.dumps({
+        "hmc_samples": str(archive), "components": selected_components,
+        "parameters": summary, "skipped": skipped,
+    }, indent=2) + "\n")
+    return {
+        "summary": summary, "skipped": skipped, "one_dimensional": one_d_path,
+        "corner": corner_path, "summary_file": summary_path,
+    }
+
+
 def _nested_difference(reference: Any, bound: Any, *, upper: bool) -> Any:
     """Return non-negative ``bound - reference`` or ``reference - bound``."""
     if isinstance(reference, Mapping) and isinstance(bound, Mapping):
@@ -258,6 +460,207 @@ class FitResult:
             "max_loglike_sample_index": summary.get("max_loglike_sample_index"),
         })
         return metrics
+
+    def compare_truth(
+        self,
+        truth: Mapping[str, Any] | str | Path,
+        *,
+        components: list[str] | tuple[str, ...],
+        save_path: str | Path,
+        max_samples: int = 15_000,
+    ) -> dict[str, Any]:
+        """Compare selected scalar HMC posteriors against simulation truth.
+
+        ``truth`` is either a legacy-style truth dictionary or a JSON file
+        containing ``kwargs_lens``, ``kwargs_lens_light``, ``kwargs_source``,
+        and/or ``kwargs_point_source``.  ``components`` explicitly selects
+        one or more of ``lens_mass``, ``lens_light``, ``source_light``, and
+        ``point_source`` (space-separated aliases are accepted).  Fixed and
+        linked parameters have no independent posterior site and are reported
+        in ``skipped`` rather than plotted.
+
+        The method writes ``posterior_truth_1d.png`` and, when two or more
+        scalar parameters are selected, ``posterior_truth_corner.png``.  The
+        latter marks truth in red and draws the 2D 1-sigma (39.3-percent)
+        credible contour.
+        """
+        if self.samples is None:
+            raise RuntimeError("compare_truth() requires HMC posterior samples.")
+        if not isinstance(max_samples, int) or max_samples < 1:
+            raise ValueError("max_samples must be a positive integer.")
+        selected_components = _normalise_truth_components(components)
+        if isinstance(truth, (str, Path)):
+            truth_path = Path(truth).expanduser()
+            if not truth_path.is_file():
+                raise FileNotFoundError(f"Truth JSON does not exist: {truth_path}")
+            with truth_path.open() as stream:
+                truth_data = json.load(stream)
+        elif isinstance(truth, Mapping):
+            truth_data = dict(truth)
+        else:
+            raise TypeError("truth must be a mapping or a path to a JSON file.")
+
+        directory = Path(save_path).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        model = self._require_model()
+        _, parameter_lists = model.definition.as_dicts()
+        samples = self.samples
+        values: list[np.ndarray] = []
+        truths: list[float] = []
+        labels: list[str] = []
+        skipped: list[str] = []
+
+        for component in selected_components:
+            kwargs_key, prefix = _TRUTH_COMPONENTS[component]
+            truth_components = truth_data.get(kwargs_key)
+            # Accept the historic short spelling as input only.
+            if truth_components is None and component == "point_source":
+                truth_components = truth_data.get("kwargs_ps")
+            definitions = parameter_lists.get({
+                "lens_mass": "lens_mass_params_list",
+                "lens_light": "lens_light_params_list",
+                "source_light": "source_light_params_list",
+                "point_source": "point_source_params_list",
+            }[component], [])
+            if not isinstance(truth_components, list):
+                skipped.append(f"{component}: missing {kwargs_key} in truth")
+                continue
+            for profile_index, definition in enumerate(definitions):
+                if profile_index >= len(truth_components) or not isinstance(truth_components[profile_index], Mapping):
+                    skipped.append(f"{component}[{profile_index}]: missing truth profile")
+                    continue
+                truth_profile = truth_components[profile_index]
+                for parameter in definition:
+                    site = f"{prefix}{parameter}_{profile_index}"
+                    if site not in samples:
+                        # Correlated and fixed parameters intentionally have
+                        # no independent NumPyro posterior coordinate.
+                        continue
+                    if parameter not in truth_profile or truth_profile[parameter] is None:
+                        skipped.append(f"{component}[{profile_index}].{parameter}: missing truth value")
+                        continue
+                    posterior = np.asarray(samples[site])
+                    truth_value = np.asarray(truth_profile[parameter])
+                    if posterior.ndim == 1:
+                        posterior = posterior[:, None]
+                    elif posterior.ndim > 2:
+                        skipped.append(f"{component}[{profile_index}].{parameter}: non-scalar posterior")
+                        continue
+                    flat_truth = truth_value.reshape(-1)
+                    if posterior.shape[1] != flat_truth.size:
+                        skipped.append(
+                            f"{component}[{profile_index}].{parameter}: posterior/truth shape mismatch"
+                        )
+                        continue
+                    for element_index in range(posterior.shape[1]):
+                        draws = np.asarray(posterior[:, element_index], dtype=float)
+                        true_value = float(flat_truth[element_index])
+                        finite = np.isfinite(draws)
+                        if not np.isfinite(true_value) or finite.sum() < 2:
+                            skipped.append(f"{component}[{profile_index}].{parameter}: non-finite values")
+                            continue
+                        suffix = "" if posterior.shape[1] == 1 else f"[{element_index}]"
+                        labels.append(f"{component}[{profile_index}].{parameter}{suffix}")
+                        values.append(draws[finite])
+                        truths.append(true_value)
+
+        if not values:
+            raise ValueError(
+                "No comparable scalar posterior sites were found. Check components, "
+                "the declared profiles, and the truth kwargs dictionary."
+            )
+
+        import matplotlib.pyplot as plt
+
+        summary: dict[str, dict[str, float]] = {}
+        ncols = min(3, len(values))
+        nrows = int(np.ceil(len(values) / ncols))
+        figure, axes = plt.subplots(nrows, ncols, figsize=(5.2 * ncols, 3.6 * nrows), squeeze=False)
+        for index, (label, draws, true_value) in enumerate(zip(labels, values, truths)):
+            axis = axes.flat[index]
+            median, lower, upper = np.percentile(draws, [50.0, 16.0, 84.0])
+            summary[label] = {
+                "truth": true_value,
+                "median": float(median),
+                "lower_1sigma": float(median - lower),
+                "upper_1sigma": float(upper - median),
+            }
+            axis.hist(draws, bins="auto", density=True, histtype="stepfilled", color="tab:blue", alpha=0.55)
+            axis.axvspan(lower, upper, color="tab:blue", alpha=0.16, label="posterior 1σ")
+            axis.axvline(median, color="tab:blue", lw=1.7, label="posterior median")
+            axis.axvline(true_value, color="tab:red", lw=1.8, ls="--", label="truth")
+            axis.set(title=label, xlabel="parameter value", ylabel="posterior density")
+            axis.legend(fontsize=8)
+        for axis in axes.flat[len(values):]:
+            axis.remove()
+        figure.suptitle("HMC posterior versus truth", y=1.01)
+        figure.tight_layout()
+        one_d_path = directory / "posterior_truth_1d.png"
+        figure.savefig(one_d_path, dpi=180, bbox_inches="tight")
+        plt.close(figure)
+
+        corner_path: Path | None = None
+        if len(values) >= 2:
+            try:
+                import corner
+            except ImportError as error:
+                raise ImportError("compare_truth() needs the optional 'corner' package for its 2D plot.") from error
+            common_count = min(len(item) for item in values)
+            matrix = np.column_stack([item[:common_count] for item in values])
+            if common_count > max_samples:
+                rng = np.random.default_rng(42)
+                matrix = matrix[rng.choice(common_count, size=max_samples, replace=False)]
+            figure = corner.corner(
+                matrix, labels=labels, truths=truths, truth_color="tab:red",
+                quantiles=[0.16, 0.5, 0.84], levels=[0.393, 0.865, 0.989],
+                show_titles=True, title_fmt=".4g",
+            )
+            corner_path = directory / "posterior_truth_corner.png"
+            figure.savefig(corner_path, dpi=180, bbox_inches="tight")
+            plt.close(figure)
+
+        summary_path = directory / "posterior_truth_summary.json"
+        summary_path.write_text(json.dumps({
+            "components": selected_components,
+            "parameters": summary,
+            "skipped": skipped,
+        }, indent=2) + "\n")
+        return {
+            "summary": summary,
+            "skipped": skipped,
+            "one_dimensional": one_d_path,
+            "corner": corner_path,
+            "summary_file": summary_path,
+        }
+
+    def fit_analytic_pixelated_source(
+        self,
+        *,
+        profile: str = "SERSIC_ELLIPSE",
+        n_samples: int = 200,
+        crop_size: int | tuple[int, int] | None = None,
+        truth: Mapping[str, Any] | str | Path | None = None,
+        save_path: str | Path | None = None,
+        random_seed: int = 42,
+    ) -> dict[str, Any]:
+        """Strict per-HMC-draw analytic fit on a uniform pixelated source.
+
+        Each draw ray-traces the declared source-arc mask using its own lens
+        parameters before fitting, so source-plane physical coordinates and
+        pixel scale are propagated with the lens posterior.
+        """
+        if self.samples is None:
+            raise RuntimeError("fit_analytic_pixelated_source() requires HMC samples.")
+        model = self._require_model()
+        if model.initialization_path is None:
+            raise RuntimeError("The HMC run directory is unavailable; load HMC from disk first.")
+        from .utils import fit_analytic_pixelated_source
+        return fit_analytic_pixelated_source(
+            model.initialization_path, profile=profile, n_samples=n_samples,
+            crop_size=crop_size, image_pixel_scale=model.data.pixel_scale,
+            truth=truth, save_path=save_path, random_seed=random_seed,
+            model=model, median_parameters=self.parameters,
+        )
 
     def plot_best_fit(self, *, scale: str = "linear", residual_vis_max: float = 0.0,
                       save_path: str | Path | None = None):

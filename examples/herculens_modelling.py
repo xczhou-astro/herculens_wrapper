@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
-import os
 from pathlib import Path
 import shutil
 import sys
@@ -39,7 +38,10 @@ def parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument("--output-root", type=Path, default=SCRIPT_DIR)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--gpus", default=None, help="CUDA_VISIBLE_DEVICES value; omitted leaves the environment unchanged.")
+    parser.add_argument(
+        "--gpus", default=None,
+        help="One CUDA/MIG identifier or comma-separated MIG UUIDs. Multiple identifiers run independent SVI runs in parallel.",
+    )
     parser.add_argument("--svi-runs", type=int, default=4)
     parser.add_argument("--svi-iterations", type=int, default=10_000)
     parser.add_argument("--pixelated-warmup", type=int, default=2_000)
@@ -187,10 +189,53 @@ def prepare_stage(model, args: argparse.Namespace, directory: Path) -> None:
         shutil.copy2(SCRIPT_PATH, directory / SCRIPT_PATH.name)
 
 
+def prepare_stage_data_only(args: argparse.Namespace, directory: Path) -> None:
+    """Prepare shared SVI-stage inputs without importing/initialising JAX."""
+    directory.mkdir(parents=True, exist_ok=True)
+    save_config(args, directory)
+    data = make_data(args)
+    data.show(scale="linear", save_path=directory / "input_data_linear.png")
+    data.show(scale="log", save_path=directory / "input_data_log.png")
+    data.save(directory / "data")
+    if SCRIPT_PATH != (directory / SCRIPT_PATH.name).resolve():
+        shutil.copy2(SCRIPT_PATH, directory / SCRIPT_PATH.name)
+
+
+def _split_visible_devices(gpus: str | None) -> list[str]:
+    """Split comma-separated CUDA/MIG identifiers without resolving them."""
+    return [] if gpus is None else [item.strip() for item in gpus.split(",") if item.strip()]
+
+
 def run_svi(args: argparse.Namespace, source_method: str, directory: Path, init_path: Path | None) -> None:
     from herculens_wrapper.api import (
         SamplerConfig, SingleBandResultsCombination, is_completed_svi_run,
     )
+
+    devices = _split_visible_devices(args.gpus)
+    # The API owns multi-MIG scheduling.  The run script only selects the
+    # requested devices and prepares shared stage products.
+    if len(devices) > 1:
+        directory.mkdir(parents=True, exist_ok=True)
+        prepare_stage_data_only(args, directory)
+        model = make_model(args, source_method)
+        if init_path is not None:
+            # Do not initialize in the parent: it could initialize JAX on all
+            # visible devices before the spawned workers restrict themselves
+            # to one MIG.  Each child loads this path and initializes with its
+            # own seed instead.
+            model.initialization_path = init_path.expanduser()
+        sampler = SamplerConfig.svi(
+            max_iterations=args.svi_iterations, learning_rate=1e-2, init_scale=0.01,
+            loss_kind="trace_elbo", num_particles=10, random_seed=args.seed,
+        )
+        results = model.run(
+            sampler, save_path=directory, n_runs=args.svi_runs,
+            parallel=True, gpus=devices, pixelated_init_match="image",
+            num_iterations_warmup=args.pixelated_warmup if source_method == "pixelated" else 0,
+            residual_vis_max=args.residual_vis_max,
+        )
+        results.output(directory, residual_vis_max=args.residual_vis_max)
+        return
 
     directory.mkdir(parents=True, exist_ok=True)
     with stage_logging(directory):
