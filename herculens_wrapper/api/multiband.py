@@ -701,10 +701,12 @@ class MultiBandModel:
 
     def run(
         self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
-        save_path: str | Path | None = None,
+        save_path: str | Path | None = None, residual_vis_max: float = 0.0,
     ) -> MultiBandFitResult:
         if sampler.name not in {"svi", "hmc"}:
             raise NotImplementedError("MultiBandModel currently supports SVI and HMC.")
+        if residual_vis_max < 0:
+            raise ValueError("residual_vis_max must be non-negative.")
         from ..samplers import run_hmc, run_svi
         initial = dict(init_params or self.initial_parameters or self.initialize(seed=sampler.random_seed))
         samples = None
@@ -719,11 +721,13 @@ class MultiBandModel:
             output.mkdir(parents=True, exist_ok=True)
             args = sampler.to_namespace()
             args.save_path = str(output)
+            args.residual_vis_max = float(residual_vis_max)
             samples, parameters, details = run_hmc(
                 self.prob_model, args, initial,
                 init_params_path=str(self.initialization_path),
                 batch_diagnostics_callback=lambda draws, batch_index, health: self._save_hmc_batch_diagnostics(
                     draws, batch_index, health, output, int(args.num_chains_hmc_numpyro),
+                    residual_vis_max=float(residual_vis_max),
                 ),
             )
             details["num_chains_hmc_numpyro"] = int(args.num_chains_hmc_numpyro)
@@ -745,6 +749,8 @@ class MultiBandModel:
         health: Mapping[str, Any],
         output: Path,
         num_chains: int,
+        *,
+        residual_vis_max: float = 0.0,
     ) -> None:
         """Save cumulative multiband diagnostics after one HMC batch."""
         from ..samplers import save_hmc_diagnostics
@@ -789,9 +795,11 @@ class MultiBandModel:
             self._plot_hmc_chain_comparison(
                 samples, band, directory, chain_components,
                 batch_index=batch_index, num_chains=num_chains,
+                residual_vis_max=residual_vis_max,
             )
         plot_multiband_composite(
-            plot_rows, str(directory), output_filename=f"multiband_composite_batch_{batch_index}.png",
+            plot_rows, str(directory), residual_vis_max=residual_vis_max,
+            output_filename=f"multiband_composite_batch_{batch_index}.png",
         )
 
     def _evaluate_hmc_component_medians(
@@ -898,7 +906,7 @@ class MultiBandModel:
         self,
         samples: Mapping[str, Any], band: Mapping[str, Any], directory: Path,
         chain_components: list[dict[str, dict[str, np.ndarray]]],
-        *, batch_index: int, num_chains: int,
+        *, batch_index: int, num_chains: int, residual_vis_max: float = 0.0,
     ) -> None:
         """Save a six-panel composite row for every HMC chain in one band."""
         from ..visualizations import plot_multiband_composite
@@ -927,7 +935,7 @@ class MultiBandModel:
                 "model_lens_light": components["lens_light"],
             })
         plot_multiband_composite(
-            chain_rows, str(directory),
+            chain_rows, str(directory), residual_vis_max=residual_vis_max,
             output_filename=f"hmc_chain_comparison_{band['name']}_batch_{batch_index}.png",
         )
 

@@ -297,7 +297,10 @@ def run_hmc(
         sampler = SamplerConfig.hmc(num_warmup=args.hmc_warmup, num_samples=args.hmc_samples,
                                     num_chains=args.hmc_chains, checkpoint_interval=args.checkpoint_interval,
                                     random_seed=args.seed)
-        result = model.run(sampler, init_params=initial, save_path=directory)
+        result = model.run(
+            sampler, init_params=initial, save_path=directory,
+            residual_vis_max=args.residual_vis_max,
+        )
         result.output(save_path=directory, residual_vis_max=args.residual_vis_max)
 
 

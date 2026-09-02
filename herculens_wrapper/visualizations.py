@@ -2201,7 +2201,13 @@ def generate_run_plots(
     if comp_total is not None:
         best_fit_model = comp_total
 
-    if chi2 is None and best_fit_model is not None and image_data is not None and noise_map is not None:
+    # The best-fit and composite panels must annotate the same rendered
+    # image.  In HMC this is the component-wise posterior-median image, which
+    # differs from the image evaluated at coordinate-wise median parameters.
+    # ``composite.png`` has historically displayed the full-image residual
+    # sum, so compute that same value here rather than accepting a separately
+    # supplied (normally masked, parameter-median) metric.
+    if best_fit_model is not None and image_data is not None and noise_map is not None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
 
     def _try(name, fn):

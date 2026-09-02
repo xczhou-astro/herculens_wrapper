@@ -709,6 +709,10 @@ class SingleBandModel:
             initial = self.initialize(seed=sampler.random_seed)
         self.definition.update_values(initial)
         run_hmc, run_optax, run_svi = _sampler_backend(); args = sampler.to_namespace()
+        # ``run_hmc`` creates intermediate batch diagnostics before a
+        # FitResult exists, so propagate the visualization setting through
+        # its lightweight namespace rather than only applying it at output().
+        args.residual_vis_max = float(residual_vis_max)
         if sampler.name == "optax": params, details, samples = *run_optax(self.prob_model, args, initial), None
         elif sampler.name == "svi": params, details, samples = *run_svi(self.prob_model, self.data.likelihood_image, args, initial), None
         elif sampler.name == "hmc":
