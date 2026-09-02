@@ -261,6 +261,18 @@ class MassProfile(Profile):
     def __init__(self, profile_type: str, **kwargs: Any) -> None:
         super().__init__(str(profile_type).upper(), **kwargs)
 
+    def __getnewargs_ex__(self):
+        """Make individual mass profiles safe to pickle for spawned workers.
+
+        ``MassProfile(["SIE", "SHEAR"])`` is a construction convenience
+        that returns a :class:`ProfileCollection`; its individual members are
+        still ``MassProfile`` instances whose custom ``__new__`` requires the
+        profile type.  Python's default pickle reconstruction supplies no
+        arguments, which fails under multiprocessing's ``spawn`` start
+        method unless this hook is present.
+        """
+        return (self.profile_type,), {}
+
 
 class StellarMassMGE(MassProfile):
     """A fixed lens-light Gaussian MGE scaled into stellar convergence.
@@ -389,6 +401,10 @@ class LightProfile(Profile):
 
     def __init__(self, profile_type: str, **kwargs: Any) -> None:
         super().__init__(str(profile_type).upper(), **kwargs)
+
+    def __getnewargs_ex__(self):
+        """Make ordinary light-profile declarations safe for spawn/pickle."""
+        return (self.profile_type,), {}
 
     @classmethod
     def multi_gaussian_ellipse(
