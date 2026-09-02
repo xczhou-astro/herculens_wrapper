@@ -792,6 +792,18 @@ def _build_hmc_chain_init_params(
     max_retries = max(int(getattr(args, 'hmc_init_max_retries', 100)), 0)
     rng_key = jax.random.PRNGKey(int(getattr(args, 'random_seed', 0)) + 130363)
     chain_params = []
+
+    def saved_median_for_all_chains():
+        """Return correctly batched unconstrained SVI-median starts."""
+        if num_chains == 1:
+            return init_params_unconst
+        return jax.tree_util.tree_map(
+            lambda value: jnp.broadcast_to(
+                value, (num_chains,) + jnp.shape(value),
+            ),
+            init_params_unconst,
+        )
+
     print(
         f'[hmc:init] Drawing {num_chains} chain initializations from the joint '
         f'SVI posterior within 1 sigma (max_retries={max_retries} per chain).'
@@ -801,23 +813,36 @@ def _build_hmc_chain_init_params(
         accepted = None
         for attempt in range(max_retries):
             rng_key, sample_key = jax.random.split(rng_key)
-            latent = posterior.sample(sample_key)
+            try:
+                latent = posterior.sample(sample_key)
 
-            # Direct rejection is impractical with thousands of latent
-            # coordinates. Keep the joint draw direction and contract it into
-            # the guide's marginal 1-sigma box in unconstrained space.
-            delta = latent - loc
-            standardized_max = jnp.max(
-                jnp.abs(delta) / jnp.maximum(marginal_std, 1e-12)
-            )
-            contraction = jnp.minimum(
-                1.0,
-                0.999 / jnp.maximum(standardized_max, 1e-12),
-            )
-            latent_1sigma = loc + contraction * delta
-            candidate_all = guide._unpack_and_constrain(
-                latent_1sigma, guide_params,
-            )
+                # Direct rejection is impractical with thousands of latent
+                # coordinates. Keep the joint draw direction and contract it
+                # into the guide's marginal 1-sigma box in unconstrained space.
+                delta = latent - loc
+                standardized_max = jnp.max(
+                    jnp.abs(delta) / jnp.maximum(marginal_std, 1e-12)
+                )
+                contraction = jnp.minimum(
+                    1.0,
+                    0.999 / jnp.maximum(standardized_max, 1e-12),
+                )
+                latent_1sigma = loc + contraction * delta
+                candidate_all = guide._unpack_and_constrain(
+                    latent_1sigma, guide_params,
+                )
+            except Exception as error:
+                # Some CUDA/XLA combinations fail while autotuning the small
+                # low-rank-guide matrix product.  This affects only our
+                # optional dispersed chain starts, not the HMC target model.
+                # A common valid SVI-median start still gives every NUTS chain
+                # an independent RNG trajectory, so prefer it to aborting a
+                # costly HMC run before warmup.
+                print(
+                    '[hmc:init] Could not draw an SVI-posterior chain start '
+                    f'({error}); using the saved SVI median for all chains.'
+                )
+                return saved_median_for_all_chains()
 
             try:
                 candidate = {}
@@ -1405,17 +1430,33 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             "parameters are fixed or linked."
         )
 
+    # ``MultiHMCGibbs`` stores one RNG key per inner kernel.  NumPyro's pmap
+    # path requires a single per-chain RNG key in the scan carry, so this
+    # custom kernel cannot safely drive chains distributed across devices.
+    # Use ordinary joint NUTS in that case: the four chains remain independent
+    # and run concurrently, only the within-chain Gibbs splitting is removed.
+    from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
+    requested_num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
+    requested_chain_method = resolve_chain_method_hmc_numpyro(args)
+    parallel_multichain = requested_num_chains > 1 and requested_chain_method == 'parallel'
+
     # Gibbs needs two non-empty conditional blocks.  With a fixed lens mass
     # there is only the light/source block, for which ordinary joint NUTS is
     # the correct and simpler kernel.
     use_joint_nuts = (
         bool(getattr(args, 'disable_gibbs', False))
+        or parallel_multichain
         or not vars_mass
         or not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other)
     )
 
     if use_joint_nuts:
-        if not vars_mass:
+        if parallel_multichain:
+            print(
+                '[hmc] chain_method=parallel with multiple chains: using joint NUTS; '
+                'MultiHMCGibbs is not pmap-compatible.'
+            )
+        elif not vars_mass:
             print("[hmc] Lens mass is fixed; running joint NUTS for remaining free parameters.")
         elif not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other):
             print("[hmc] Only lens-mass parameters are free; running joint NUTS.")
@@ -1513,9 +1554,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     num_warmup = int(getattr(args, 'num_warmup_hmc_numpyro', 1000))
     num_samples_total = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
     checkpoint_interval = int(getattr(args, 'checkpoint_interval_hmc_numpyro', 250))
-    num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
-    from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
-    chain_method = resolve_chain_method_hmc_numpyro(args)
+    num_chains = requested_num_chains
+    chain_method = requested_chain_method
     progress_bar = bool(getattr(args, 'progress_bar_hmc_numpyro', True))
     
     if checkpoint_interval <= 0 or checkpoint_interval > num_samples_total:
