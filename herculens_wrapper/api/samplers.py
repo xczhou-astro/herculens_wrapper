@@ -638,7 +638,7 @@ class FitResult:
         *,
         profile: str = "SERSIC_ELLIPSE",
         n_samples: int = 200,
-        crop_size: int | tuple[int, int] | None = None,
+        crop_radius: float | None = None,
         truth: Mapping[str, Any] | str | Path | None = None,
         save_path: str | Path | None = None,
         random_seed: int = 42,
@@ -647,7 +647,8 @@ class FitResult:
 
         Each draw ray-traces the declared source-arc mask using its own lens
         parameters before fitting, so source-plane physical coordinates and
-        pixel scale are propagated with the lens posterior.
+        pixel scale are propagated with the lens posterior.  ``crop_radius``
+        restricts each fit to a circle centred on the median source grid.
         """
         if self.samples is None:
             raise RuntimeError("fit_analytic_pixelated_source() requires HMC samples.")
@@ -657,7 +658,7 @@ class FitResult:
         from .utils import fit_analytic_pixelated_source
         return fit_analytic_pixelated_source(
             model.initialization_path, profile=profile, n_samples=n_samples,
-            crop_size=crop_size, image_pixel_scale=model.data.pixel_scale,
+            crop_radius=crop_radius, image_pixel_scale=model.data.pixel_scale,
             truth=truth, save_path=save_path, random_seed=random_seed,
             model=model, median_parameters=self.parameters,
         )
@@ -759,6 +760,52 @@ class FitResult:
             "y": np.asarray(y),
             "extent": np.asarray(extent),
         }
+
+    def _uniform_pixelated_source_plane(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        source = self.get_source_plane()
+        if source["grid_kind"] != "uniform":
+            raise NotImplementedError("These source-plane diagnostics currently support uniform pixelated grids only.")
+        x, y = np.meshgrid(source["x"], source["y"])
+        return np.asarray(source["pixels"], dtype=float), x, y
+
+    def plot_radial_profile(
+        self,
+        crop_radius: float | None = None,
+        truth: Mapping[str, Any] | str | Path | None = None,
+        save_path: str | Path | None = None,
+        xscale: str = "linear",
+        yscale: str = "linear",
+    ) -> Path:
+        """Plot median pixelated-source radial brightness and enclosed flux.
+
+        ``crop_radius`` is in arcsec; both profiles terminate at that radius.
+        When supplied, ``truth`` is a params JSON or mapping with an analytic
+        ``kwargs_source`` component and is overplotted for comparison.
+        """
+        from .utils import plot_pixelated_source_radial_profile
+
+        pixels, x, y = self._uniform_pixelated_source_plane()
+        return plot_pixelated_source_radial_profile(
+            pixels, x, y, crop_radius=crop_radius, truth=truth,
+            image_pixel_scale=self._require_model().data.pixel_scale,
+            save_path=save_path, xscale=xscale, yscale=yscale,
+        )
+
+    def plot_pixelated_source_construction(
+        self,
+        crop_radius: float | None = None,
+        truth: Mapping[str, Any] | str | Path | None = None,
+        save_path: str | Path | None = None,
+    ) -> Path:
+        """Plot the circularly cropped median pixelated source and truth residual."""
+        from .utils import plot_pixelated_source_reconstruction
+
+        pixels, x, y = self._uniform_pixelated_source_plane()
+        return plot_pixelated_source_reconstruction(
+            pixels, x, y, crop_radius=crop_radius, truth=truth,
+            image_pixel_scale=self._require_model().data.pixel_scale,
+            save_path=save_path,
+        )
 
     def _legacy_plot_result(self, callback, save_path: str | Path | None, default_name: str, **kwargs: Any) -> Path:
         directory, filename, output = self._plot_destination(save_path, default_name)
