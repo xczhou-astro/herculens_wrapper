@@ -223,7 +223,13 @@ def fit_analytic_pixelated_source(
         local_names, local_initial, local_bounds = _initial_and_bounds(profile, data, local_x, local_y, local_area, image_pixel_scale)
         def residual(vector):
             values = dict(zip(local_names, vector))
-            return (_light_model(profile, values, local_x.ravel(), local_y.ravel(), image_pixel_scale) - data).ravel()
+            # ``_light_model`` is evaluated at flattened coordinates, whereas
+            # a reconstructed source draw remains a 2-D grid.  Flatten both
+            # operands before subtraction so least_squares always receives a
+            # one-dimensional residual vector.
+            return _light_model(
+                profile, values, local_x.ravel(), local_y.ravel(), image_pixel_scale,
+            ) - np.asarray(data, dtype=float).ravel()
         answer = least_squares(residual, local_initial, bounds=local_bounds, method="trf")
         return answer.x, float(np.sqrt(np.mean(answer.fun ** 2)))
 
