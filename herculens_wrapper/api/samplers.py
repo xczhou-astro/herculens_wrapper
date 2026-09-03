@@ -8,7 +8,7 @@ import pickle
 import sys
 import tempfile
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 import numpy as np
 from .models import SamplerName
 
@@ -103,6 +103,227 @@ def _parse_single_band_site(name: str) -> tuple[str, str, int] | None:
     return None
 
 
+def _ordered_single_band_truth_sites(
+    samples: Mapping[str, Any],
+    components: Sequence[str],
+    kwargs_result: Mapping[str, Any] | None,
+) -> list[str]:
+    """Order sampled scalar sites by declared component/profile/parameter.
+
+    HDF5 enumerates dataset keys in storage order (normally lexical), which
+    is unrelated to the physical model declaration.  ``kwargs_result.json``
+    retains the profile and parameter insertion order used by the API output;
+    use it whenever it is available, then append any unlisted sampled sites
+    deterministically.
+    """
+    parsed = {
+        site: parsed_site
+        for site in samples
+        if (parsed_site := _parse_single_band_site(site)) is not None
+        and parsed_site[0] in components
+    }
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for component in components:
+        kwargs_key, _ = _TRUTH_COMPONENTS[component]
+        profiles = [] if kwargs_result is None else kwargs_result.get(kwargs_key, [])
+        if isinstance(profiles, list):
+            for profile_index, profile in enumerate(profiles):
+                if not isinstance(profile, Mapping):
+                    continue
+                for parameter in profile:
+                    matches = [
+                        site for site, item in parsed.items()
+                        if item == (component, parameter, profile_index)
+                    ]
+                    for site in sorted(matches):
+                        if site not in seen:
+                            ordered.append(site)
+                            seen.add(site)
+        # Retain sampled values that are not serialised in kwargs_result
+        # (for example a future scalar nuisance parameter), without allowing
+        # them to disrupt the declared parameter order above.
+        remainder = sorted(
+            (site for site, item in parsed.items()
+             if item[0] == component and site not in seen),
+            key=lambda site: (parsed[site][2], parsed[site][1], site),
+        )
+        ordered.extend(remainder)
+        seen.update(remainder)
+    return ordered
+
+
+def analyze_hmc_degeneracies(
+    hmc_run: str | Path,
+    *,
+    components: Sequence[str] = ("lens_mass", "lens_light", "source_light", "point_source"),
+    min_abs_correlation: float = 0.6,
+    include_hyperparameters: bool = False,
+    include_derived: bool = False,
+    save_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load an HMC run and quantify pairwise posterior degeneracies.
+
+    Parameters
+    ----------
+    hmc_run
+        A directory containing both ``hmc_samples.h5`` and
+        ``kwargs_result.json``, or the path to its ``hmc_samples.h5`` file.
+    components
+        Model components whose scalar NumPyro sites are included.  Pixelated
+        fields are always excluded: a correlation matrix of source pixels is
+        not a useful lens-parameter diagnostic.
+    min_abs_correlation
+        Threshold used to list ``strong_pairs``.  The complete Pearson and
+        Spearman matrices are returned irrespective of this threshold.
+    include_hyperparameters
+        Include scalar sites that do not map to a standard model component.
+    include_derived
+        Also add ``q``/``phi_deg`` from each sampled ``e1``/``e2`` pair and
+        ``gamma_ext``/``phi_ext_deg`` from ``gamma1``/``gamma2``.  This is
+        disabled by default because derived quantities are deterministic
+        functions of native parameters and therefore introduce trivial strong
+        correlations.
+    save_path
+        Optional JSON summary path.  The large sample matrix is returned in
+        memory but intentionally is not duplicated in the JSON file.
+
+    Notes
+    -----
+    Pairwise correlations identify approximately *linear* posterior
+    degeneracies.  Inspect a corner plot as well for curved or multimodal
+    relations.  ``kwargs_result.json`` is loaded and returned so callers can
+    associate profile indices with their fitted model configuration.
+    """
+    if not np.isfinite(min_abs_correlation) or not 0.0 <= min_abs_correlation <= 1.0:
+        raise ValueError("min_abs_correlation must lie between 0 and 1.")
+    selected_components = _normalise_truth_components(tuple(components))
+    archive = Path(hmc_run).expanduser()
+    if archive.is_dir():
+        run_directory, archive = archive, archive / "hmc_samples.h5"
+    else:
+        run_directory = archive.parent
+    if archive.name != "hmc_samples.h5" or not archive.is_file():
+        raise FileNotFoundError("hmc_run must be a run directory or an existing hmc_samples.h5 file.")
+    kwargs_path = run_directory / "kwargs_result.json"
+    if not kwargs_path.is_file():
+        raise FileNotFoundError(f"HMC run is missing kwargs_result.json: {kwargs_path}")
+    with kwargs_path.open() as stream:
+        kwargs_result = json.load(stream)
+    if not isinstance(kwargs_result, Mapping):
+        raise ValueError(f"kwargs_result.json must contain a dictionary: {kwargs_path}")
+
+    from ..samplers import _load_hmc_samples_hdf5
+
+    samples, _ = _load_hmc_samples_hdf5(str(archive))
+    scalar_sites: dict[str, np.ndarray] = {}
+    skipped: list[str] = []
+    for site, raw_values in samples.items():
+        parsed = _parse_single_band_site(site)
+        if parsed is None:
+            if not include_hyperparameters:
+                continue
+            label = str(site).rsplit("/", 1)[-1]
+        else:
+            component, parameter, profile_index = parsed
+            if component not in selected_components:
+                continue
+            label = f"{component}[{profile_index}].{parameter}"
+        values = np.asarray(raw_values, dtype=float)
+        if values.ndim == 1:
+            pass
+        elif values.ndim == 2 and values.shape[1] == 1:
+            values = values[:, 0]
+        else:
+            skipped.append(f"{site}: non-scalar shape {values.shape}")
+            continue
+        if values.size < 3:
+            skipped.append(f"{site}: fewer than three posterior draws")
+            continue
+        if np.nanstd(values) == 0.0:
+            skipped.append(f"{site}: zero posterior variance")
+            continue
+        scalar_sites[label] = values
+    if len(scalar_sites) < 2:
+        raise ValueError("Need at least two varying scalar HMC sites to calculate degeneracies.")
+
+    if include_derived:
+        native = dict(scalar_sites)
+        profile_bases = {label.rsplit(".", 1)[0] for label in native if "." in label}
+        for base in sorted(profile_bases):
+            e1, e2 = native.get(f"{base}.e1"), native.get(f"{base}.e2")
+            if e1 is not None and e2 is not None:
+                ellipticity = np.hypot(e1, e2)
+                scalar_sites[f"{base}.q"] = (1.0 - ellipticity) / (1.0 + ellipticity)
+                scalar_sites[f"{base}.phi_deg"] = np.degrees(0.5 * np.arctan2(e2, e1))
+            gamma1, gamma2 = native.get(f"{base}.gamma1"), native.get(f"{base}.gamma2")
+            if gamma1 is not None and gamma2 is not None:
+                scalar_sites[f"{base}.gamma_ext"] = np.hypot(gamma1, gamma2)
+                scalar_sites[f"{base}.phi_ext_deg"] = np.degrees(0.5 * np.arctan2(gamma2, gamma1))
+
+    labels = list(scalar_sites)
+    lengths = {values.shape[0] for values in scalar_sites.values()}
+    if len(lengths) != 1:
+        raise ValueError(f"Scalar HMC sites have inconsistent draw counts: {sorted(lengths)}")
+    matrix = np.column_stack([scalar_sites[label] for label in labels])
+    finite_rows = np.all(np.isfinite(matrix), axis=1)
+    matrix = matrix[finite_rows]
+    if matrix.shape[0] < 3:
+        raise ValueError("Fewer than three finite joint posterior draws remain.")
+
+    # Spearman catches monotonic but non-linear relationships without adding a
+    # mandatory plotting dependency to this lightweight diagnostic.
+    from scipy.stats import spearmanr
+
+    pearson = np.corrcoef(matrix, rowvar=False)
+    spearman = np.asarray(spearmanr(matrix, axis=0).statistic, dtype=float)
+    # scipy returns a scalar rather than a 2x2 matrix for exactly two inputs.
+    if spearman.ndim == 0:
+        spearman = np.array([[1.0, float(spearman)], [float(spearman), 1.0]])
+    strong_pairs: list[dict[str, Any]] = []
+    for first in range(len(labels)):
+        for second in range(first + 1, len(labels)):
+            correlation = float(pearson[first, second])
+            if abs(correlation) >= min_abs_correlation:
+                strong_pairs.append({
+                    "parameter_1": labels[first],
+                    "parameter_2": labels[second],
+                    "pearson_r": correlation,
+                    "spearman_r": float(spearman[first, second]),
+                })
+    strong_pairs.sort(key=lambda item: abs(item["pearson_r"]), reverse=True)
+
+    summary = {
+        "hmc_samples": str(archive),
+        "kwargs_result": str(kwargs_path),
+        "components": selected_components,
+        "parameter_labels": labels,
+        "n_draws": int(matrix.shape[0]),
+        "min_abs_correlation": float(min_abs_correlation),
+        "include_hyperparameters": bool(include_hyperparameters),
+        "include_derived": bool(include_derived),
+        "pearson_correlation": pearson.tolist(),
+        "spearman_correlation": spearman.tolist(),
+        "strong_pairs": strong_pairs,
+        "skipped": skipped,
+    }
+    summary_file: Path | None = None
+    if save_path is not None:
+        summary_file = Path(save_path).expanduser()
+        summary_file.parent.mkdir(parents=True, exist_ok=True)
+        summary_file.write_text(json.dumps(summary, indent=2) + "\n")
+    return {
+        "samples": matrix,
+        "parameter_labels": labels,
+        "pearson_correlation": pearson,
+        "spearman_correlation": spearman,
+        "strong_pairs": strong_pairs,
+        "kwargs_result": dict(kwargs_result),
+        "skipped": skipped,
+        "summary_file": summary_file,
+    }
+
+
 def compare_hmc_truth(
     hmc_samples: str | Path,
     truth: Mapping[str, Any] | str | Path,
@@ -134,11 +355,27 @@ def compare_hmc_truth(
     directory = Path(save_path).expanduser()
     directory.mkdir(parents=True, exist_ok=True)
 
+    kwargs_result: Mapping[str, Any] | None = None
+    kwargs_path = archive.parent / "kwargs_result.json"
+    if kwargs_path.is_file():
+        try:
+            with kwargs_path.open() as stream:
+                candidate = json.load(stream)
+            if isinstance(candidate, Mapping):
+                kwargs_result = candidate
+        except (OSError, json.JSONDecodeError):
+            # Truth comparison only needs HMC samples and truth; preserve its
+            # original usefulness if an old/malformed output lacks kwargs.
+            pass
+
     values: list[np.ndarray] = []
     true_values: list[float] = []
     labels: list[str] = []
     skipped: list[str] = []
-    for site, site_values in samples.items():
+    for site in _ordered_single_band_truth_sites(
+        samples, selected_components, kwargs_result,
+    ):
+        site_values = samples[site]
         parsed = _parse_single_band_site(site)
         if parsed is None:
             continue
