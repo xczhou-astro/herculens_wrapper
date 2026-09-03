@@ -663,6 +663,9 @@ class FitResult:
     random_seed: int | None = None
     derived: Mapping[str, Any] = field(default_factory=dict)
     _model: Any = field(default=None, repr=False, compare=False)
+    _analytic_pixelated_source_fit: Mapping[str, Any] | None = field(
+        default=None, repr=False, compare=False,
+    )
     @property
     def loss_history(self) -> np.ndarray | None:
         history = self.details.get("loss_history")
@@ -893,12 +896,14 @@ class FitResult:
         if model.initialization_path is None:
             raise RuntimeError("The HMC run directory is unavailable; load HMC from disk first.")
         from .utils import fit_analytic_pixelated_source
-        return fit_analytic_pixelated_source(
+        fit = fit_analytic_pixelated_source(
             model.initialization_path, profile=profile, n_samples=n_samples,
             crop_radius=crop_radius, image_pixel_scale=model.data.pixel_scale,
             truth=truth, save_path=save_path, random_seed=random_seed,
             model=model, median_parameters=self.parameters,
         )
+        self._analytic_pixelated_source_fit = fit
+        return fit
 
     def plot_best_fit(self, *, scale: str = "linear", residual_vis_max: float = 0.0,
                       save_path: str | Path | None = None):
@@ -1034,13 +1039,26 @@ class FitResult:
         truth: Mapping[str, Any] | str | Path | None = None,
         save_path: str | Path | None = None,
     ) -> Path:
-        """Plot the circularly cropped median pixelated source and truth residual."""
+        """Plot pixelated/truth/analytic source constructions and residuals.
+
+        Call :meth:`fit_analytic_pixelated_source` first.  Its posterior
+        median analytic parameters are cached in this result and used to make
+        the fitted-construction row of the 2×3 figure.
+        """
         from .utils import plot_pixelated_source_reconstruction
 
         pixels, x, y = self._uniform_pixelated_source_plane()
+        fit = self._analytic_pixelated_source_fit
+        if fit is None:
+            raise RuntimeError(
+                "Call result.fit_analytic_pixelated_source(...) before "
+                "plot_pixelated_source_construction()."
+            )
         return plot_pixelated_source_reconstruction(
             pixels, x, y, crop_radius=crop_radius, truth=truth,
             image_pixel_scale=self._require_model().data.pixel_scale,
+            fitted_profile=fit["profile"],
+            fitted_parameters=fit["median_parameters"],
             save_path=save_path,
         )
 

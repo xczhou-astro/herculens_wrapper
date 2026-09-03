@@ -170,9 +170,18 @@ def plot_pixelated_source_reconstruction(
     crop_radius: float | None,
     truth: Mapping[str, Any] | str | Path | None,
     image_pixel_scale: float,
+    fitted_profile: str | None = None,
+    fitted_parameters: Mapping[str, float] | None = None,
     save_path: str | Path | None = None,
 ) -> Path:
-    """Plot a circularly cropped median source, optional truth, and residual."""
+    """Plot the pixelated source, truth, and optional analytic construction.
+
+    When analytic fitted parameters are supplied, the six panels are the
+    pixelated median, truth, pixelated-minus-truth, fitted construction,
+    fitted-minus-pixelated, and fitted-minus-truth.  This deliberately keeps
+    the pre-existing pixelated-minus-truth diagnostic as the sixth comparison
+    is added, rather than replacing it.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.colors import TwoSlopeNorm
 
@@ -183,12 +192,24 @@ def plot_pixelated_source_reconstruction(
     output = _output_plot_path(save_path, "pixelated_source_reconstruction.png")
     extent = [float(x.min()), float(x.max()), float(y.min()), float(y.max())]
 
-    if truth_pixels is None:
+    fitted_pixels = None
+    if fitted_parameters is not None:
+        if fitted_profile is None:
+            raise ValueError("fitted_profile is required with fitted_parameters.")
+        fitted_profile = str(fitted_profile).upper()
+        if fitted_profile not in _PROFILE_PARAMETERS:
+            raise ValueError(f"Unsupported fitted_profile {fitted_profile!r}.")
+        missing = [name for name in _PROFILE_PARAMETERS[fitted_profile] if name not in fitted_parameters]
+        if missing:
+            raise ValueError(f"fitted_parameters is missing {missing} for {fitted_profile}.")
+        fitted_pixels = _light_model(fitted_profile, fitted_parameters, x, y, image_pixel_scale)
+
+    if fitted_pixels is None and truth_pixels is None:
         figure, axis = plt.subplots(figsize=(5, 4.5), constrained_layout=True)
         handle = axis.imshow(np.where(mask, pixels, np.nan), origin="lower", extent=extent, cmap="magma")
         axis.set(title="Pixelated source (median)", xlabel="arcsec", ylabel="arcsec")
         figure.colorbar(handle, ax=axis, label="pixel flux")
-    else:
+    elif fitted_pixels is None:
         residual = pixels - truth_pixels
         vmax = float(np.nanpercentile(np.abs(np.concatenate([pixels[mask], truth_pixels[mask]])), 99.5))
         rmax = max(float(np.nanpercentile(np.abs(residual[mask]), 99)), 1e-12)
@@ -203,6 +224,47 @@ def plot_pixelated_source_reconstruction(
         rmse = float(np.sqrt(np.mean(residual[mask] ** 2)))
         axes[2].set(title=f"Pixelated − Truth\nRMSE = {rmse:.4g}", xlabel="arcsec", ylabel="arcsec")
         figure.colorbar(handle, ax=axes[2], label="pixel flux")
+    else:
+        brightness_images = [pixels, fitted_pixels]
+        if truth_pixels is not None:
+            brightness_images.append(truth_pixels)
+        vmax = max(float(np.nanpercentile(np.abs(image[mask]), 99.5)) for image in brightness_images)
+        vmax = max(vmax, 1e-30)
+        pixelated_minus_truth = None if truth_pixels is None else pixels - truth_pixels
+        fitted_minus_pixelated = fitted_pixels - pixels
+        fitted_minus_truth = None if truth_pixels is None else fitted_pixels - truth_pixels
+        residual_images = [fitted_minus_pixelated]
+        if pixelated_minus_truth is not None:
+            residual_images.extend((pixelated_minus_truth, fitted_minus_truth))
+        rmax = max(float(np.nanpercentile(np.abs(image[mask]), 99)) for image in residual_images)
+        rmax = max(rmax, 1e-12)
+        figure, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
+
+        def draw_brightness(axis, image, title):
+            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="magma", vmin=0, vmax=vmax)
+            axis.set(title=title, xlabel="arcsec", ylabel="arcsec")
+            figure.colorbar(handle, ax=axis, label="pixel flux")
+
+        def draw_residual(axis, image, title):
+            if image is None:
+                axis.set_axis_off()
+                axis.set_title(f"{title}\n(no truth supplied)")
+                return
+            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="coolwarm", norm=TwoSlopeNorm(vcenter=0, vmin=-rmax, vmax=rmax))
+            rmse = float(np.sqrt(np.mean(image[mask] ** 2)))
+            axis.set(title=f"{title}\nRMSE = {rmse:.4g}", xlabel="arcsec", ylabel="arcsec")
+            figure.colorbar(handle, ax=axis, label="pixel flux")
+
+        draw_brightness(axes[0, 0], pixels, "Pixelated source (median)")
+        if truth_pixels is None:
+            axes[0, 1].set_axis_off()
+            axes[0, 1].set_title("Truth (not supplied)")
+        else:
+            draw_brightness(axes[0, 1], truth_pixels, "Truth")
+        draw_residual(axes[0, 2], pixelated_minus_truth, "Pixelated − Truth")
+        draw_brightness(axes[1, 0], fitted_pixels, f"Fitted {fitted_profile}")
+        draw_residual(axes[1, 1], fitted_minus_pixelated, "Fitted − Pixelated median")
+        draw_residual(axes[1, 2], fitted_minus_truth, "Fitted − Truth")
     figure.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(figure)
     return output
@@ -411,10 +473,23 @@ def fit_analytic_pixelated_source(
         figure = corner.corner(fitted, labels=list(parameter_names), truths=truth_values, truth_color="tab:red", quantiles=[.16,.5,.84], levels=[.393,.865,.989], show_titles=True)
         corner_plot = output / "analytic_source_parameters_corner.png"; figure.savefig(corner_plot, dpi=180, bbox_inches="tight"); plt.close(figure)
     summary.update({
+        "profile": profile,
+        "median_parameters": {
+            name: float(value) for name, value in zip(parameter_names, parameter_median)
+        },
         "median_fit_rmse": float(np.median(rmses)),
         "crop_radius": crop_radius,
         "grid_kind": grid_kind,
         "n_source_samples": int(len(selected)),
     })
     summary_path = output / "analytic_source_fit_summary.json"; summary_path.write_text(json.dumps(summary, indent=2) + "\n")
-    return {"parameters": summary, "samples": fitted, "source_draw_indices": selected, "one_dimensional": one_d_plot, "corner": corner_plot, "summary_file": summary_path}
+    return {
+        "parameters": summary,
+        "profile": profile,
+        "median_parameters": summary["median_parameters"],
+        "samples": fitted,
+        "source_draw_indices": selected,
+        "one_dimensional": one_d_plot,
+        "corner": corner_plot,
+        "summary_file": summary_path,
+    }
