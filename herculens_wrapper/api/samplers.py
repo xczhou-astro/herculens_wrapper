@@ -909,9 +909,9 @@ class FitResult:
 
         Each draw ray-traces the declared source-arc mask using its own lens
         parameters before fitting, so source-plane physical coordinates and
-        pixel scale are propagated with the lens posterior. Each source draw
-        is translated to its own flux centroid before the analytic fit.
-        ``crop_radius`` restricts each fit to a circle around that origin.
+        pixel scale are propagated with the lens posterior. Each fit includes
+        free source ``center_x`` and ``center_y`` in physical coordinates.
+        ``crop_radius`` is seeded on the source flux centroid.
         """
         if self.samples is None:
             raise RuntimeError("fit_analytic_pixelated_source() requires HMC samples.")
@@ -1033,58 +1033,117 @@ class FitResult:
         x, y = np.meshgrid(source["x"], source["y"])
         return np.asarray(source["pixels"], dtype=float), x, y
 
+    def _uniform_source_plane_from_file(
+        self, source_file: str | Path,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Read a source reconstruction from the primary FITS HDU on this result's grid."""
+        from astropy.io import fits
+
+        source_path = Path(source_file).expanduser()
+        if not source_path.is_file():
+            raise FileNotFoundError(f"Source FITS does not exist: {source_path}")
+        pixels = np.asarray(fits.getdata(source_path, ext=0), dtype=float)
+        _, x, y = self._uniform_pixelated_source_plane()
+        if pixels.ndim != 2 or pixels.shape != x.shape:
+            raise ValueError(
+                "The primary source FITS image shape must match the result's "
+                f"uniform source grid {x.shape}; got {pixels.shape}."
+            )
+        return pixels, x, y
+
+    @staticmethod
+    def _uniform_source_cell_area(x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Return uniform source-cell areas for analytic source fitting."""
+        dx = float(np.mean(np.diff(x[0])))
+        dy = float(np.mean(np.diff(y[:, 0])))
+        return np.full_like(x, abs(dx * dy), dtype=float)
+
     def plot_radial_profile(
         self,
+        profile: str = "SERSIC_ELLIPSE",
         crop_radius: float | None = None,
         truth: Mapping[str, Any] | str | Path | None = None,
+        source_file: str | Path | None = None,
         save_path: str | Path | None = None,
         xscale: str = "linear",
         yscale: str = "linear",
     ) -> Path:
-        """Plot median pixelated-source radial brightness in a local frame.
+        """Fit and plot median-source radial brightness about the truth centre.
 
-        ``crop_radius`` is in arcsec and is measured from the source centre.
-        When supplied, ``truth`` is a params JSON or mapping with an analytic
-        ``kwargs_source`` component and is overplotted for comparison.
+        ``truth`` is required because its ``center_x/y`` define the radial
+        origin. The cropped pixelated source is independently fit with
+        ``profile``; ``crop_radius`` is in arcsec and is measured from the
+        truth centre.
+        If ``source_file`` is supplied, its primary FITS HDU replaces the
+        in-memory source image before plotting.
         """
-        from .utils import plot_pixelated_source_radial_profile
+        from .utils import _fit_analytic_source_image, _truth_map, plot_pixelated_source_radial_profile
 
-        pixels, x, y = self._uniform_pixelated_source_plane()
-        fit = self._analytic_pixelated_source_fit
+        pixels, x, y = (
+            self._uniform_pixelated_source_plane()
+            if source_file is None else self._uniform_source_plane_from_file(source_file)
+        )
+        _, _, truth_values = _truth_map(
+            truth, x, y, self._require_model().data.pixel_scale,
+        )
+        if truth_values is None:
+            raise ValueError("plot_radial_profile() requires analytic source truth with center_x and center_y.")
+        truth_center = (float(truth_values["center_x"]), float(truth_values["center_y"]))
+        profile = str(profile).upper()
+        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN"}:
+            raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
+        fitted_parameters, _, _ = _fit_analytic_source_image(
+            profile, pixels, x, y, self._uniform_source_cell_area(x, y),
+            self._require_model().data.pixel_scale, crop_radius, crop_center=truth_center,
+        )
         return plot_pixelated_source_radial_profile(
             pixels, x, y, crop_radius=crop_radius, truth=truth,
             image_pixel_scale=self._require_model().data.pixel_scale,
-            coordinate_center=None if fit is None else fit["median_coordinate_center"],
+            coordinate_center=truth_center,
+            fitted_profile=profile,
+            fitted_parameters=fitted_parameters,
             save_path=save_path, xscale=xscale, yscale=yscale,
         )
 
     def plot_pixelated_source_construction(
         self,
+        source_file: str | Path,
+        profile: str = "SERSIC_ELLIPSE",
         crop_radius: float | None = None,
         truth: Mapping[str, Any] | str | Path | None = None,
         save_path: str | Path | None = None,
     ) -> Path:
         """Plot pixelated/truth/analytic source constructions and residuals.
 
-        Call :meth:`fit_analytic_pixelated_source` first.  Its posterior
-        median analytic parameters are cached in this result and used to make
-        the fitted-construction row of the 2×3 figure.
+        ``source_file`` is the required ``kwargs_source_pixels.fits`` (or an
+        equivalent source FITS). Its primary HDU remains in its native source
+        coordinates: pixelated-minus-truth is evaluated directly, then the
+        cropped image is independently fit with ``profile`` for the second
+        row of the 2×3 figure.
         """
-        from .utils import plot_pixelated_source_reconstruction
+        from .utils import _fit_analytic_source_image, _truth_map, plot_pixelated_source_reconstruction
 
-        pixels, x, y = self._uniform_pixelated_source_plane()
-        fit = self._analytic_pixelated_source_fit
-        if fit is None:
-            raise RuntimeError(
-                "Call result.fit_analytic_pixelated_source(...) before "
-                "plot_pixelated_source_construction()."
-            )
+        pixels, x, y = self._uniform_source_plane_from_file(source_file)
+        profile = str(profile).upper()
+        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN"}:
+            raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
+        _, _, truth_values = _truth_map(
+            truth, x, y, self._require_model().data.pixel_scale,
+        )
+        if truth_values is None:
+            raise ValueError("plot_pixelated_source_construction() requires analytic source truth.")
+        truth_center = (float(truth_values["center_x"]), float(truth_values["center_y"]))
+        median_fit, _, _ = _fit_analytic_source_image(
+            profile, pixels, x, y, self._uniform_source_cell_area(x, y),
+            self._require_model().data.pixel_scale, crop_radius, crop_center=truth_center,
+        )
         return plot_pixelated_source_reconstruction(
             pixels, x, y, crop_radius=crop_radius, truth=truth,
             image_pixel_scale=self._require_model().data.pixel_scale,
-            fitted_profile=fit["profile"],
-            fitted_parameters=fit["median_parameters"],
-            coordinate_center=fit["median_coordinate_center"],
+            fitted_profile=profile,
+            fitted_parameters=median_fit,
+            coordinate_center=(0.0, 0.0),
+            crop_center=truth_center,
             save_path=save_path,
         )
 

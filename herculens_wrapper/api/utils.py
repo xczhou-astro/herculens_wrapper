@@ -115,6 +115,46 @@ def _flux_weighted_center(
     return float((weights * x).sum() / normalisation), float((weights * y).sum() / normalisation)
 
 
+def _fit_analytic_source_image(
+    profile: str,
+    pixels: np.ndarray,
+    x: np.ndarray,
+    y: np.ndarray,
+    area: np.ndarray,
+    image_pixel_scale: float,
+    crop_radius: float | None,
+    crop_center: tuple[float, float] | None = None,
+) -> tuple[dict[str, float], float, tuple[float, float]]:
+    """Fit one source image in physical coordinates, including its centre."""
+    from scipy.optimize import least_squares
+
+    if crop_center is None:
+        crop_center = _flux_weighted_center(pixels, x, y, area, image_pixel_scale)
+    crop_center = (float(crop_center[0]), float(crop_center[1]))
+    fit_mask = _circular_crop_mask(x, y, crop_radius, crop_center)
+    if not np.any(fit_mask):
+        raise ValueError("crop_radius does not include any source pixels.")
+    local_x, local_y, local_area, local_pixels = (
+        value[fit_mask] for value in (x, y, area, pixels)
+    )
+    parameter_names, initial, bounds = _initial_and_bounds(
+        profile, local_pixels, local_x, local_y, local_area, image_pixel_scale,
+    )
+
+    def residual(vector: np.ndarray) -> np.ndarray:
+        values = dict(zip(parameter_names, vector))
+        return _light_model(
+            profile, values, local_x.ravel(), local_y.ravel(), image_pixel_scale,
+        ) - np.asarray(local_pixels, dtype=float).ravel()
+
+    answer = least_squares(residual, initial, bounds=bounds, method="trf")
+    return (
+        {name: float(value) for name, value in zip(parameter_names, answer.x)},
+        float(np.sqrt(np.mean(answer.fun ** 2))),
+        crop_center,
+    )
+
+
 def _reconstruct_source_draws(samples: Mapping[str, Any], indices: np.ndarray, fallback: Mapping[str, Any]) -> np.ndarray:
     """Reconstruct physical source pixels for selected HMC draws."""
     from herculens_wrapper.models import PowerSpectrum
@@ -195,6 +235,7 @@ def plot_pixelated_source_reconstruction(
     fitted_profile: str | None = None,
     fitted_parameters: Mapping[str, float] | None = None,
     coordinate_center: tuple[float, float] | None = None,
+    crop_center: tuple[float, float] | None = None,
     save_path: str | Path | None = None,
 ) -> Path:
     """Plot the pixelated source, truth, and optional analytic construction.
@@ -213,12 +254,29 @@ def plot_pixelated_source_reconstruction(
         coordinate_center = _flux_weighted_center(pixels, x, y, None, image_pixel_scale)
     coordinate_center = (float(coordinate_center[0]), float(coordinate_center[1]))
     x_local, y_local = x - coordinate_center[0], y - coordinate_center[1]
-    mask = _circular_crop_mask(x_local, y_local, crop_radius, (0.0, 0.0))
-    truth_pixels, _, _ = _truth_map(
+    if crop_center is None:
+        crop_center = coordinate_center
+    local_crop_center = (
+        float(crop_center[0]) - coordinate_center[0],
+        float(crop_center[1]) - coordinate_center[1],
+    )
+    mask = _circular_crop_mask(x_local, y_local, crop_radius, local_crop_center)
+    truth_pixels, _, truth_values = _truth_map(
         truth, x_local, y_local, image_pixel_scale, coordinate_center=coordinate_center,
     )
     output = _output_plot_path(save_path, "pixelated_source_reconstruction.png")
     extent = [float(x_local.min()), float(x_local.max()), float(y_local.min()), float(y_local.max())]
+
+    def mark_reference_points(axis):
+        """Draw the native source-plane origin and, when present, truth centre."""
+        axis.axvline(0.0, color="0.7", lw=0.9, ls="--", zorder=4)
+        axis.axhline(0.0, color="0.7", lw=0.9, ls="--", zorder=4)
+        if truth_values is not None:
+            axis.plot(
+                float(truth_values["center_x"]), float(truth_values["center_y"]),
+                marker="x", markersize=9, markeredgewidth=2.0, color="lime",
+                zorder=5,
+            )
 
     fitted_pixels = None
     if fitted_parameters is not None:
@@ -230,13 +288,20 @@ def plot_pixelated_source_reconstruction(
         missing = [name for name in _PROFILE_PARAMETERS[fitted_profile] if name not in fitted_parameters]
         if missing:
             raise ValueError(f"fitted_parameters is missing {missing} for {fitted_profile}.")
-        # Analytic parameters are fitted in this local source-centred frame.
-        fitted_pixels = _light_model(fitted_profile, fitted_parameters, x_local, y_local, image_pixel_scale)
+        # The median source is fitted in physical coordinates; translate the
+        # fitted centre along with the grid for this source-centred display.
+        local_fitted_parameters = dict(fitted_parameters)
+        local_fitted_parameters["center_x"] = float(local_fitted_parameters["center_x"]) - coordinate_center[0]
+        local_fitted_parameters["center_y"] = float(local_fitted_parameters["center_y"]) - coordinate_center[1]
+        fitted_pixels = _light_model(
+            fitted_profile, local_fitted_parameters, x_local, y_local, image_pixel_scale,
+        )
 
     if fitted_pixels is None and truth_pixels is None:
         figure, axis = plt.subplots(figsize=(5, 4.5), constrained_layout=True)
-        handle = axis.imshow(np.where(mask, pixels, np.nan), origin="lower", extent=extent, cmap="magma")
-        axis.set(title="Pixelated source (median)", xlabel="arcsec from source centre", ylabel="arcsec from source centre")
+        handle = axis.imshow(np.where(mask, pixels, np.nan), origin="lower", extent=extent, cmap="twilight")
+        axis.set(title="Pixelated source (median)", xlabel="source-plane arcsec", ylabel="source-plane arcsec")
+        mark_reference_points(axis)
         figure.colorbar(handle, ax=axis, label="pixel flux")
     elif fitted_pixels is None:
         residual = pixels - truth_pixels
@@ -246,12 +311,14 @@ def plot_pixelated_source_reconstruction(
         for axis, image, title in zip(
             axes[:2], (pixels, truth_pixels), ("Pixelated source (median)", "Truth")
         ):
-            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="magma", vmin=0, vmax=vmax)
-            axis.set(title=title, xlabel="arcsec from source centre", ylabel="arcsec from source centre")
+            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="twilight", vmin=0, vmax=vmax)
+            axis.set(title=title, xlabel="source-plane arcsec", ylabel="source-plane arcsec")
+            mark_reference_points(axis)
             figure.colorbar(handle, ax=axis, label="pixel flux")
-        handle = axes[2].imshow(np.where(mask, residual, np.nan), origin="lower", extent=extent, cmap="coolwarm", norm=TwoSlopeNorm(vcenter=0, vmin=-rmax, vmax=rmax))
+        handle = axes[2].imshow(np.where(mask, residual, np.nan), origin="lower", extent=extent, cmap="bwr", norm=TwoSlopeNorm(vcenter=0, vmin=-rmax, vmax=rmax))
         rmse = float(np.sqrt(np.mean(residual[mask] ** 2)))
-        axes[2].set(title=f"Pixelated − Truth\nRMSE = {rmse:.4g}", xlabel="arcsec from source centre", ylabel="arcsec from source centre")
+        axes[2].set(title=f"Pixelated − Truth\nRMSE = {rmse:.4g}", xlabel="source-plane arcsec", ylabel="source-plane arcsec")
+        mark_reference_points(axes[2])
         figure.colorbar(handle, ax=axes[2], label="pixel flux")
     else:
         brightness_images = [pixels, fitted_pixels]
@@ -270,8 +337,9 @@ def plot_pixelated_source_reconstruction(
         figure, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
 
         def draw_brightness(axis, image, title):
-            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="magma", vmin=0, vmax=vmax)
-            axis.set(title=title, xlabel="arcsec from source centre", ylabel="arcsec from source centre")
+            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="twilight", vmin=0, vmax=vmax)
+            axis.set(title=title, xlabel="source-plane arcsec", ylabel="source-plane arcsec")
+            mark_reference_points(axis)
             figure.colorbar(handle, ax=axis, label="pixel flux")
 
         def draw_residual(axis, image, title):
@@ -279,9 +347,10 @@ def plot_pixelated_source_reconstruction(
                 axis.set_axis_off()
                 axis.set_title(f"{title}\n(no truth supplied)")
                 return
-            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="coolwarm", norm=TwoSlopeNorm(vcenter=0, vmin=-rmax, vmax=rmax))
+            handle = axis.imshow(np.where(mask, image, np.nan), origin="lower", extent=extent, cmap="bwr", norm=TwoSlopeNorm(vcenter=0, vmin=-rmax, vmax=rmax))
             rmse = float(np.sqrt(np.mean(image[mask] ** 2)))
-            axis.set(title=f"{title}\nRMSE = {rmse:.4g}", xlabel="arcsec from source centre", ylabel="arcsec from source centre")
+            axis.set(title=f"{title}\nRMSE = {rmse:.4g}", xlabel="source-plane arcsec", ylabel="source-plane arcsec")
+            mark_reference_points(axis)
             figure.colorbar(handle, ax=axis, label="pixel flux")
 
         draw_brightness(axes[0, 0], pixels, "Pixelated source (median)")
@@ -291,7 +360,7 @@ def plot_pixelated_source_reconstruction(
         else:
             draw_brightness(axes[0, 1], truth_pixels, "Truth")
         draw_residual(axes[0, 2], pixelated_minus_truth, "Pixelated − Truth")
-        draw_brightness(axes[1, 0], fitted_pixels, f"Fitted {fitted_profile}")
+        draw_brightness(axes[1, 0], fitted_pixels, f"Fitted source ({fitted_profile})")
         draw_residual(axes[1, 1], fitted_minus_pixelated, "Fitted − Pixelated median")
         draw_residual(axes[1, 2], fitted_minus_truth, "Fitted − Truth")
     figure.savefig(output, dpi=180, bbox_inches="tight")
@@ -308,6 +377,8 @@ def plot_pixelated_source_radial_profile(
     truth: Mapping[str, Any] | str | Path | None,
     image_pixel_scale: float,
     coordinate_center: tuple[float, float] | None = None,
+    fitted_profile: str | None = None,
+    fitted_parameters: Mapping[str, float] | None = None,
     save_path: str | Path | None = None,
     xscale: str = "linear",
     yscale: str = "linear",
@@ -323,6 +394,22 @@ def plot_pixelated_source_radial_profile(
     truth_pixels, profile, _ = _truth_map(
         truth, x_local, y_local, image_pixel_scale, coordinate_center=coordinate_center,
     )
+    fitted_pixels = None
+    if fitted_parameters is not None:
+        if fitted_profile is None:
+            raise ValueError("fitted_profile is required with fitted_parameters.")
+        fitted_profile = str(fitted_profile).upper()
+        if fitted_profile not in _PROFILE_PARAMETERS:
+            raise ValueError(f"Unsupported fitted_profile {fitted_profile!r}.")
+        missing = [name for name in _PROFILE_PARAMETERS[fitted_profile] if name not in fitted_parameters]
+        if missing:
+            raise ValueError(f"fitted_parameters is missing {missing} for {fitted_profile}.")
+        local_fitted_parameters = dict(fitted_parameters)
+        local_fitted_parameters["center_x"] = float(local_fitted_parameters["center_x"]) - coordinate_center[0]
+        local_fitted_parameters["center_y"] = float(local_fitted_parameters["center_y"]) - coordinate_center[1]
+        fitted_pixels = _light_model(
+            fitted_profile, local_fitted_parameters, x_local, y_local, image_pixel_scale,
+        )
     radius = np.hypot(x_local, y_local)
     radial_limit = float(crop_radius) if crop_radius is not None else float(radius.max())
     if not np.isfinite(radial_limit) or radial_limit <= 0:
@@ -347,6 +434,13 @@ def plot_pixelated_source_radial_profile(
     brightness_axis = figure.add_subplot(grid[0, 0])
     residual_axis = figure.add_subplot(grid[1, 0], sharex=brightness_axis)
     brightness_axis.plot(centres, radial_brightness, "o-", label="pixelated median")
+    radial_fitted = None
+    if fitted_pixels is not None:
+        fitted_brightness = fitted_pixels / image_pixel_scale**2
+        radial_fitted = np.asarray([
+            annular_mean(fitted_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
+        ])
+        brightness_axis.plot(centres, radial_fitted, "-", label=f"fitted {fitted_profile.lower()}")
     if truth_pixels is not None:
         truth_brightness = truth_pixels / image_pixel_scale**2
         radial_truth = np.asarray([
@@ -363,7 +457,19 @@ def plot_pixelated_source_radial_profile(
         residual_axis.plot(
             centres[valid], relative_residual[valid],
             "o-", color="tab:blue",
+            label="pixelated − truth",
         )
+        if radial_fitted is not None:
+            fitted_valid = np.isfinite(radial_fitted) & np.isfinite(radial_truth) & (np.abs(radial_truth) > 0)
+            fitted_relative_residual = np.full_like(radial_fitted, np.nan, dtype=float)
+            np.divide(
+                radial_fitted - radial_truth, radial_truth,
+                out=fitted_relative_residual, where=fitted_valid,
+            )
+            residual_axis.plot(
+                centres[fitted_valid], fitted_relative_residual[fitted_valid],
+                "o-", color="tab:orange", label="fitted − truth",
+            )
         residual_axis.set(
             xlabel="radius from source centre [arcsec]",
             ylabel="(brightness − truth) / truth",
@@ -372,6 +478,7 @@ def plot_pixelated_source_radial_profile(
             xlim=(float(edges[1] * 0.5) if xscale == "log" else 0.0, radial_limit),
         )
         residual_axis.grid(alpha=0.25)
+        residual_axis.legend(fontsize=8)
     else:
         residual_axis.set_axis_off()
     x_lower = float(edges[1] * 0.5) if xscale == "log" else 0.0
@@ -406,11 +513,11 @@ def fit_analytic_pixelated_source(
     """Fit an analytic profile to selected pixelated-HMC source reconstructions.
 
     ``hmc_run`` must contain ``hmc_samples.h5``, ``kwargs_result.json``, and
-    ``kwargs_source_pixels.fits``. Each reconstructed draw is translated to
-    its positive-flux source centroid before fitting; fitted ``center_x`` and
-    ``center_y`` therefore describe residual offsets in this local frame.
-    ``crop_radius`` selects a circular source-plane region in arcsec around
-    that local origin. For uniform source grids,
+    ``kwargs_source_pixels.fits``. Each reconstructed draw is fit in its
+    physical source-plane coordinates, including free ``center_x`` and
+    ``center_y``. ``crop_radius`` selects a circular source-plane region in
+    arcsec around a flux-centroid seed, while the profile centre remains free.
+    For uniform source grids,
     ``source_grid_scale`` is required to express fitted radii in arcsec.
     ``image_pixel_scale`` converts the stored source pixel fluxes to the
     surface-brightness convention used by Herculens analytic profiles.
@@ -418,7 +525,6 @@ def fit_analytic_pixelated_source(
     per-draw geometry: every draw ray-traces the source-arc mask through its
     own lens mass before fitting.  This is the recommended API path.
     """
-    from scipy.optimize import least_squares
     from herculens_wrapper.samplers import _load_hmc_samples_hdf5
 
     profile = str(profile).upper()
@@ -454,9 +560,6 @@ def fit_analytic_pixelated_source(
         area, grid_kind = np.full_like(median_pixels, abs(dx * dy)), "uniform_per_draw_mask"
     else:
         median_pixels, x, y, area, grid_kind = _source_geometry(source_path, source_grid_scale)
-    median_coordinate_center = _flux_weighted_center(
-        median_pixels, x, y, area, image_pixel_scale,
-    )
     samples, _ = _load_hmc_samples_hdf5(str(archive))
     count = np.asarray(samples["pixels_wn_source_grid"]).shape[0]
     selected = np.random.default_rng(random_seed).choice(count, size=min(n_samples, count), replace=False)
@@ -480,35 +583,25 @@ def fit_analytic_pixelated_source(
         source_draws = np.asarray(source_draws)
     parameter_names = _PROFILE_PARAMETERS[profile]
 
-    def fit_one(data: np.ndarray, coords):
-        absolute_x, absolute_y, local_area = coords
-        source_center = _flux_weighted_center(
-            data, absolute_x, absolute_y, local_area, image_pixel_scale,
+    median_source_fit_parameters, median_source_fit_rmse, median_crop_center = _fit_analytic_source_image(
+        profile, median_pixels, x, y, area, image_pixel_scale, crop_radius,
+    )
+    median_coordinate_center = (
+        median_source_fit_parameters["center_x"],
+        median_source_fit_parameters["center_y"],
+    )
+    draw_fit_results = [
+        _fit_analytic_source_image(
+            profile, draw, draw_x, draw_y, draw_area, image_pixel_scale, crop_radius,
         )
-        local_x = absolute_x - source_center[0]
-        local_y = absolute_y - source_center[1]
-        fit_mask = _circular_crop_mask(local_x, local_y, crop_radius, (0.0, 0.0))
-        if not np.any(fit_mask):
-            raise ValueError("crop_radius does not include any source pixels for an HMC draw.")
-        local_x, local_y, local_area, data = (
-            value[fit_mask] for value in (local_x, local_y, local_area, data)
-        )
-        local_names, local_initial, local_bounds = _initial_and_bounds(profile, data, local_x, local_y, local_area, image_pixel_scale)
-        def residual(vector):
-            values = dict(zip(local_names, vector))
-            # ``_light_model`` is evaluated at flattened coordinates, whereas
-            # a reconstructed source draw remains a 2-D grid.  Flatten both
-            # operands before subtraction so least_squares always receives a
-            # one-dimensional residual vector.
-            return _light_model(
-                profile, values, local_x.ravel(), local_y.ravel(), image_pixel_scale,
-            ) - np.asarray(data, dtype=float).ravel()
-        answer = least_squares(residual, local_initial, bounds=local_bounds, method="trf")
-        return answer.x, float(np.sqrt(np.mean(answer.fun ** 2))), source_center
-
-    fitted, rmses, draw_centers = zip(*(fit_one(draw, coords) for draw, coords in zip(source_draws, draw_coordinates)))
-    fitted = np.asarray(fitted)
-    draw_centers = np.asarray(draw_centers, dtype=float)
+        for draw, (draw_x, draw_y, draw_area) in zip(source_draws, draw_coordinates)
+    ]
+    fitted = np.asarray([
+        [values[name] for name in parameter_names]
+        for values, _, _ in draw_fit_results
+    ])
+    rmses = np.asarray([rmse for _, rmse, _ in draw_fit_results])
+    draw_centers = np.asarray([center for _, _, center in draw_fit_results], dtype=float)
     parameter_median = np.median(fitted, axis=0)
     p16, p84 = np.percentile(fitted, [16, 84], axis=0)
     output = Path(save_path).expanduser() if save_path is not None else run / "analytic_source_fit"
@@ -519,10 +612,7 @@ def fit_analytic_pixelated_source(
     if truth_data is not None:
         source_truth = (truth_data.get("kwargs_source") or [{}])[0]
         if all(name in source_truth for name in parameter_names):
-            truth_values = np.asarray([
-                0.0 if name in {"center_x", "center_y"} else source_truth[name]
-                for name in parameter_names
-            ], dtype=float)
+            truth_values = np.asarray([source_truth[name] for name in parameter_names], dtype=float)
 
     import matplotlib.pyplot as plt
 
@@ -549,13 +639,18 @@ def fit_analytic_pixelated_source(
             name: float(value) for name, value in zip(parameter_names, parameter_median)
         },
         "median_fit_rmse": float(np.median(rmses)),
+        "median_source_fit_parameters": median_source_fit_parameters,
+        "median_source_fit_rmse": float(median_source_fit_rmse),
         "crop_radius": crop_radius,
         "grid_kind": grid_kind,
         "n_source_samples": int(len(selected)),
         "median_coordinate_center": [
             float(median_coordinate_center[0]), float(median_coordinate_center[1]),
         ],
-        "draw_coordinate_center_median": [
+        "median_source_crop_center": [
+            float(median_crop_center[0]), float(median_crop_center[1]),
+        ],
+        "draw_crop_center_median": [
             float(np.median(draw_centers[:, 0])), float(np.median(draw_centers[:, 1])),
         ],
     })
@@ -566,8 +661,9 @@ def fit_analytic_pixelated_source(
         "median_parameters": summary["median_parameters"],
         "samples": fitted,
         "source_draw_indices": selected,
-        "coordinate_centers": draw_centers,
+        "crop_centers": draw_centers,
         "median_coordinate_center": tuple(median_coordinate_center),
+        "median_source_fit_parameters": median_source_fit_parameters,
         "one_dimensional": one_d_plot,
         "corner": corner_plot,
         "summary_file": summary_path,
