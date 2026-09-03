@@ -909,8 +909,9 @@ class FitResult:
 
         Each draw ray-traces the declared source-arc mask using its own lens
         parameters before fitting, so source-plane physical coordinates and
-        pixel scale are propagated with the lens posterior.  ``crop_radius``
-        restricts each fit to a circle centred on the median source grid.
+        pixel scale are propagated with the lens posterior. Each source draw
+        is translated to its own flux centroid before the analytic fit.
+        ``crop_radius`` restricts each fit to a circle around that origin.
         """
         if self.samples is None:
             raise RuntimeError("fit_analytic_pixelated_source() requires HMC samples.")
@@ -1040,18 +1041,20 @@ class FitResult:
         xscale: str = "linear",
         yscale: str = "linear",
     ) -> Path:
-        """Plot median pixelated-source radial brightness and enclosed flux.
+        """Plot median pixelated-source radial brightness in a local frame.
 
-        ``crop_radius`` is in arcsec; both profiles terminate at that radius.
+        ``crop_radius`` is in arcsec and is measured from the source centre.
         When supplied, ``truth`` is a params JSON or mapping with an analytic
         ``kwargs_source`` component and is overplotted for comparison.
         """
         from .utils import plot_pixelated_source_radial_profile
 
         pixels, x, y = self._uniform_pixelated_source_plane()
+        fit = self._analytic_pixelated_source_fit
         return plot_pixelated_source_radial_profile(
             pixels, x, y, crop_radius=crop_radius, truth=truth,
             image_pixel_scale=self._require_model().data.pixel_scale,
+            coordinate_center=None if fit is None else fit["median_coordinate_center"],
             save_path=save_path, xscale=xscale, yscale=yscale,
         )
 
@@ -1081,6 +1084,7 @@ class FitResult:
             image_pixel_scale=self._require_model().data.pixel_scale,
             fitted_profile=fit["profile"],
             fitted_parameters=fit["median_parameters"],
+            coordinate_center=fit["median_coordinate_center"],
             save_path=save_path,
         )
 
