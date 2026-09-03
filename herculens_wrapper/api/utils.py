@@ -476,6 +476,7 @@ def plot_pixelated_source_radial_profile(
             title="Relative brightness residual",
             xscale=xscale,
             xlim=(float(edges[1] * 0.5) if xscale == "log" else 0.0, radial_limit),
+            ylim=(-2.0, 2.0),
         )
         residual_axis.grid(alpha=0.25)
         residual_axis.legend(fontsize=8)
