@@ -332,19 +332,23 @@ def compare_hmc_truth(
     save_path: str | Path,
     max_samples: int = 15_000,
     round_to: int = 3,
+    round_sample_values: bool = False,
 ) -> dict[str, Any]:
     """Plot selected HMC posterior parameters against simulation truth.
 
     This standalone utility needs no declared data, profiles, or model.  Pass
     either a HMC run directory or its ``hmc_samples.h5`` file, plus a truth
     ``params.json``/mapping using the standard ``kwargs_*`` structure. ``round_to``
-    controls the decimal places in posterior annotations; returned values retain
-    full numerical precision.
+    controls the decimal places in posterior annotations.  When
+    ``round_sample_values=True``, posterior draws and truth values are also
+    rounded to ``round_to`` before every plotted and reported calculation.
     """
     if not isinstance(max_samples, int) or max_samples < 1:
         raise ValueError("max_samples must be a positive integer.")
     if not isinstance(round_to, int) or isinstance(round_to, bool) or round_to < 0:
         raise ValueError("round_to must be a non-negative integer.")
+    if not isinstance(round_sample_values, bool):
+        raise TypeError("round_sample_values must be a boolean.")
     selected_components = _normalise_truth_components(components)
     archive = Path(hmc_samples).expanduser()
     if archive.is_dir():
@@ -416,9 +420,13 @@ def compare_hmc_truth(
             if finite.sum() < 2 or not np.isfinite(true_value):
                 skipped.append(f"{site}: non-finite posterior or truth")
                 continue
+            draws = draws[finite]
+            if round_sample_values:
+                draws = np.round(draws, decimals=round_to)
+                true_value = float(np.round(true_value, decimals=round_to))
             suffix = "" if posterior.shape[1] == 1 else f"[{element}]"
             labels.append(f"{component}[{profile_index}].{parameter}{suffix}")
-            values.append(draws[finite])
+            values.append(draws)
             true_values.append(true_value)
     if not values:
         raise ValueError("No comparable scalar sites found for the requested components.")
@@ -482,6 +490,7 @@ def compare_hmc_truth(
     summary_path = directory / "posterior_truth_summary.json"
     summary_path.write_text(json.dumps({
         "hmc_samples": str(archive), "components": selected_components,
+        "round_to": round_to, "round_sample_values": round_sample_values,
         "parameters": summary, "skipped": skipped,
     }, indent=2) + "\n")
     return {

@@ -282,7 +282,7 @@ def plot_pixelated_source_radial_profile(
     xscale: str = "linear",
     yscale: str = "linear",
 ) -> Path:
-    """Plot median-source radial brightness and enclosed flux to ``crop_radius``."""
+    """Plot radial surface brightness and its truth-relative residual."""
     import matplotlib.pyplot as plt
 
     pixels = np.asarray(pixels, dtype=float)
@@ -305,9 +305,6 @@ def plot_pixelated_source_radial_profile(
     edges = np.linspace(0, radial_limit, n_bins + 1)
     centres = 0.5 * (edges[:-1] + edges[1:])
     brightness = pixels / image_pixel_scale**2
-    dx, dy = float(np.mean(np.diff(x[0]))), float(np.mean(np.diff(y[:, 0])))
-    area = np.full_like(pixels, abs(dx * dy))
-
     def annular_mean(image: np.ndarray, lo: float, hi: float) -> float:
         selected = image[(radius >= lo) & (radius < hi) & mask]
         return float(np.mean(selected)) if selected.size else np.nan
@@ -315,29 +312,18 @@ def plot_pixelated_source_radial_profile(
     radial_brightness = np.asarray([
         annular_mean(brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
     ])
-    cumulative_flux = np.asarray([
-        np.sum(brightness[(radius < edge) & mask] * area[(radius < edge) & mask])
-        for edge in edges[1:]
-    ])
     output = _output_plot_path(save_path, "source_radial_profiles.png")
-    figure = plt.figure(figsize=(11, 5.5), constrained_layout=True)
-    grid = figure.add_gridspec(2, 2, height_ratios=(3.0, 1.0))
+    figure = plt.figure(figsize=(7.5, 5.5), constrained_layout=True)
+    grid = figure.add_gridspec(2, 1, height_ratios=(3.0, 1.0))
     brightness_axis = figure.add_subplot(grid[0, 0])
-    flux_axis = figure.add_subplot(grid[0, 1])
-    residual_axis = figure.add_subplot(grid[1, :])
+    residual_axis = figure.add_subplot(grid[1, 0], sharex=brightness_axis)
     brightness_axis.plot(centres, radial_brightness, "o-", label="pixelated median")
-    flux_axis.plot(edges[1:], cumulative_flux, "o-", label="pixelated median")
     if truth_pixels is not None:
         truth_brightness = truth_pixels / image_pixel_scale**2
         radial_truth = np.asarray([
             annular_mean(truth_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
         ])
-        cumulative_truth = np.asarray([
-            np.sum(truth_brightness[(radius < edge) & mask] * area[(radius < edge) & mask])
-            for edge in edges[1:]
-        ])
         brightness_axis.plot(centres, radial_truth, "-", label=f"truth {profile.lower()}")
-        flux_axis.plot(edges[1:], cumulative_truth, "-", label=f"truth {profile.lower()}")
         valid = np.isfinite(radial_brightness) & np.isfinite(radial_truth) & (np.abs(radial_truth) > 0)
         relative_residual = np.full_like(radial_brightness, np.nan, dtype=float)
         np.divide(
@@ -360,8 +346,15 @@ def plot_pixelated_source_radial_profile(
     else:
         residual_axis.set_axis_off()
     x_lower = float(edges[1] * 0.5) if xscale == "log" else 0.0
-    brightness_axis.set(xlabel="radius [arcsec]", ylabel="surface brightness", title="Radial brightness profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); brightness_axis.legend()
-    flux_axis.set(xlabel="radius [arcsec]", ylabel="enclosed flux", title="Cumulative flux profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); flux_axis.legend()
+    brightness_axis.set(
+        xlabel="radius [arcsec]" if truth_pixels is None else None,
+        ylabel="surface brightness",
+        title="Radial brightness profile",
+        xscale=xscale,
+        yscale=yscale,
+        xlim=(x_lower, radial_limit),
+    )
+    brightness_axis.legend()
     figure.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(figure)
     return output
