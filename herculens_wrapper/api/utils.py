@@ -312,17 +312,56 @@ def plot_pixelated_source_radial_profile(
         selected = image[(radius >= lo) & (radius < hi) & mask]
         return float(np.mean(selected)) if selected.size else np.nan
 
+    radial_brightness = np.asarray([
+        annular_mean(brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
+    ])
+    cumulative_flux = np.asarray([
+        np.sum(brightness[(radius < edge) & mask] * area[(radius < edge) & mask])
+        for edge in edges[1:]
+    ])
     output = _output_plot_path(save_path, "source_radial_profiles.png")
-    figure, axes = plt.subplots(1, 2, figsize=(11, 4), constrained_layout=True)
-    axes[0].plot(centres, [annular_mean(brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])], "o-", label="pixelated median")
-    axes[1].plot(edges[1:], [np.sum(brightness[(radius < edge) & mask] * area[(radius < edge) & mask]) for edge in edges[1:]], "o-", label="pixelated median")
+    figure = plt.figure(figsize=(11, 5.5), constrained_layout=True)
+    grid = figure.add_gridspec(2, 2, height_ratios=(3.0, 1.0))
+    brightness_axis = figure.add_subplot(grid[0, 0])
+    flux_axis = figure.add_subplot(grid[0, 1])
+    residual_axis = figure.add_subplot(grid[1, :])
+    brightness_axis.plot(centres, radial_brightness, "o-", label="pixelated median")
+    flux_axis.plot(edges[1:], cumulative_flux, "o-", label="pixelated median")
     if truth_pixels is not None:
         truth_brightness = truth_pixels / image_pixel_scale**2
-        axes[0].plot(centres, [annular_mean(truth_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])], "-", label=f"truth {profile.lower()}")
-        axes[1].plot(edges[1:], [np.sum(truth_brightness[(radius < edge) & mask] * area[(radius < edge) & mask]) for edge in edges[1:]], "-", label=f"truth {profile.lower()}")
+        radial_truth = np.asarray([
+            annular_mean(truth_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
+        ])
+        cumulative_truth = np.asarray([
+            np.sum(truth_brightness[(radius < edge) & mask] * area[(radius < edge) & mask])
+            for edge in edges[1:]
+        ])
+        brightness_axis.plot(centres, radial_truth, "-", label=f"truth {profile.lower()}")
+        flux_axis.plot(edges[1:], cumulative_truth, "-", label=f"truth {profile.lower()}")
+        valid = np.isfinite(radial_brightness) & np.isfinite(radial_truth) & (np.abs(radial_truth) > 0)
+        relative_residual = np.full_like(radial_brightness, np.nan, dtype=float)
+        np.divide(
+            radial_brightness - radial_truth, radial_truth,
+            out=relative_residual, where=valid,
+        )
+        residual_axis.axhline(0.0, color="black", lw=1.0, ls="--")
+        residual_axis.plot(
+            centres[valid], relative_residual[valid],
+            "o-", color="tab:blue",
+        )
+        residual_axis.set(
+            xlabel="radius [arcsec]",
+            ylabel="(brightness − truth) / truth",
+            title="Relative brightness residual",
+            xscale=xscale,
+            xlim=(float(edges[1] * 0.5) if xscale == "log" else 0.0, radial_limit),
+        )
+        residual_axis.grid(alpha=0.25)
+    else:
+        residual_axis.set_axis_off()
     x_lower = float(edges[1] * 0.5) if xscale == "log" else 0.0
-    axes[0].set(xlabel="radius [arcsec]", ylabel="surface brightness", title="Radial brightness profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); axes[0].legend()
-    axes[1].set(xlabel="radius [arcsec]", ylabel="enclosed flux", title="Cumulative flux profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); axes[1].legend()
+    brightness_axis.set(xlabel="radius [arcsec]", ylabel="surface brightness", title="Radial brightness profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); brightness_axis.legend()
+    flux_axis.set(xlabel="radius [arcsec]", ylabel="enclosed flux", title="Cumulative flux profile", xscale=xscale, yscale=yscale, xlim=(x_lower, radial_limit)); flux_axis.legend()
     figure.savefig(output, dpi=180, bbox_inches="tight")
     plt.close(figure)
     return output

@@ -331,15 +331,20 @@ def compare_hmc_truth(
     components: list[str] | tuple[str, ...],
     save_path: str | Path,
     max_samples: int = 15_000,
+    round_to: int = 3,
 ) -> dict[str, Any]:
     """Plot selected HMC posterior parameters against simulation truth.
 
     This standalone utility needs no declared data, profiles, or model.  Pass
     either a HMC run directory or its ``hmc_samples.h5`` file, plus a truth
-    ``params.json``/mapping using the standard ``kwargs_*`` structure.
+    ``params.json``/mapping using the standard ``kwargs_*`` structure. ``round_to``
+    controls the decimal places in posterior annotations; returned values retain
+    full numerical precision.
     """
     if not isinstance(max_samples, int) or max_samples < 1:
         raise ValueError("max_samples must be a positive integer.")
+    if not isinstance(round_to, int) or isinstance(round_to, bool) or round_to < 0:
+        raise ValueError("round_to must be a non-negative integer.")
     selected_components = _normalise_truth_components(components)
     archive = Path(hmc_samples).expanduser()
     if archive.is_dir():
@@ -435,7 +440,15 @@ def compare_hmc_truth(
         axis.axvspan(p16, p84, color="tab:blue", alpha=0.16, label="posterior 1σ")
         axis.axvline(median, color="tab:blue", lw=1.7, label="posterior median")
         axis.axvline(true_value, color="tab:red", lw=1.8, ls="--", label="truth")
-        axis.set(title=label, xlabel="parameter value", ylabel="posterior density")
+        lower, upper = median - p16, p84 - median
+        axis.set(
+            title=(
+                f"{label}\n"
+                f"{median:.{round_to}f} "
+                f"(+{upper:.{round_to}f}/−{lower:.{round_to}f})"
+            ),
+            xlabel="parameter value", ylabel="posterior density",
+        )
         axis.legend(fontsize=8)
     for axis in axes.flat[len(values):]:
         axis.remove()
@@ -460,7 +473,7 @@ def compare_hmc_truth(
         figure = corner.corner(
             matrix, labels=labels, truths=true_values, truth_color="tab:red",
             quantiles=[0.16, 0.5, 0.84], levels=[0.393, 0.865, 0.989],
-            show_titles=True, title_fmt=".4g",
+            show_titles=True, title_fmt=f".{round_to}f",
         )
         corner_path = directory / "posterior_truth_corner.png"
         figure.savefig(corner_path, dpi=180, bbox_inches="tight")
