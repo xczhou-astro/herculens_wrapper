@@ -507,6 +507,7 @@ def fit_analytic_pixelated_source(
     truth: Mapping[str, Any] | str | Path | None = None,
     save_path: str | Path | None = None,
     random_seed: int = 42,
+    round_to: int = 3,
     model: Any | None = None,
     median_parameters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -521,6 +522,7 @@ def fit_analytic_pixelated_source(
     ``source_grid_scale`` is required to express fitted radii in arcsec.
     ``image_pixel_scale`` converts the stored source pixel fluxes to the
     surface-brightness convention used by Herculens analytic profiles.
+    ``round_to`` controls only the decimal places in corner-plot annotations.
     Supplying ``model`` and its HMC median parameters activates strict
     per-draw geometry: every draw ray-traces the source-arc mask through its
     own lens mass before fitting.  This is the recommended API path.
@@ -532,6 +534,8 @@ def fit_analytic_pixelated_source(
         raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
     if not isinstance(n_samples, int) or n_samples < 1:
         raise ValueError("n_samples must be a positive integer.")
+    if not isinstance(round_to, int) or isinstance(round_to, bool) or round_to < 0:
+        raise ValueError("round_to must be a non-negative integer.")
     if image_pixel_scale <= 0:
         raise ValueError("image_pixel_scale must be positive.")
     run = Path(hmc_run).expanduser()
@@ -631,7 +635,12 @@ def fit_analytic_pixelated_source(
     corner_plot = None
     if len(parameter_names) >= 2 and len(fitted) >= len(parameter_names):
         import corner
-        figure = corner.corner(fitted, labels=list(parameter_names), truths=truth_values, truth_color="tab:red", quantiles=[.16,.5,.84], levels=[.393,.865,.989], show_titles=True)
+        figure = corner.corner(
+            fitted, labels=list(parameter_names), truths=truth_values,
+            truth_color="tab:red", quantiles=[.16, .5, .84],
+            levels=[.393, .865, .989], show_titles=True,
+            title_fmt=f".{round_to}f",
+        )
         corner_plot = output / "analytic_source_parameters_corner.png"; figure.savefig(corner_plot, dpi=180, bbox_inches="tight"); plt.close(figure)
     summary.update({
         "profile": profile,
@@ -644,6 +653,7 @@ def fit_analytic_pixelated_source(
         "crop_radius": crop_radius,
         "grid_kind": grid_kind,
         "n_source_samples": int(len(selected)),
+        "round_to": round_to,
         "median_coordinate_center": [
             float(median_coordinate_center[0]), float(median_coordinate_center[1]),
         ],

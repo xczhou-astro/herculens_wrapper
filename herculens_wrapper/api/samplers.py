@@ -904,6 +904,7 @@ class FitResult:
         truth: Mapping[str, Any] | str | Path | None = None,
         save_path: str | Path | None = None,
         random_seed: int = 42,
+        round_to: int = 3,
     ) -> dict[str, Any]:
         """Strict per-HMC-draw analytic fit on a uniform pixelated source.
 
@@ -923,6 +924,7 @@ class FitResult:
             model.initialization_path, profile=profile, n_samples=n_samples,
             crop_radius=crop_radius, image_pixel_scale=model.data.pixel_scale,
             truth=truth, save_path=save_path, random_seed=random_seed,
+            round_to=round_to,
             model=model, median_parameters=self.parameters,
         )
         self._analytic_pixelated_source_fit = fit
