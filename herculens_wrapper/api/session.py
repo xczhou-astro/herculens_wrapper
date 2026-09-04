@@ -473,7 +473,10 @@ class SingleBandModel:
             str(profile._initialization["path"])
             for profile in collection
             if profile.profile_type == "PIXELATED"
-            and hasattr(profile, "pixelated_prior")
+            and (
+                "pixelated_prior" in profile._parameters
+                or getattr(type(profile), "pixelated_prior", None) is not None
+            )
             and profile._initialization is not None
             and profile._initialization["component"] == "lens_light"
         }

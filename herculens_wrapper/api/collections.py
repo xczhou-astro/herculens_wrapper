@@ -8,7 +8,14 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any, Sequence
 
-from .parameters import LightProfile, MassProfile, PointSourceProfile, Profile, ProfileCollection
+from .parameters import (
+    LightProfile,
+    MassProfile,
+    Parameter,
+    PointSourceProfile,
+    Profile,
+    ProfileCollection,
+)
 from .models import ComponentName
 
 
@@ -60,7 +67,17 @@ class LensProfileCollection:
                         entry["linked_to"] = f"{link._profile.profile_type}.{link.name}"
                     parameters[name] = entry
                 entry = {"profile": profile.profile_type, "parameters": parameters}
-                if hasattr(profile, "pixel_grid") and hasattr(profile, "pixelated_prior"):
+                # Profile.__getattr__ deliberately creates parameters for the
+                # notebook-friendly ``profile.name`` syntax.  Never use
+                # hasattr() here: probing an ordinary SIE for ``pixel_grid``
+                # would register a phantom, unspecified model parameter.
+                pixelated_names = {"pixel_grid", "pixelated_prior"}
+                if pixelated_names.issubset(profile._parameters):
+                    materialized = profile.parameters
+                    entry["pixel_grid"] = materialized["pixel_grid"]
+                    entry["pixelated_prior"] = materialized["pixelated_prior"]
+                elif all(getattr(type(profile), name, None) is not None
+                         for name in pixelated_names):
                     entry["pixel_grid"] = profile.pixel_grid
                     entry["pixelated_prior"] = profile.pixelated_prior
                 if profile._initialization is not None:

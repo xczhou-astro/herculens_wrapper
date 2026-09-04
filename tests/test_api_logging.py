@@ -5,6 +5,12 @@ import sys
 
 import pytest
 
+from herculens_wrapper.api import (
+    LensProfileCollection,
+    MassProfile,
+    PixelatedLensLight,
+    PixelatedSource,
+)
 from herculens_wrapper.api._logging import (
     RunContext,
     logged_model_run,
@@ -132,3 +138,34 @@ def test_spawned_workers_write_isolated_python_and_native_logs(tmp_path):
         assert f"python-error-{run_id}" in text
         assert f"native-error-{run_id}" in text
         assert f"python-output-{1 - run_id}" not in text
+
+
+def test_profile_configuration_does_not_create_phantom_parameters():
+    sie = MassProfile("SIE", prior={"theta_E": [1.0, 0.1, 0.2, 2.0]})
+    profiles = LensProfileCollection(lens_mass=sie)
+
+    configuration = profiles.configuration
+
+    assert set(sie._parameters) == {"theta_E"}
+    assert "pixel_grid" not in configuration["lens_mass"][0]
+    assert profiles.as_definition().as_dicts()[1]["lens_mass_params_list"] == [
+        {"theta_E": [1.0, 0.1, 0.2, 2.0]}
+    ]
+
+
+def test_profile_configuration_keeps_real_pixelated_settings():
+    source = PixelatedSource(
+        pixel_grid={"pixel_grid_shape": 24},
+        pixelated_prior={"prior_type": "matern"},
+    )
+    lens_light = PixelatedLensLight(scale_factor=0.75)
+    profiles = LensProfileCollection(
+        source_light=source,
+        lens_light=lens_light,
+    )
+
+    configuration = profiles.configuration
+
+    assert configuration["source_light"][0]["pixel_grid"]["pixel_grid_shape"] == 24
+    assert configuration["source_light"][0]["pixelated_prior"]["prior_type"] == "matern"
+    assert configuration["lens_light"][0]["pixel_grid"]["pixel_scale_factor"] == 0.75
