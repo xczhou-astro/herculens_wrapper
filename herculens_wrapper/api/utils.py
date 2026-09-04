@@ -11,8 +11,10 @@ import numpy as np
 
 _PROFILE_PARAMETERS = {
     "SERSIC_ELLIPSE": ("amp", "R_sersic", "n_sersic", "e1", "e2", "center_x", "center_y"),
-    "GAUSSIAN": ("amp", "sigma", "center_x", "center_y"),
+    # Keep the more specific profile before GAUSSIAN: an elliptical Gaussian
+    # necessarily contains every circular-Gaussian parameter too.
     "GAUSSIAN_ELLIPSE": ("amp", "sigma", "e1", "e2", "center_x", "center_y"),
+    "GAUSSIAN": ("amp", "sigma", "center_x", "center_y"),
 }
 
 
