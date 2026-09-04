@@ -1066,6 +1066,7 @@ class FitResult:
         crop_radius: float | None = None,
         truth: Mapping[str, Any] | str | Path | None = None,
         source_file: str | Path | None = None,
+        residual_vis_max: float = 2.0,
         save_path: str | Path | None = None,
         xscale: str = "linear",
         yscale: str = "linear",
@@ -1075,7 +1076,8 @@ class FitResult:
         ``truth`` is required because its ``center_x/y`` define the radial
         origin. The cropped pixelated source is independently fit with
         ``profile``; ``crop_radius`` is in arcsec and is measured from the
-        truth centre.
+        truth centre. ``residual_vis_max`` sets the symmetric y-range of the
+        relative-residual panel.
         If ``source_file`` is supplied, its primary FITS HDU replaces the
         in-memory source image before plotting.
         """
@@ -1104,6 +1106,7 @@ class FitResult:
             coordinate_center=truth_center,
             fitted_profile=profile,
             fitted_parameters=fitted_parameters,
+            residual_vis_max=residual_vis_max,
             save_path=save_path, xscale=xscale, yscale=yscale,
         )
 

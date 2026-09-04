@@ -379,6 +379,7 @@ def plot_pixelated_source_radial_profile(
     coordinate_center: tuple[float, float] | None = None,
     fitted_profile: str | None = None,
     fitted_parameters: Mapping[str, float] | None = None,
+    residual_vis_max: float = 2.0,
     save_path: str | Path | None = None,
     xscale: str = "linear",
     yscale: str = "linear",
@@ -387,6 +388,8 @@ def plot_pixelated_source_radial_profile(
     import matplotlib.pyplot as plt
 
     pixels = np.asarray(pixels, dtype=float)
+    if not np.isfinite(residual_vis_max) or residual_vis_max <= 0:
+        raise ValueError("residual_vis_max must be a positive finite value.")
     if coordinate_center is None:
         coordinate_center = _flux_weighted_center(pixels, x, y, None, image_pixel_scale)
     coordinate_center = (float(coordinate_center[0]), float(coordinate_center[1]))
@@ -476,7 +479,7 @@ def plot_pixelated_source_radial_profile(
             title="Relative brightness residual",
             xscale=xscale,
             xlim=(float(edges[1] * 0.5) if xscale == "log" else 0.0, radial_limit),
-            ylim=(-2.0, 2.0),
+            ylim=(-float(residual_vis_max), float(residual_vis_max)),
         )
         residual_axis.grid(alpha=0.25)
         residual_axis.legend(fontsize=8)
