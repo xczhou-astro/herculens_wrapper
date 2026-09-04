@@ -1660,7 +1660,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     # A checkpoint with zero draws is a fresh start; stale samples must not leak in.
                     with h5py.File(samples_hdf5_path, 'w'):
                         pass
-            last_state = ckpt['last_state']
+            # A state pickled directly from ``pmap`` can retain the sharding
+            # mesh created by the previous process/run.  Materialize it on
+            # the host so the next ``pmap`` invocation can shard it onto its
+            # own mesh instead of mixing two otherwise-identical mesh objects.
+            last_state = jax.device_get(ckpt['last_state'])
             start_batch_idx = ckpt['completed_batches']
             if 'all_samples' in ckpt:
                 _write_hmc_checkpoint(
@@ -1699,6 +1703,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         remaining_samples -= size
     total_batch_count = start_batch_idx + len(batch_sizes)
             
+    intermediate_diagnostics_enabled = True
     for batch_offset, size in enumerate(batch_sizes):
         i = start_batch_idx + batch_offset
             
@@ -1767,7 +1772,13 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
             )
             
-        last_state = mcmc.last_state
+        # NumPyro constructs a new pmap transform for each MCMC.run call.  A
+        # device-resident state carries that transform's AbstractMesh and is
+        # rejected by a later batch whose new mesh has a different identity.
+        # Host materialization removes only the sharding metadata; all chain
+        # and adaptation values are preserved.  It also makes checkpoints
+        # portable across process restarts and equivalent MIG layouts.
+        last_state = jax.device_get(mcmc.last_state)
         
         # Get samples from this batch
         batch_samples = mcmc.get_samples(group_by_chain=False)
@@ -1818,7 +1829,14 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             continue
 
         # Generate the compact single-band diagnostic set for this batch.
+        # On small MIG slices this optional model-image evaluation can exceed
+        # memory even though HMC itself fits.  After the first OOM, keep the
+        # sampler running and skip the same optional work for later batches.
+        if not intermediate_diagnostics_enabled:
+            print('[hmc] Skipping intermediate diagnostics after an earlier device OOM.')
         try:
+            if not intermediate_diagnostics_enabled:
+                raise StopIteration
             temp_samples = _concatenate_batches(all_samples, num_chains)
             temp_hmc_extra_fields = _concatenate_hmc_extra_fields(
                 all_hmc_extra_fields, num_chains,
@@ -1875,8 +1893,27 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
                 hmc_extra_fields=temp_hmc_extra_fields,
             )
+        except StopIteration:
+            pass
         except Exception as e:
-            print(f"[warning] Failed to generate intermediate diagnostics: {e}")
+            error_text = str(e)
+            print(f"[warning] Failed to generate intermediate diagnostics: {error_text}")
+            if (
+                'RESOURCE_EXHAUSTED' in error_text
+                or 'out of memory' in error_text.lower()
+            ):
+                intermediate_diagnostics_enabled = False
+                print(
+                    '[hmc] Intermediate diagnostics disabled for the remaining '
+                    'batches; HMC sampling and checkpointing will continue.'
+                )
+                # Release failed diagnostic buffers/compiled executables.  The
+                # host-resident ``last_state`` above remains intact.
+                clear_caches = getattr(jax, 'clear_caches', None)
+                if clear_caches is not None:
+                    clear_caches()
+                import gc
+                gc.collect()
             
         # Free MCMC object and trigger garbage collection to release GPU memory
         if 'mcmc' in locals():

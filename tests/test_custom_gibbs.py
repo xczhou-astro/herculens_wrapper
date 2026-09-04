@@ -78,8 +78,15 @@ def test_parallel_chains_resume_without_rng_shape_change():
         chain_method="parallel",
         progress_bar=False,
     )
-    resumed.post_warmup_state = first.last_state
-    resumed.run(first.last_state.rng_key)
+    # Batch/checkpoint boundaries intentionally materialize the state on the
+    # host, preventing a previous pmap mesh identity from leaking into the
+    # next independently-created pmap transform.
+    host_state = jax.device_get(first.last_state)
+    clear_caches = getattr(jax, "clear_caches", None)
+    if clear_caches is not None:
+        clear_caches()
+    resumed.post_warmup_state = host_state
+    resumed.run(host_state.rng_key)
 
     assert jax.random.key_data(resumed.last_state.rng_key).shape == (2, 2)
     assert all(value.shape == (2, 2) for value in resumed.get_samples(True).values())
