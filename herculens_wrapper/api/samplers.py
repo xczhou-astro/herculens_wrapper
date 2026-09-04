@@ -10,6 +10,7 @@ import tempfile
 from types import SimpleNamespace
 from typing import Any, Mapping, Sequence
 import numpy as np
+from ._logging import logged_result_output
 from .models import SamplerName
 
 
@@ -688,6 +689,23 @@ class FitResult:
     _analytic_pixelated_source_fit: Mapping[str, Any] | None = field(
         default=None, repr=False, compare=False,
     )
+
+    @property
+    def run_directory(self) -> Path | None:
+        """Directory inherited from the model run that created this result."""
+        context = getattr(self, "_run_context", None)
+        if context is None:
+            context = getattr(self._model, "_run_context", None)
+        return None if context is None else context.directory
+
+    @property
+    def log_path(self) -> Path | None:
+        """Log inherited from the model run that created this result."""
+        context = getattr(self, "_run_context", None)
+        if context is None:
+            context = getattr(self._model, "_run_context", None)
+        return None if context is None else context.log_path
+
     @property
     def loss_history(self) -> np.ndarray | None:
         history = self.details.get("loss_history")
@@ -1347,7 +1365,8 @@ class FitResult:
             ), save_path, "corner.png",
         )
 
-    def output(self, save_path: str | Path, *, scale: str = "log", residual_vis_max: float = 0.0,
+    @logged_result_output
+    def output(self, save_path: str | Path | None = None, *, scale: str = "log", residual_vis_max: float = 0.0,
                include_corner: bool = True) -> dict[str, Any]:
         """Write the standard single-band pipeline products to one run directory.
 
@@ -1600,6 +1619,7 @@ class SingleBandResultsCombination:
         if not self.results:
             raise ValueError("SingleBandResultsCombination requires at least one FitResult.")
 
+    @logged_result_output
     def output(
         self,
         save_path: str | Path,

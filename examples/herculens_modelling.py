@@ -10,11 +10,9 @@ python herculens_modelling.py --data-dir /path/to/data --stage single --sampler 
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
 from pathlib import Path
 import shutil
 import sys
-import traceback
 
 import numpy as np
 
@@ -24,7 +22,7 @@ LOCAL_WRAPPER = SCRIPT_DIR.parents[1] / "herculens_wrapper"
 if LOCAL_WRAPPER.is_dir() and str(LOCAL_WRAPPER) not in sys.path:
     sys.path.insert(0, str(LOCAL_WRAPPER))
 
-from herculens_wrapper.utils import Tee, save_config
+from herculens_wrapper.utils import save_config
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -164,24 +162,6 @@ def make_model(args: argparse.Namespace, source_method: str):
     )
 
 
-@contextmanager
-def stage_logging(directory: Path):
-    """Mirror stage stdout/stderr to ``directory/log.txt``."""
-    log_path = directory / "log.txt"
-    original_stdout, original_stderr = sys.stdout, sys.stderr
-    with log_path.open("w", encoding="utf-8") as log_file:
-        sys.stdout = Tee(original_stdout, log_file)
-        sys.stderr = Tee(original_stderr, log_file)
-        try:
-            yield log_path
-        except BaseException:
-            traceback.print_exc()
-            raise
-        finally:
-            sys.stdout = original_stdout
-            sys.stderr = original_stderr
-
-
 def prepare_stage(model, args: argparse.Namespace, directory: Path) -> None:
     directory.mkdir(parents=True, exist_ok=True)
     save_config(args, directory)
@@ -241,35 +221,34 @@ def run_svi(args: argparse.Namespace, source_method: str, directory: Path, init_
         return
 
     directory.mkdir(parents=True, exist_ok=True)
-    with stage_logging(directory):
-        model = make_model(args, source_method)
-        prepare_stage(model, args, directory)
-        results = []
-        print(f"Starting {source_method} SVI with {args.svi_runs} runs: {directory}")
-        for run_id in range(args.svi_runs):
-            run_dir = directory / f"run_{run_id}"
-            run_dir.mkdir(parents=True, exist_ok=True)
-            if is_completed_svi_run(run_dir):
-                print(f"[svi] Run {run_id} is complete; loading it and continuing.")
-                model.load(run_dir, seed=args.seed + run_id)
-                results.append(model.get_results(random_seed=args.seed + run_id))
-                continue
-            initial = model.initialize(
-                seed=args.seed + run_id, run_id=run_id, init_params_path=init_path,
-                pixelated_init_match="image",
-                num_iterations_warmup=args.pixelated_warmup if source_method == "pixelated" else 0,
-            )
-            model.plot_initial_model(scale="linear", save_path=run_dir / "initial_guess_model.png", residual_vis_max=args.residual_vis_max)
-            if source_method == "pixelated":
-                model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
-            sampler = SamplerConfig.svi(max_iterations=args.svi_iterations, learning_rate=1e-2, init_scale=0.01,
-                                        loss_kind="trace_elbo", num_particles=10, random_seed=args.seed + run_id)
-            result = model.run(sampler, init_params=initial)
-            result.output(save_path=run_dir, residual_vis_max=args.residual_vis_max)
-            results.append(result)
-        SingleBandResultsCombination(results).output(
-            directory, residual_vis_max=args.residual_vis_max,
+    model = make_model(args, source_method)
+    prepare_stage(model, args, directory)
+    results = []
+    print(f"Starting {source_method} SVI with {args.svi_runs} runs: {directory}")
+    for run_id in range(args.svi_runs):
+        run_dir = directory / f"run_{run_id}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if is_completed_svi_run(run_dir):
+            print(f"[svi] Run {run_id} is complete; loading it and continuing.")
+            model.load(run_dir, seed=args.seed + run_id)
+            results.append(model.get_results(random_seed=args.seed + run_id))
+            continue
+        initial = model.initialize(
+            seed=args.seed + run_id, run_id=run_id, init_params_path=init_path,
+            pixelated_init_match="image",
+            num_iterations_warmup=args.pixelated_warmup if source_method == "pixelated" else 0,
         )
+        model.plot_initial_model(scale="linear", save_path=run_dir / "initial_guess_model.png", residual_vis_max=args.residual_vis_max)
+        if source_method == "pixelated":
+            model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
+        sampler = SamplerConfig.svi(max_iterations=args.svi_iterations, learning_rate=1e-2, init_scale=0.01,
+                                    loss_kind="trace_elbo", num_particles=10, random_seed=args.seed + run_id)
+        result = model.run(sampler, init_params=initial, save_path=run_dir)
+        result.output(residual_vis_max=args.residual_vis_max)
+        results.append(result)
+    SingleBandResultsCombination(results).output(
+        directory, residual_vis_max=args.residual_vis_max,
+    )
 
 
 def run_hmc(
@@ -285,26 +264,25 @@ def run_hmc(
             f"{source_method.capitalize()} HMC needs matching SVI output: {init_path}"
         )
     directory.mkdir(parents=True, exist_ok=True)
-    with stage_logging(directory):
-        model = make_model(args, source_method)
-        prepare_stage(model, args, directory)
-        # Restore the matching SVI posterior. HMC then draws chain-specific
-        # initial values from that guide; no image-match warmup is used here.
-        initial = model.initialize(
-            seed=args.seed, run_id=0, init_params_path=init_path,
-            num_iterations_warmup=0,
-        )
-        model.plot_initial_model(scale="linear", save_path=directory / "initial_guess_model.png", residual_vis_max=args.residual_vis_max)
-        if source_method == "pixelated":
-            model.plot_initial_source(scale="linear", save_path=directory / "initial_source_plane.png")
-        sampler = SamplerConfig.hmc(num_warmup=args.hmc_warmup, num_samples=args.hmc_samples,
-                                    num_chains=args.hmc_chains, checkpoint_interval=args.checkpoint_interval,
-                                    random_seed=args.seed)
-        result = model.run(
-            sampler, init_params=initial, save_path=directory,
-            residual_vis_max=args.residual_vis_max,
-        )
-        result.output(save_path=directory, residual_vis_max=args.residual_vis_max)
+    model = make_model(args, source_method)
+    prepare_stage(model, args, directory)
+    # Restore the matching SVI posterior. HMC then draws chain-specific
+    # initial values from that guide; no image-match warmup is used here.
+    initial = model.initialize(
+        seed=args.seed, run_id=0, init_params_path=init_path,
+        num_iterations_warmup=0,
+    )
+    model.plot_initial_model(scale="linear", save_path=directory / "initial_guess_model.png", residual_vis_max=args.residual_vis_max)
+    if source_method == "pixelated":
+        model.plot_initial_source(scale="linear", save_path=directory / "initial_source_plane.png")
+    sampler = SamplerConfig.hmc(num_warmup=args.hmc_warmup, num_samples=args.hmc_samples,
+                                num_chains=args.hmc_chains, checkpoint_interval=args.checkpoint_interval,
+                                random_seed=args.seed)
+    result = model.run(
+        sampler, init_params=initial, save_path=directory,
+        residual_vis_max=args.residual_vis_max,
+    )
+    result.output(residual_vis_max=args.residual_vis_max)
 
 
 def requested_pair(args: argparse.Namespace) -> tuple[str, str]:

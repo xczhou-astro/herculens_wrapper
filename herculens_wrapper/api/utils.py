@@ -384,7 +384,13 @@ def plot_pixelated_source_radial_profile(
     xscale: str = "linear",
     yscale: str = "linear",
 ) -> Path:
-    """Plot radial surface brightness and its truth-relative residual."""
+    """Plot azimuthally averaged radial brightness and its residual.
+
+    Error bars are the asymmetric 16th--84th percentile interval of the
+    valid pixels in each annulus.  They describe azimuthal variation (and
+    hence remain informative for elliptical or otherwise non-axisymmetric
+    sources), rather than an uncertainty on the annular mean.
+    """
     import matplotlib.pyplot as plt
 
     pixels = np.asarray(pixels, dtype=float)
@@ -424,32 +430,46 @@ def plot_pixelated_source_radial_profile(
     edges = np.linspace(0, radial_limit, n_bins + 1)
     centres = 0.5 * (edges[:-1] + edges[1:])
     brightness = pixels / image_pixel_scale**2
-    def annular_mean(image: np.ndarray, lo: float, hi: float) -> float:
+    def annular_summary(image: np.ndarray, lo: float, hi: float) -> tuple[float, float, float]:
         selected = image[(radius >= lo) & (radius < hi) & mask]
-        return float(np.mean(selected)) if selected.size else np.nan
+        if not selected.size:
+            return np.nan, np.nan, np.nan
+        mean = float(np.mean(selected))
+        lower, upper = np.percentile(selected, (16.0, 84.0))
+        # Matplotlib's asymmetric yerr is measured from the plotted mean.
+        return mean, max(0.0, mean - float(lower)), max(0.0, float(upper) - mean)
 
-    radial_brightness = np.asarray([
-        annular_mean(brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
-    ])
+    def annular_summaries(image: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = [annular_summary(image, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])]
+        means = np.asarray([value[0] for value in values])
+        errors = np.asarray([[value[1] for value in values], [value[2] for value in values]])
+        return means, errors
+
+    radial_brightness, radial_brightness_error = annular_summaries(brightness)
     output = _output_plot_path(save_path, "source_radial_profiles.png")
     figure = plt.figure(figsize=(7.5, 5.5), constrained_layout=True)
     grid = figure.add_gridspec(2, 1, height_ratios=(3.0, 1.0))
     brightness_axis = figure.add_subplot(grid[0, 0])
     residual_axis = figure.add_subplot(grid[1, 0], sharex=brightness_axis)
-    brightness_axis.plot(centres, radial_brightness, "o-", label="pixelated median")
+    brightness_axis.errorbar(
+        centres, radial_brightness, yerr=radial_brightness_error,
+        fmt="o-", capsize=2, label="pixelated median",
+    )
     radial_fitted = None
     if fitted_pixels is not None:
         fitted_brightness = fitted_pixels / image_pixel_scale**2
-        radial_fitted = np.asarray([
-            annular_mean(fitted_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
-        ])
-        brightness_axis.plot(centres, radial_fitted, "-", label=f"fitted {fitted_profile.lower()}")
+        radial_fitted, radial_fitted_error = annular_summaries(fitted_brightness)
+        brightness_axis.errorbar(
+            centres, radial_fitted, yerr=radial_fitted_error,
+            fmt="-", capsize=2, label=f"fitted {fitted_profile.lower()}",
+        )
     if truth_pixels is not None:
         truth_brightness = truth_pixels / image_pixel_scale**2
-        radial_truth = np.asarray([
-            annular_mean(truth_brightness, lo, hi) for lo, hi in zip(edges[:-1], edges[1:])
-        ])
-        brightness_axis.plot(centres, radial_truth, "-", label=f"truth {profile.lower()}")
+        radial_truth, radial_truth_error = annular_summaries(truth_brightness)
+        brightness_axis.errorbar(
+            centres, radial_truth, yerr=radial_truth_error,
+            fmt="-", capsize=2, label=f"truth {profile.lower()}",
+        )
         valid = np.isfinite(radial_brightness) & np.isfinite(radial_truth) & (np.abs(radial_truth) > 0)
         relative_residual = np.full_like(radial_brightness, np.nan, dtype=float)
         np.divide(

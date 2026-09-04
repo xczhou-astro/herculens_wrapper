@@ -13,6 +13,7 @@ import numpy as np
 
 from .collections import LensProfileCollection
 from .data import SingleBandData
+from ._logging import RunContext, format_configuration, logged_model_run, logged_result_output
 from .models import ModelDefinition, count_physical_parameters
 from .samplers import SamplerConfig
 
@@ -159,6 +160,21 @@ class MultiBandFitResult:
     random_seed: int | None = None
     initial_parameters: Mapping[str, Any] | None = None
     samples: Mapping[str, Any] | None = None
+
+    @property
+    def run_directory(self) -> Path | None:
+        context = getattr(self, "_run_context", None)
+        if context is None:
+            context = getattr(self._model, "_run_context", None)
+        return None if context is None else context.directory
+
+    @property
+    def log_path(self) -> Path | None:
+        context = getattr(self, "_run_context", None)
+        if context is None:
+            context = getattr(self._model, "_run_context", None)
+        return None if context is None else context.log_path
+
     def kwargs_by_band(self) -> dict[str, Any]:
         return self._model.prob_model.params2kwargs_by_band(self.parameters)
 
@@ -245,7 +261,8 @@ class MultiBandFitResult:
             })
         return metrics
 
-    def output(self, save_path: str | Path, *, residual_vis_max: float = 0.0,
+    @logged_result_output
+    def output(self, save_path: str | Path | None = None, *, residual_vis_max: float = 0.0,
                include_corner: bool = True) -> dict[str, Any]:
         """Write wrapper-style per-band diagnostics and joint SVI products."""
         from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy, save_rtu_source_fits
@@ -456,7 +473,59 @@ class MultiBandModel:
         self.source_grid_scale, self.likelihood_scale = float(source_grid_scale), float(likelihood_scale)
         self.prob_model = self.bands = None
         self.initial_parameters = None; self.result = None
+        self._run_context: RunContext | None = None
         self._build()
+
+    @property
+    def run_directory(self) -> Path | None:
+        return None if self._run_context is None else self._run_context.directory
+
+    @property
+    def log_path(self) -> Path | None:
+        return None if self._run_context is None else self._run_context.log_path
+
+    def configuration(self, *, sampler: SamplerConfig | None = None) -> dict[str, Any]:
+        observations = {}
+        for name, data in self.observations.items():
+            observations[name] = {
+                "image_shape": data.image.shape,
+                "noise_shape": data.noise.shape,
+                "psf_shape": data.psf.shape,
+                "pixel_scale": data.pixel_scale,
+                "psf_supersampling_factor": data.psf_supersampling_factor,
+                "crop_size": data.crop_size,
+                "input_paths": data._input_paths,
+            }
+        payload: dict[str, Any] = {
+            "model": "MultiBandModel",
+            "observations": observations,
+            "profiles": {
+                "shared": self.profiles.shared.configuration,
+                "bands": {
+                    name: collection.configuration
+                    for name, collection in self.profiles.bands.items()
+                },
+                "unshared": self.profiles.unshared,
+            },
+            "backend_definitions": {
+                name: {"types": definition[0], "parameters": definition[1]}
+                for name, definition in self.profiles.band_definitions().items()
+            },
+            "numerics": self.numerics,
+            "source_grid_scale": self.source_grid_scale,
+            "likelihood_scale": self.likelihood_scale,
+            "initialization_path": getattr(self, "initialization_path", None),
+        }
+        if sampler is not None:
+            payload["sampler"] = {
+                "name": sampler.name,
+                "random_seed": sampler.random_seed,
+                "options": sampler.options,
+            }
+        return payload
+
+    def describe(self, *, sampler: SamplerConfig | None = None) -> str:
+        return format_configuration(self.configuration(sampler=sampler))
 
     def _build(self) -> None:
         from ..models import create_lens_image, validate_param_list
@@ -699,6 +768,7 @@ class MultiBandModel:
                 self.initial_parameters[key] = value
         print("[svi-warmup] Pixelated-source image-match warmup complete.")
 
+    @logged_model_run
     def run(
         self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
         save_path: str | Path | None = None, residual_vis_max: float = 0.0,
@@ -958,6 +1028,7 @@ class MultiBandResultsCombination:
         if any(result._model is None for result in self.results):
             raise RuntimeError("Every multiband result must be attached to its MultiBandModel.")
 
+    @logged_result_output
     def output(
         self,
         save_path: str | Path,

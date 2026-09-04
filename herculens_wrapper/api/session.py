@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from .collections import LensProfileCollection
 from .data import SingleBandData
+from ._logging import RunContext, format_configuration, logged_model_run
 from .models import ModelDefinition, count_physical_parameters
 from .samplers import FitResult, SamplerConfig
 from .visualization import PlotScale, _extent, _normalization
@@ -26,7 +27,15 @@ def _sampler_backend():
 
 
 def _svi_many_worker(spec, run_id, device):
-    """Spawn worker for one independent SVI run (sets CUDA before JAX use)."""
+    """Spawn one SVI worker with an isolated file-only process log."""
+    run_dir = Path(spec["directory"]) / f"run_{run_id}"
+    context = RunContext(run_dir, console=False, run_id=run_id)
+    with context.capture(f"parallel SVI worker run_{run_id} device={device}"):
+        return _svi_many_worker_impl(spec, run_id, device)
+
+
+def _svi_many_worker_impl(spec, run_id, device):
+    """Worker implementation; CUDA is selected before importing JAX."""
     if device is not None:
         os.environ["CUDA_VISIBLE_DEVICES"] = device
     from .samplers import is_completed_svi_run
@@ -55,7 +64,10 @@ def _svi_many_worker(spec, run_id, device):
     source_types = model.definition.as_dicts()[0].get("source_light_type_list", [])
     if any("PIXELATED" in str(profile_type).upper() for profile_type in source_types):
         model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
-    model.run(sampler, init_params=initial).output(run_dir, residual_vis_max=spec["residual_vis_max"])
+    model.run(
+        sampler, init_params=initial, save_path=run_dir,
+        residual_vis_max=spec["residual_vis_max"],
+    ).output(residual_vis_max=spec["residual_vis_max"])
 
 class SingleBandModel:
     """Config-free, immediately built controller for a single band."""
@@ -85,7 +97,59 @@ class SingleBandModel:
         # evaluated when get_results() is requested.
         self._loaded_hmc_samples: Mapping[str, Any] | None = None
         self._loaded_hmc_details: dict[str, Any] | None = None
+        self._run_context: RunContext | None = None
         self._build()
+
+    @property
+    def run_directory(self) -> Path | None:
+        """Directory currently associated with this model's API log."""
+        return None if self._run_context is None else self._run_context.directory
+
+    @property
+    def log_path(self) -> Path | None:
+        """Run log path, once a run/output directory has been established."""
+        return None if self._run_context is None else self._run_context.log_path
+
+    def configuration(self, *, sampler: SamplerConfig | None = None) -> dict[str, Any]:
+        """Return the effective data, profile, numerics, and sampler declaration."""
+        data = self.observation
+        payload: dict[str, Any] = {
+            "model": "SingleBandModel",
+            "observation": {
+                "image_shape": data.image.shape,
+                "noise_shape": data.noise.shape,
+                "psf_shape": data.psf.shape,
+                "pixel_scale": data.pixel_scale,
+                "psf_supersampling_factor": data.psf_supersampling_factor,
+                "crop_size": data.crop_size,
+                "background_subtract": data.background_subtract,
+                "background_offset": data.background_offset,
+                "source_arc_mask_path": data.source_arc_mask_path,
+                "source_arc_mask_radius": data.source_arc_mask_radius,
+                "contaminate_mask_path": data.contaminate_mask_path,
+                "input_paths": data._input_paths,
+            },
+            "profiles": self.profiles.configuration,
+            "backend_definition": dict(zip(
+                ("types", "parameters"), self.definition.as_dicts(),
+            )),
+            "numerics": self.numerics,
+            "source_grid_scale": self.source_grid_scale,
+            "likelihood_scale": self.likelihood_scale,
+            "initialization_path": self.initialization_path,
+            "devices": {"CUDA_VISIBLE_DEVICES": os.environ.get("CUDA_VISIBLE_DEVICES")},
+        }
+        if sampler is not None:
+            payload["sampler"] = {
+                "name": sampler.name,
+                "random_seed": sampler.random_seed,
+                "options": sampler.options,
+            }
+        return payload
+
+    def describe(self, *, sampler: SamplerConfig | None = None) -> str:
+        """Return the same readable configuration snapshot written to the run log."""
+        return format_configuration(self.configuration(sampler=sampler))
 
     def with_fixed(self, **selections: Any) -> "SingleBandModel":
         """Create an independently built next-stage model with fixed values.
@@ -122,6 +186,8 @@ class SingleBandModel:
             pixelated_init_match=pixelated_init_match,
             num_iterations_warmup=num_iterations_warmup,
         )
+        if self.initialization_path is not None:
+            self._run_context = RunContext(self.initialization_path)
         self.result = None
         return parameters
 
@@ -236,6 +302,7 @@ class SingleBandModel:
             raise ValueError("HMC archive has an invalid number of chains or sample layout.")
 
         self.initialization_path = output
+        self._run_context = RunContext(output)
         self._loaded_hmc_samples = samples
         self._loaded_hmc_details = {
             "loaded_from": str(output),
@@ -674,6 +741,8 @@ class SingleBandModel:
         # the Markov chains.
         initial = {name: np.asarray(values)[-1] for name, values in archived_samples.items()}
         return self.run(sampler, init_params=initial, save_path=output)
+
+    @logged_model_run
     def run(
         self,
         sampler: SamplerConfig,
@@ -845,9 +914,20 @@ class SingleBandModel:
                         worker.start()
                     for worker in workers:
                         worker.join()
-                    failures = [worker.exitcode for worker in workers if worker.exitcode]
+                    failures = [
+                        (run_id, worker.exitcode)
+                        for run_id, worker in zip(batch_ids, workers)
+                        if worker.exitcode
+                    ]
                     if failures:
-                        raise RuntimeError(f"One or more parallel SVI runs failed (exit codes: {failures}).")
+                        summary = ", ".join(
+                            f"run_{run_id}=exit {exitcode}"
+                            for run_id, exitcode in failures
+                        )
+                        raise RuntimeError(
+                            f"One or more parallel SVI runs failed ({summary}). "
+                            "See each run_i/log.txt for its traceback."
+                        )
             else:
                 for run_id in pending:
                     _svi_many_worker(spec, run_id, None)
@@ -868,6 +948,7 @@ class SingleBandModel:
             restored.load(run_dir, seed=int(sampler.random_seed) + run_id)
             results.append(restored.get_results(random_seed=int(sampler.random_seed) + run_id))
         return SingleBandResultsCombination(results)
+
     def model_image(self, parameters: Mapping[str, Any] | None = None) -> np.ndarray:
         if self.prob_model is None or self.lens_image is None: raise RuntimeError("The backend model is unavailable.")
         if parameters is None:
