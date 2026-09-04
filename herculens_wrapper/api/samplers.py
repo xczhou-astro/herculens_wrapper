@@ -1112,8 +1112,10 @@ class FitResult:
             raise ValueError("plot_radial_profile() requires analytic source truth with center_x and center_y.")
         truth_center = (float(truth_values["center_x"]), float(truth_values["center_y"]))
         profile = str(profile).upper()
-        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN"}:
-            raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
+        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN", "GAUSSIAN_ELLIPSE"}:
+            raise ValueError(
+                "profile must be 'SERSIC_ELLIPSE', 'GAUSSIAN', or 'GAUSSIAN_ELLIPSE'."
+            )
         fitted_parameters, _, _ = _fit_analytic_source_image(
             profile, pixels, x, y, self._uniform_source_cell_area(x, y),
             self._require_model().data.pixel_scale, crop_radius, crop_center=truth_center,
@@ -1148,8 +1150,10 @@ class FitResult:
 
         pixels, x, y = self._uniform_source_plane_from_file(source_file)
         profile = str(profile).upper()
-        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN"}:
-            raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
+        if profile not in {"SERSIC_ELLIPSE", "GAUSSIAN", "GAUSSIAN_ELLIPSE"}:
+            raise ValueError(
+                "profile must be 'SERSIC_ELLIPSE', 'GAUSSIAN', or 'GAUSSIAN_ELLIPSE'."
+            )
         _, _, truth_values = _truth_map(
             truth, x, y, self._require_model().data.pixel_scale,
         )

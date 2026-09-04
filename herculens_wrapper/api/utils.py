@@ -12,6 +12,7 @@ import numpy as np
 _PROFILE_PARAMETERS = {
     "SERSIC_ELLIPSE": ("amp", "R_sersic", "n_sersic", "e1", "e2", "center_x", "center_y"),
     "GAUSSIAN": ("amp", "sigma", "center_x", "center_y"),
+    "GAUSSIAN_ELLIPSE": ("amp", "sigma", "e1", "e2", "center_x", "center_y"),
 }
 
 
@@ -91,6 +92,34 @@ def _initial_and_bounds(profile: str, pixels: np.ndarray, x: np.ndarray, y: np.n
         initial = [max(float(np.nanmax(brightness)), 1e-12), 0.2 * extent, 1.0, 0.0, 0.0, cx, cy]
         lower = [0.0, resolution * 0.15, 0.3, -0.7, -0.7, float(x.min()), float(y.min())]
         upper = [np.inf, 2.0 * extent, 8.0, 0.7, 0.7, float(x.max()), float(y.max())]
+    elif profile == "GAUSSIAN_ELLIPSE":
+        # Estimate the intrinsic shape from brightness-weighted second
+        # moments.  A circular start can leave least_squares in a shallow
+        # local solution for a strongly elliptical Gaussian.
+        weights = brightness * area
+        dx, dy = x - cx, y - cy
+        weight_sum = float(np.sum(weights))
+        if weight_sum > 0:
+            covariance = np.array([
+                [np.sum(weights * dx * dx), np.sum(weights * dx * dy)],
+                [np.sum(weights * dx * dy), np.sum(weights * dy * dy)],
+            ]) / weight_sum
+            eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+            major_index = int(np.argmax(eigenvalues))
+            variance_major = max(float(eigenvalues[major_index]), resolution ** 2)
+            variance_minor = max(float(eigenvalues[1 - major_index]), resolution ** 2)
+            q = np.clip(np.sqrt(variance_minor / variance_major), 1e-3, 1.0)
+            phi = float(np.arctan2(eigenvectors[1, major_index], eigenvectors[0, major_index]))
+            ellipticity = (1.0 - q) / (1.0 + q)
+            e1, e2 = ellipticity * np.cos(2.0 * phi), ellipticity * np.sin(2.0 * phi)
+            sigma = float((variance_major * variance_minor) ** 0.25)
+        else:
+            sigma, e1, e2 = 0.2 * extent, 0.0, 0.0
+        # ``amp`` is total Gaussian flux in Herculens, also for the
+        # elliptical profile.
+        initial = [max(total, 1e-12), sigma, e1, e2, cx, cy]
+        lower = [0.0, resolution * 0.15, -0.5, -0.5, float(x.min()), float(y.min())]
+        upper = [np.inf, 2.0 * extent, 0.5, 0.5, float(x.max()), float(y.max())]
     else:
         initial = [max(total, 1e-12), 0.2 * extent, cx, cy]
         lower = [0.0, resolution * 0.15, float(x.min()), float(y.min())]
@@ -555,7 +584,9 @@ def fit_analytic_pixelated_source(
 
     profile = str(profile).upper()
     if profile not in _PROFILE_PARAMETERS:
-        raise ValueError("profile must be 'SERSIC_ELLIPSE' or 'GAUSSIAN'.")
+        raise ValueError(
+            "profile must be 'SERSIC_ELLIPSE', 'GAUSSIAN', or 'GAUSSIAN_ELLIPSE'."
+        )
     if not isinstance(n_samples, int) or n_samples < 1:
         raise ValueError("n_samples must be a positive integer.")
     if not isinstance(round_to, int) or isinstance(round_to, bool) or round_to < 0:
