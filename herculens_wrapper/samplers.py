@@ -1430,33 +1430,21 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             "parameters are fixed or linked."
         )
 
-    # ``MultiHMCGibbs`` stores one RNG key per inner kernel.  NumPyro's pmap
-    # path requires a single per-chain RNG key in the scan carry, so this
-    # custom kernel cannot safely drive chains distributed across devices.
-    # Use ordinary joint NUTS in that case: the four chains remain independent
-    # and run concurrently, only the within-chain Gibbs splitting is removed.
     from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
     requested_num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
     requested_chain_method = resolve_chain_method_hmc_numpyro(args)
-    parallel_multichain = requested_num_chains > 1 and requested_chain_method == 'parallel'
 
     # Gibbs needs two non-empty conditional blocks.  With a fixed lens mass
     # there is only the light/source block, for which ordinary joint NUTS is
     # the correct and simpler kernel.
     use_joint_nuts = (
         bool(getattr(args, 'disable_gibbs', False))
-        or parallel_multichain
         or not vars_mass
         or not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other)
     )
 
     if use_joint_nuts:
-        if parallel_multichain:
-            print(
-                '[hmc] chain_method=parallel with multiple chains: using joint NUTS; '
-                'MultiHMCGibbs is not pmap-compatible.'
-            )
-        elif not vars_mass:
+        if not vars_mass:
             print("[hmc] Lens mass is fixed; running joint NUTS for remaining free parameters.")
         elif not (vars_pixel + vars_power + vars_lens_light_hmc + vars_other):
             print("[hmc] Only lens-mass parameters are free; running joint NUTS.")
@@ -1496,6 +1484,8 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             dense_mass=dense_mass_blocks if dense_mass_blocks else False,
         )
     else:
+        if requested_num_chains > 1 and requested_chain_method == 'parallel':
+            print('[hmc] Running Gibbs-within-HMC chains in parallel across JAX devices.')
         # Set up inner kernels
         # Kernel 1: NUTS for source pixels, Matérn, lens light, and other variables
         dense_mass_blocks_1 = []
@@ -1748,10 +1738,30 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 chain_method=chain_method,
             )
             mcmc.post_warmup_state = last_state
-            if use_joint_nuts:
-                rng_key_to_pass = last_state.rng_key
-            else:
-                rng_key_to_pass = last_state.rng_key[..., 0, :]
+            rng_key_to_pass = last_state.rng_key
+            if not use_joint_nuts:
+                # Checkpoints written before the pmap-compatible Gibbs state
+                # stored one outer RNG key per inner kernel.  Collapse that
+                # legacy extra axis once; new checkpoints already expose one
+                # key per chain and pass through unchanged.
+                key_data = getattr(jax.random, 'key_data', lambda key: key)(
+                    rng_key_to_pass,
+                )
+                key_data_shape = key_data.shape
+                expected_shape = (
+                    (num_chains, 2) if num_chains > 1 else (2,)
+                )
+                if key_data_shape != expected_shape:
+                    prng_key_dtype = getattr(jax.dtypes, 'prng_key', None)
+                    if (
+                        prng_key_dtype is not None
+                        and jax.dtypes.issubdtype(
+                            rng_key_to_pass.dtype, prng_key_dtype,
+                        )
+                    ):
+                        rng_key_to_pass = rng_key_to_pass[..., 0]
+                    else:
+                        rng_key_to_pass = rng_key_to_pass[..., 0, :]
             mcmc.run(
                 rng_key_to_pass,
                 extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),

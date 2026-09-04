@@ -331,7 +331,8 @@ def log_jax_device_layout(args):
             else:
                 print(
                     f'  -> {n_chains} chains on {n_devices} device(s): '
-                    f'first {n_devices} in parallel, remainder sequential'
+                    'NumPyro will fall back to sequential execution because '
+                    'parallel mode requires at least one device per chain'
                 )
         elif chain_method == 'vectorized':
             print(f'  -> {n_chains} chains vectorized on {n_devices} device(s)')

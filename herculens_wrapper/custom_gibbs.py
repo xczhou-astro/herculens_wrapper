@@ -18,6 +18,9 @@ MultiHMCGibbsState = namedtuple(
  - **hmc_states** - list of current :data:`~numpyro.infer.hmc.HMCState`
  - **diverging** - A list of boolean value to indicate whether the current trajectory is diverging.
  - **accept_prob**, **num_steps**, **energy** - per-inner-kernel NUTS diagnostics.
+ - **rng_key** - one key for the outer chain.  The per-Gibbs-block keys remain
+   in ``hmc_states``.  Keeping this field to one key per chain is required by
+   NumPyro's sequential, vectorized, and ``pmap`` chain transforms.
 """
 
 
@@ -81,7 +84,8 @@ class MultiHMCGibbs(MCMCKernel):
     def postprocess_fn(self, args, kwargs):
         from numpyro.infer.util import constrain_fn
         base_model = self.inner_kernels[0].model
-        _ = kwargs.pop("_cond_sites", {})
+        kwargs = {} if kwargs is None else kwargs.copy()
+        kwargs.pop("_cond_sites", None)
         return partial(constrain_fn, base_model, args, kwargs)
 
     def init(self, rng_key, num_warmup, init_params, model_args, model_kwargs):
@@ -108,7 +112,6 @@ class MultiHMCGibbs(MCMCKernel):
                 ).get_trace(*model_args, **model_kwargs)
             z = {}
             hmc_states = []
-            rng_keys = []
             for key_z, kernel in zip(key_zs[1:], self.inner_kernels):
                 cond_sites_kdx = {}
                 init_params_kdx = {} if (init_params is not None) else None
@@ -129,7 +132,6 @@ class MultiHMCGibbs(MCMCKernel):
                     model_kwargs=model_kwargs_kdx
                 )
                 hmc_states.append(hmc_state_kdx)
-                rng_keys.append(hmc_state_kdx.rng_key)
                 z = z | hmc_state_kdx.z
             return MultiHMCGibbsState(
                 z,
@@ -138,7 +140,7 @@ class MultiHMCGibbs(MCMCKernel):
                 jnp.stack([state.accept_prob for state in hmc_states]),
                 jnp.stack([state.num_steps for state in hmc_states]),
                 jnp.stack([state.energy for state in hmc_states]),
-                jnp.stack(rng_keys),
+                key_zs[0],
             )
 
         # not-vectorized
@@ -168,7 +170,6 @@ class MultiHMCGibbs(MCMCKernel):
         accept_prob = []
         num_steps = []
         energy = []
-        rng_keys = []
         for hmc_state, kernel in zip(state.hmc_states, self.inner_kernels):
             # convert z to constrained space for conditioning
             z_constrained = postprocess_fn(z)
@@ -200,9 +201,13 @@ class MultiHMCGibbs(MCMCKernel):
             accept_prob.append(hmc_state.accept_prob)
             num_steps.append(hmc_state.num_steps)
             energy.append(hmc_state.energy)
-            rng_keys.append(hmc_state.rng_key)
             # update new z values (unconstrained space)
             z = z | hmc_state.z
+        # NumPyro treats ``state.rng_key`` as one key per outer chain when it
+        # starts or resumes sequential/vectorized/parallel chains.  The inner
+        # HMC states already advance their own independent keys above; advance
+        # this bookkeeping key without exposing an extra Gibbs-block axis.
+        rng_key, _ = random.split(state.rng_key)
         return MultiHMCGibbsState(
             z,
             hmc_states,
@@ -210,7 +215,7 @@ class MultiHMCGibbs(MCMCKernel):
             jnp.stack(accept_prob),
             jnp.stack(num_steps),
             jnp.stack(energy),
-            jnp.stack(rng_keys),
+            rng_key,
         )
 
     def sample(self, state, model_args, model_kwargs):

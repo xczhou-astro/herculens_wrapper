@@ -40,7 +40,10 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--gpus", default=None,
-        help="One CUDA/MIG identifier or comma-separated MIG UUIDs. Multiple identifiers run independent SVI runs in parallel.",
+        help=(
+            "One CUDA/MIG identifier or comma-separated MIG UUIDs. Multiple "
+            "identifiers run independent SVI fits or parallel HMC chains."
+        ),
     )
     parser.add_argument("--svi-runs", type=int, default=4)
     parser.add_argument("--svi-iterations", type=int, default=10_000)
