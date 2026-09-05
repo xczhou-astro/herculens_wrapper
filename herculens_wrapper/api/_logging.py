@@ -170,9 +170,7 @@ def logged_model_run(method):
             return method(self, sampler, *args, **kwargs)
         with context.capture(f"{type(self).__name__}.run[{sampler.name}]"):
             configuration = self.configuration(sampler=sampler)
-            snapshot = context.save_configuration(configuration)
-            print(f"[api] Model configuration: {snapshot}")
-            print(self.describe(sampler=sampler))
+            context.save_configuration(configuration)
             result = method(self, sampler, *args, **kwargs)
             # A model may be reused for multiple runs.  Pinning the context to
             # each returned result prevents an older result from following the

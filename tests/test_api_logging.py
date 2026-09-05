@@ -80,7 +80,8 @@ def test_model_binds_result_to_the_same_log(tmp_path):
     assert result._run_context.directory == tmp_path
     assert result.output() == tmp_path
     text = (tmp_path / "log.txt").read_text()
-    assert "test model description" in text
+    assert "test model description" not in text
+    assert "Model configuration:" not in text
     assert "sampler body" in text
     assert "result body" in text
     assert (tmp_path / "model_configuration.json").is_file()
