@@ -6,6 +6,20 @@ def safe_float(val, default):
     return float(val) if val is not None else default
 
 
+def _single_pixelated_index(profile_types, component):
+    """Return the sole PIXELATED profile index, or ``None`` when absent."""
+    indices = [
+        index for index, profile_type in enumerate(profile_types or [])
+        if str(profile_type).upper() == 'PIXELATED'
+    ]
+    if len(indices) > 1:
+        raise ValueError(
+            f"Only one PIXELATED {component} component is currently supported; "
+            "combine it with any number of parametric profiles."
+        )
+    return indices[0] if indices else None
+
+
 import jax
 jax.config.update('jax_enable_x64', True)
 import optax
@@ -749,9 +763,14 @@ def create_prob_model(
     noise = Noise(nx=image_data.shape[0], ny=image_data.shape[0], noise_map=noise_map)
 
     # For wavelet_sparsity prior, we need to initialize the RegularizationModel
+    source_types = type_list.get('source_light_type_list', [])
+    pixelated_source_index = _single_pixelated_index(source_types, 'source-light')
+    has_pixelated_source = pixelated_source_index is not None
     pixelated_prior = {}
-    if type_list.get('source_light_type_list') == ['PIXELATED']:
-        pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
+    if has_pixelated_source:
+        pixelated_prior = param_list['source_light_params_list'][pixelated_source_index].get(
+            'pixelated_prior', {}
+        )
     prior_type = pixelated_prior.get('prior_type', 'matern')
 
     source_support_mask = None
@@ -761,7 +780,7 @@ def create_prob_model(
     starlet = None
     nscales = None
     
-    if type_list.get('source_light_type_list') == ['PIXELATED'] and prior_type in ('wavelet_sparsity', 'wavelet_penalty'):
+    if has_pixelated_source and prior_type in ('wavelet_sparsity', 'wavelet_penalty'):
         from herculens.RegulModel.regul_model import RegularizationModel
         
         # 1. Load or estimate kwargs_best
@@ -770,17 +789,17 @@ def create_prob_model(
             try:
                 ks = init_info.get('kwargs_source', [])
                 if (
-                    isinstance(ks, list) and len(ks) > 0
-                    and isinstance(ks[0], dict)
-                    and isinstance(ks[0].get('pixels'), dict)
-                    and ks[0]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
+                    isinstance(ks, list) and len(ks) > pixelated_source_index
+                    and isinstance(ks[pixelated_source_index], dict)
+                    and isinstance(ks[pixelated_source_index].get('pixels'), dict)
+                    and ks[pixelated_source_index]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
                 ):
                     init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
                         os.path.abspath(str(init_params_path))
                     )
-                    npy_name = ks[0]['pixels'].get('file')
+                    npy_name = ks[pixelated_source_index]['pixels'].get('file')
                     npy_path = os.path.join(init_dir, npy_name)
-                    ks0 = dict(ks[0])
+                    ks0 = dict(ks[pixelated_source_index])
                     from herculens_wrapper.utils import load_array_file
                     ks0['pixels'] = load_array_file(npy_path)
                     if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
@@ -788,7 +807,7 @@ def create_prob_model(
                         npy_wn_path = os.path.join(init_dir, npy_wn_name)
                         ks0['pixels_wn'] = load_array_file(npy_wn_path)
                     ks = list(ks)
-                    ks[0] = ks0
+                    ks[pixelated_source_index] = ks0
                     init_info['kwargs_source'] = ks
             except Exception as e:
                 print(f"[Wavelet Init] Could not resolve pixelated source stub: {e}")
@@ -807,14 +826,14 @@ def create_prob_model(
         # 3. Create and initialize RegularizationModel
         if prior_type == 'wavelet_sparsity':
             w_regul_model = RegularizationModel([
-                ('source', 0, 'SPARSITY_STARLET_2'),
-                ('source', 0, 'POSITIVITY'),
+                ('source', pixelated_source_index, 'SPARSITY_STARLET_2'),
+                ('source', pixelated_source_index, 'POSITIVITY'),
             ])
         else:
             w_regul_model = RegularizationModel([
-                ('source', 0, 'SPARSITY_STARLET'),
-                ('source', 0, 'SPARSITY_BLWAVELET'),
-                ('source', 0, 'POSITIVITY'),
+                ('source', pixelated_source_index, 'SPARSITY_STARLET'),
+                ('source', pixelated_source_index, 'SPARSITY_BLWAVELET'),
+                ('source', pixelated_source_index, 'POSITIVITY'),
             ])
         
         print(f"[Wavelet Init] Propagating noise to compute wavelet weights ({prior_type})...")
@@ -929,10 +948,12 @@ def create_prob_model(
 
                         prior_lens_light.append(model)
 
-            if type_list['source_light_type_list'] == ['PIXELATED']:
-                if fix_source_light and kwargs_source_light_fixed is not None:
-                    prior_source_light = _kwargs_list_to_jax(kwargs_source_light_fixed)
-                else:
+            prior_source_light = []
+            if fix_source_light and kwargs_source_light_fixed is not None:
+                prior_source_light = _kwargs_list_to_jax(kwargs_source_light_fixed)
+            else:
+                pixelated_source_kwargs = None
+                if has_pixelated_source:
                     if prior_type == 'wavelet_sparsity':
                         # Detail scales: dist.Laplace(0, b_scales)
                         lambda0, lambda1 = pixelated_prior.get('regul_strengths', (5.0, 5.0))
@@ -964,7 +985,7 @@ def create_prob_model(
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
                         source_pixels = numpyro.deterministic('pixels_source_grid', source_pixels)
                             
-                        prior_source_light = [{'pixels': source_pixels}]
+                        pixelated_source_kwargs = {'pixels': source_pixels}
                     else:
                         ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
                         if prior_type == 'wavelet_penalty':
@@ -975,7 +996,7 @@ def create_prob_model(
                                 event_dim=2
                             )
                             source_pixels = numpyro.deterministic('pixels_source_grid', source_pixels)
-                            prior_source_light = [{'pixels': source_pixels}]
+                            pixelated_source_kwargs = {'pixels': source_pixels}
                         else:
                             k_grid = PowerSpectrum.K_grid((ny, nx))
                             k_values = k_grid.k
@@ -995,15 +1016,14 @@ def create_prob_model(
                                 nonlinear_brightness=bool(pixelated_prior.get('nonlinear_brightness', False)),
                                 nonlinear_terms=int(pixelated_prior.get('nonlinear_terms', 1)),
                             )
-                            prior_source_light = [{'pixels': res['pixels']}]
-            else:
-                prior_source_light = []
-                if fix_source_light and kwargs_source_light_fixed is not None:
-                    prior_source_light = _kwargs_list_to_jax(kwargs_source_light_fixed)
-                
+                            pixelated_source_kwargs = {'pixels': res['pixels']}
+
                 bank['source'] = prior_source_light
-                if not (fix_source_light and kwargs_source_light_fixed is not None) and 'source_light_params_list' in param_list:
+                if 'source_light_params_list' in param_list:
                     for i, source_light_model in enumerate(param_list['source_light_params_list']):
+                        if i == pixelated_source_index:
+                            prior_source_light.append(pixelated_source_kwargs)
+                            continue
                         model = {}
                         for key, param in source_light_model.items():
                             has_override, override_value = _param_override(
@@ -1155,7 +1175,7 @@ def create_prob_model(
                         obs=jnp.asarray(observation['image_data']),
                     )
             hyperparams = []
-            if type_list.get('source_light_type_list') == ['PIXELATED']:
+            if has_pixelated_source:
                 if prior_type == 'wavelet_penalty':
                     lambda_0, lambda_1 = pixelated_prior.get('regul_strengths', (3.0, 3.0))
                     hyperparams = [
@@ -1163,8 +1183,8 @@ def create_prob_model(
                         {'lambda_0': lambda_0},
                         {'strength': lambda_0},
                     ]
-                elif 'factors' in param_list['source_light_params_list'][0]:
-                    hyperparams = param_list['source_light_params_list'][0]['factors']
+                elif 'factors' in param_list['source_light_params_list'][pixelated_source_index]:
+                    hyperparams = param_list['source_light_params_list'][pixelated_source_index]['factors']
 
             if regul_model is not None and not sample_wavelets:
                 regul_ready = True
@@ -1281,11 +1301,11 @@ def create_prob_model(
                         kwargs_lens_light.append(kw)
 
             kwargs_source = []
-            if type_list['source_light_type_list'] == ['PIXELATED']:
-                if fix_source_light and kwargs_source_light_fixed is not None:
-                    kwargs_source = _kwargs_list_to_jax(kwargs_source_light_fixed)
-                else:
-                    pixelated_prior = param_list['source_light_params_list'][0].get('pixelated_prior', {})
+            if fix_source_light and kwargs_source_light_fixed is not None:
+                kwargs_source = _kwargs_list_to_jax(kwargs_source_light_fixed)
+            else:
+                pixelated_source_kwargs = None
+                if has_pixelated_source:
                     if prior_type == 'wavelet_sparsity':
                         source_scales = params['source_scales']
                         source_coarse = params['source_coarse']
@@ -1293,11 +1313,11 @@ def create_prob_model(
                         source_pixels = starlet.reconstruct(all_coeffs)
                         if bool(pixelated_prior.get('positive', True)):
                             source_pixels = jax.nn.softplus(100 * source_pixels) / 100.0
-                        kwargs_source = [{'pixels': source_pixels}]
+                        pixelated_source_kwargs = {'pixels': source_pixels}
                     else:
                         if prior_type == 'wavelet_penalty':
                             source_pixels = params['source_pixels']
-                            kwargs_source = [{'pixels': source_pixels}]
+                            pixelated_source_kwargs = {'pixels': source_pixels}
                         else:
                             ny, nx = lens_image.SourceModel.pixel_grid.num_pixel_axes
                             k_grid = PowerSpectrum.K_grid((ny, nx))
@@ -1322,7 +1342,7 @@ def create_prob_model(
                             if sigma_val is not None:
                                 sigma_val = jnp.ravel(jnp.asarray(sigma_val))[0]
                                 
-                            kwargs_source = [{
+                            pixelated_source_kwargs = {
                                 'pixels': source_pixels,
                                 'pixels_wn': params.get('pixels_wn_source_grid'),
                                 'n_source_grid': n_val,
@@ -1330,37 +1350,35 @@ def create_prob_model(
                                 'sigma_source_grid': sigma_val,
                                 'pow_lam_source_grid': params.get('pow_lam_source_grid'),
                                 'scale_lam_source_grid': params.get('scale_lam_source_grid'),
-                            }]
-            else:
-                kwargs_source = []
-                if fix_source_light and kwargs_source_light_fixed is not None:
-                    kwargs_source = _kwargs_list_to_jax(kwargs_source_light_fixed)
-                
+                            }
+
                 bank['source'] = kwargs_source
-                if not (fix_source_light and kwargs_source_light_fixed is not None):
-                    for i, source_light_model in enumerate(param_list['source_light_params_list']):
-                        kw = {}
-                        for key, param in source_light_model.items():
-                            link_spec = _normalize_link_spec(param)
-                            if link_spec is not None:
-                                kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs source_light[{i}].{key}")
-                            elif key == 'amp':
-                                if f'source_amp_{i}' in params:
-                                    kw['amp'] = params[f'source_amp_{i}']
-                                elif f'source_{key}_{i}' in params:
-                                    kw['amp'] = params[f'source_{key}_{i}']
-                                else:
-                                    kw['amp'] = (
-                                        np.exp(param[0])
-                                        if isinstance(param, list) and len(param) == 2
-                                        else param[0] if isinstance(param, list)
-                                        else param
-                                    )
-                            elif isinstance(param, list):
-                                kw[key] = params[f'source_{key}_{i}']
+                for i, source_light_model in enumerate(param_list['source_light_params_list']):
+                    if i == pixelated_source_index:
+                        kwargs_source.append(pixelated_source_kwargs)
+                        continue
+                    kw = {}
+                    for key, param in source_light_model.items():
+                        link_spec = _normalize_link_spec(param)
+                        if link_spec is not None:
+                            kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs source_light[{i}].{key}")
+                        elif key == 'amp':
+                            if f'source_amp_{i}' in params:
+                                kw['amp'] = params[f'source_amp_{i}']
+                            elif f'source_{key}_{i}' in params:
+                                kw['amp'] = params[f'source_{key}_{i}']
                             else:
-                                kw[key] = param
-                        kwargs_source.append(kw)
+                                kw['amp'] = (
+                                    np.exp(param[0])
+                                    if isinstance(param, list) and len(param) == 2
+                                    else param[0] if isinstance(param, list)
+                                    else param
+                                )
+                        elif isinstance(param, list):
+                            kw[key] = params[f'source_{key}_{i}']
+                        else:
+                            kw[key] = param
+                    kwargs_source.append(kw)
 
             kwargs_point_source = []
             if 'point_source_params_list' in param_list:
@@ -1631,20 +1649,24 @@ def kwargs2params(
                         kwargs['kwargs_lens_light'][i][key]
                     )
     
-    if type_list is not None and type_list.get('source_light_type_list') == ['PIXELATED']:
-        pass
-    else:
-        if not fix_source_light and 'source_light_params_list' in param_list:
-            for i, source_light_model in enumerate(param_list['source_light_params_list']):
-                for key, param in source_light_model.items():
-                    if _normalize_link_spec(param) is None and isinstance(param, list):
-                        if i >= len(kwargs.get('kwargs_source', [])):
-                            continue
-                        if key not in kwargs['kwargs_source'][i]:
-                            continue
-                        params[f'source_{key}_{i}'] = jnp.asarray(
-                            kwargs['kwargs_source'][i][key]
-                        )
+    source_pixel_index = None
+    if type_list is not None:
+        source_pixel_index = _single_pixelated_index(
+            type_list.get('source_light_type_list', []), 'source-light',
+        )
+    if not fix_source_light and 'source_light_params_list' in param_list:
+        for i, source_light_model in enumerate(param_list['source_light_params_list']):
+            if i == source_pixel_index:
+                continue
+            for key, param in source_light_model.items():
+                if _normalize_link_spec(param) is None and isinstance(param, list):
+                    if i >= len(kwargs.get('kwargs_source', [])):
+                        continue
+                    if key not in kwargs['kwargs_source'][i]:
+                        continue
+                    params[f'source_{key}_{i}'] = jnp.asarray(
+                        kwargs['kwargs_source'][i][key]
+                    )
     if 'point_source_params_list' in param_list and 'kwargs_point_source' in kwargs:
         ps_type_list = [None] * len(param_list['point_source_params_list'])
         for i, point_source_model in enumerate(param_list['point_source_params_list']):
@@ -1729,10 +1751,10 @@ def get_init_params(
                     "Pixelated-source HMC must be initialized by an SVI run, "
                     f"but {init_config_path!r} records sampler={init_sampler!r}."
                 )
-            if init_source_types != ['PIXELATED']:
+            if 'PIXELATED' not in [str(value).upper() for value in init_source_types]:
                 raise ValueError(
                     "Pixelated-source HMC must be initialized by an SVI run "
-                    "using source_light_type_list=['PIXELATED'], but "
+                    "containing a PIXELATED source-light profile, but "
                     f"{init_config_path!r} records {init_source_types!r}."
                 )
 
@@ -1740,15 +1762,19 @@ def get_init_params(
         print(f"[Init] Loading kwargs from prior run: {init_dir}")
         try:
             ks = init_info.get('kwargs_source', [])
+            pixelated_source_index = _single_pixelated_index(
+                type_list.get('source_light_type_list', []), 'source-light',
+            )
             if (
-                isinstance(ks, list) and len(ks) > 0
-                and isinstance(ks[0], dict)
-                and isinstance(ks[0].get('pixels'), dict)
-                and ks[0]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
+                pixelated_source_index is not None
+                and isinstance(ks, list) and len(ks) > pixelated_source_index
+                and isinstance(ks[pixelated_source_index], dict)
+                and isinstance(ks[pixelated_source_index].get('pixels'), dict)
+                and ks[pixelated_source_index]['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
             ):
-                npy_name = ks[0]['pixels'].get('file')
+                npy_name = ks[pixelated_source_index]['pixels'].get('file')
                 npy_path = os.path.join(init_dir, npy_name)
-                ks0 = dict(ks[0])
+                ks0 = dict(ks[pixelated_source_index])
                 from herculens_wrapper.utils import load_array_file
                 ks0['pixels'] = load_array_file(npy_path)
                 if 'pixels_wn' in ks0 and isinstance(ks0['pixels_wn'], dict) and ks0['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
@@ -1756,7 +1782,7 @@ def get_init_params(
                     npy_wn_path = os.path.join(init_dir, npy_wn_name)
                     ks0['pixels_wn'] = load_array_file(npy_wn_path)
                 ks = list(ks)
-                ks[0] = ks0
+                ks[pixelated_source_index] = ks0
                 init_info['kwargs_source'] = ks
         except Exception as e:
             if require_pixelated_svi:
@@ -1781,15 +1807,21 @@ def get_init_params(
                 sample_wavelets=sample_wavelets, starlet_method=None
             )
             src_types = type_list.get('source_light_type_list', [])
-            if src_types == ['PIXELATED'] and not fix_source_light:
+            pixelated_source_index = _single_pixelated_index(src_types, 'source-light')
+            if pixelated_source_index is not None and not fix_source_light:
                 ks = init_info.get('kwargs_source', [])
-                if ks and isinstance(ks[0], dict) and 'pixels' in ks[0]:
-                    has_pixel_array = not isinstance(ks[0]['pixels'], dict)
+                if (
+                    len(ks) > pixelated_source_index
+                    and isinstance(ks[pixelated_source_index], dict)
+                    and 'pixels' in ks[pixelated_source_index]
+                ):
+                    pixelated_values = ks[pixelated_source_index]
+                    has_pixel_array = not isinstance(pixelated_values['pixels'], dict)
                     if has_pixel_array:
-                        pixels_proj = jnp.asarray(ks[0]['pixels'], dtype=jnp.float64)
+                        pixels_proj = jnp.asarray(pixelated_values['pixels'], dtype=jnp.float64)
                     else:
                         from herculens_wrapper.utils import load_array_file
-                        pixels_proj = load_array_file(os.path.join(init_dir, ks[0]['pixels'].get('file')))
+                        pixels_proj = load_array_file(os.path.join(init_dir, pixelated_values['pixels'].get('file')))
                     
                     prior_type = getattr(prob_model, 'prior_type', 'matern')
                     if prior_type == 'wavelet_sparsity':
@@ -1802,7 +1834,7 @@ def get_init_params(
                         print("[Init] Loading target source image directly for wavelet_penalty...")
                         loaded_params['source_pixels'] = pixels_proj
                     else:
-                        ks0 = ks[0]
+                        ks0 = pixelated_values
                         if 'pixels_wn' in ks0 and ks0['pixels_wn'] is not None:
                             print("[Init] Loading Matérn power spectrum parameters and pixels_wn directly from prior run...")
                             loaded_params['pixels_wn_source_grid'] = jnp.asarray(ks0['pixels_wn'], dtype=jnp.float64)
@@ -1926,28 +1958,27 @@ def resolve_fixed_kwargs(init_params_path, component):
             f"Fixing {component} requires {key!r} in the init kwargs file at {init_params_path!r}."
         )
         
-    if component == 'source_light' and isinstance(fixed, list) and len(fixed) > 0:
-        kw = fixed[0]
-        if isinstance(kw, dict):
-            import numpy as np
-            init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
-                os.path.abspath(str(init_params_path))
-            )
-            fixed_copy = list(fixed)
-            fixed_copy[0] = dict(kw)
-            
-            if isinstance(kw.get('pixels'), dict) and kw['pixels'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
-                npy_name = kw['pixels'].get('file')
-                npy_path = os.path.join(init_dir, npy_name)
+    if component == 'source_light' and isinstance(fixed, list):
+        init_dir = init_params_path if os.path.isdir(str(init_params_path)) else os.path.dirname(
+            os.path.abspath(str(init_params_path))
+        )
+        fixed_copy = list(fixed)
+        for index, kw in enumerate(fixed):
+            if not isinstance(kw, dict):
+                continue
+            fixed_copy[index] = dict(kw)
+            for pixel_key in ('pixels', 'pixels_wn'):
+                stub = kw.get(pixel_key)
+                if not (
+                    isinstance(stub, dict)
+                    and stub.get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}
+                ):
+                    continue
                 from herculens_wrapper.utils import load_array_file
-                fixed_copy[0]['pixels'] = load_array_file(npy_path)
-                
-            if isinstance(kw.get('pixels_wn'), dict) and kw['pixels_wn'].get('_format') in {'pixelated_pixels_fits', 'pixelated_pixels_npy'}:
-                npy_wn_name = kw['pixels_wn'].get('file')
-                npy_wn_path = os.path.join(init_dir, npy_wn_name)
-                fixed_copy[0]['pixels_wn'] = load_array_file(npy_wn_path)
-                
-            fixed = fixed_copy
+                fixed_copy[index][pixel_key] = load_array_file(
+                    os.path.join(init_dir, stub.get('file'))
+                )
+        fixed = fixed_copy
             
     return fixed
 
@@ -2385,14 +2416,9 @@ def create_lens_image(
 
     lens_mass_model = MassModel(type_list['lens_mass_type_list'])
     lens_light_types = type_list['lens_light_type_list']
-    pixelated_lens_indices = [
-        index for index, profile_type in enumerate(lens_light_types)
-        if profile_type == 'PIXELATED'
-    ]
-    if len(pixelated_lens_indices) > 1:
-        raise ValueError("Only one PIXELATED lens-light component is currently supported.")
-    if pixelated_lens_indices:
-        pixelated_lens_params = param_list['lens_light_params_list'][pixelated_lens_indices[0]]
+    pixelated_lens_index = _single_pixelated_index(lens_light_types, 'lens-light')
+    if pixelated_lens_index is not None:
+        pixelated_lens_params = param_list['lens_light_params_list'][pixelated_lens_index]
         lens_grid_settings = dict(pixelated_lens_params.get('pixel_grid', {}))
         # interpolation is a profile setting in Herculens, not a PixelGrid
         # setting.  Supply an explicit profile instance while retaining the
@@ -2400,17 +2426,23 @@ def create_lens_image(
         from herculens.LightModel.Profiles.pixelated import Pixelated
         interpolation = lens_grid_settings.pop('pixel_interpol', 'fast_bilinear')
         lens_profiles = list(lens_light_types)
-        lens_profiles[pixelated_lens_indices[0]] = Pixelated(interpolation_type=interpolation)
+        lens_profiles[pixelated_lens_index] = Pixelated(interpolation_type=interpolation)
         lens_light_model = LightModel(lens_profiles, kwargs_pixelated=lens_grid_settings)
     else:
         lens_light_model = LightModel(lens_light_types)
     src_types = type_list['source_light_type_list']
+    pixelated_source_index = _single_pixelated_index(src_types, 'source-light')
     rtu_source_settings = None
-    if src_types == ['PIXELATED']:
-        kwargs_pixelated = param_list['source_light_params_list'][0]
+    if pixelated_source_index is not None:
+        kwargs_pixelated = param_list['source_light_params_list'][pixelated_source_index]
         source_kwargs_pixelated = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
         if source_kwargs_pixelated.get('grid_kind', 'uniform') == 'ray_transformed_uniform':
             rtu_source_settings = source_kwargs_pixelated
+            if len(src_types) > 1:
+                raise ValueError(
+                    "A ray-transformed-uniform PIXELATED source cannot currently be "
+                    "combined with parametric source-light profiles."
+                )
         # RTU itself performs the adaptive mapping before evaluating the
         # profile.  Once in (u, v) coordinates the Pixelated profile lives on
         # a fixed regular grid, so it must not enter Herculens' separate
@@ -2442,7 +2474,21 @@ def create_lens_image(
                 },
             )
         else:
-            source_light_model = LightModel(src_types, kwargs_pixelated=source_kwargs_pixelated)
+            native_grid_settings = {
+                'num_pixels': int(source_kwargs_pixelated.get('pixel_grid_shape', 100)),
+                'pixel_scale_factor': source_kwargs_pixelated.get('pixel_scale_factor', 0.5),
+                'grid_center': source_kwargs_pixelated.get('grid_center'),
+                'grid_shape': source_kwargs_pixelated.get('grid_shape'),
+            }
+            native_grid_settings = {
+                key: value for key, value in native_grid_settings.items()
+                if value is not None
+            }
+            source_light_model = LightModel(
+                src_types,
+                pixel_interpol=source_kwargs_pixelated.get('pixel_interpol', 'fast_bilinear'),
+                kwargs_pixelated=native_grid_settings,
+            )
     else:
         source_light_model = LightModel(src_types)
 
@@ -2490,6 +2536,9 @@ def validate_param_list(type_list, param_list):
             )
         if has_t and len(type_list[type_key]) != len(param_list[param_key]):
             raise ValueError(f"Length mismatch for {type_key} / {param_key}.")
+
+    _single_pixelated_index(type_list.get('lens_light_type_list', []), 'lens-light')
+    _single_pixelated_index(type_list.get('source_light_type_list', []), 'source-light')
 
     for index, (profile_type, params) in enumerate(zip(
         type_list.get("lens_mass_type_list", []),

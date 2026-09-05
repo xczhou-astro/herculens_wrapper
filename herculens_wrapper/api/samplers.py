@@ -24,6 +24,16 @@ _SVI_COMPLETION_FILES = (
 )
 
 
+def _pixelated_source_index(type_list, kwargs_source=None):
+    for index, profile_type in enumerate(type_list.get("source_light_type_list", [])):
+        if str(profile_type).upper() == "PIXELATED":
+            return index
+    return next((
+        index for index, values in enumerate(kwargs_source or [])
+        if isinstance(values, Mapping) and "pixels" in values
+    ), None)
+
+
 def is_completed_svi_run(save_path: str | Path) -> bool:
     """Return whether a standard API SVI run was exported successfully.
 
@@ -610,7 +620,9 @@ def hmc_one_sigma_kwargs(
     # actual 16th/84th-percentile offsets are saved as LOWER/UPPER extensions
     # by ``evaluate_mcmc_source_pixels_summary``; do not replace them here by
     # a parameter-wise RMS approximation.
-    source = (one_sigma.get("kwargs_source") or [{}])[0]
+    source_values = one_sigma.get("kwargs_source") or []
+    source_index = _pixelated_source_index(type_list, source_values)
+    source = source_values[source_index] if source_index is not None else None
     if isinstance(source, Mapping):
         source.pop("pixels", None)
         # ``pixels_wn`` is an internal latent field, not a physical source
@@ -630,7 +642,8 @@ def hmc_one_sigma_kwargs(
         references_already_saved=True,
         pixels_wn_hdu="SIGMA",
     )
-    source_json = (sigma_json.get("kwargs_source") or [{}])[0]
+    source_json_values = sigma_json.get("kwargs_source") or []
+    source_json = source_json_values[source_index] if source_index is not None else None
     if isinstance(source_json, dict):
         source_json.pop("pixels", None)
         source_json["pixels_lower"] = {
@@ -1073,9 +1086,12 @@ class FitResult:
         model = self._require_model()
         kwargs = self.derived.get("kwargs") or self._kwargs_result()
         sources = kwargs.get("kwargs_source", [])
-        if not sources or "pixels" not in sources[0]:
+        pixelated_source_index = _pixelated_source_index({}, sources)
+        if pixelated_source_index is None:
             raise RuntimeError("This result does not contain a pixelated source reconstruction.")
-        pixels = np.asarray(self.derived.get("source_plane", sources[0]["pixels"]))
+        pixels = np.asarray(self.derived.get(
+            "source_plane", sources[pixelated_source_index]["pixels"],
+        ))
         if getattr(model.lens_image, "_rtu_grid_source", False):
             x_corners, y_corners = model.lens_image.get_rtu_source_plane_grid(kwargs.get("kwargs_lens"))
             return {
@@ -1455,9 +1471,12 @@ class FitResult:
         kwargs_for_plots = kwargs_best
         skipped: dict[str, str] = {}
         source_plane = self.derived.get("source_plane") if self.samples is not None else None
-        if source_plane is not None and kwargs_best.get("kwargs_source"):
+        pixelated_source_index = _pixelated_source_index(
+            type_list, kwargs_best.get("kwargs_source"),
+        )
+        if source_plane is not None and pixelated_source_index is not None:
             kwargs_for_plots = deepcopy(kwargs_best)
-            kwargs_for_plots["kwargs_source"][0]["pixels"] = source_plane
+            kwargs_for_plots["kwargs_source"][pixelated_source_index]["pixels"] = source_plane
         kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_for_plots, str(directory), type_list)
         kwargs_result_path = directory / "kwargs_result.json"
         with kwargs_result_path.open("w") as stream:
@@ -1466,14 +1485,14 @@ class FitResult:
         # Keep the conventional source-pixel filename, but make RTU outputs
         # self-contained: its physical, non-uniform source-plane cell corners
         # live beside the primary brightness array in the same FITS file.
-        if getattr(model.lens_image, "_rtu_grid_source", False) and kwargs_for_plots.get("kwargs_source"):
+        if getattr(model.lens_image, "_rtu_grid_source", False) and pixelated_source_index is not None:
             try:
                 x_corners, y_corners = model.lens_image.get_rtu_source_plane_grid(
                     kwargs_for_plots.get("kwargs_lens"),
                 )
                 save_rtu_source_fits(
                     directory / "kwargs_source_pixels.fits",
-                    kwargs_for_plots["kwargs_source"][0]["pixels"], x_corners, y_corners,
+                    kwargs_for_plots["kwargs_source"][pixelated_source_index]["pixels"], x_corners, y_corners,
                     polynomial_order=getattr(model.lens_image, "_rtu_polynomial_order", None),
                 )
             except Exception as error:
@@ -1531,7 +1550,12 @@ class FitResult:
                     lambda value: np.asarray(value).std(axis=0), posterior,
                 )
                 sigma_kwargs = model.prob_model.params2kwargs(sigma_parameters)
-                sigma_source = (sigma_kwargs.get("kwargs_source") or [{}])[0]
+                sigma_source_values = sigma_kwargs.get("kwargs_source") or []
+                sigma_source_index = _pixelated_source_index(type_list, sigma_source_values)
+                sigma_source = (
+                    sigma_source_values[sigma_source_index]
+                    if sigma_source_index is not None else {}
+                )
                 from ..utils import append_array_fits
                 if sigma_source.get("pixels") is not None:
                     append_array_fits(directory / "kwargs_source_pixels.fits", sigma_source["pixels"])

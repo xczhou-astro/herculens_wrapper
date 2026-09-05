@@ -34,6 +34,15 @@ def band_site_prefix(index, band_name):
     return label
 
 
+def _pixelated_source_index(type_list):
+    return next((
+        index for index, profile_type in enumerate(
+            type_list.get('source_light_type_list', [])
+        )
+        if str(profile_type).upper() == 'PIXELATED'
+    ), None)
+
+
 def create_multiband_prob_model(
     bands,
     lens_mass_params_list,
@@ -161,19 +170,19 @@ def create_multiband_prob_model(
                         )
 
             source_types = band['type_list'].get('source_light_type_list', [])
-            if source_types == ['PIXELATED']:
+            pixelated_source_index = _pixelated_source_index(band['type_list'])
+            if pixelated_source_index is not None:
                 order.extend(
                     f'{prefix}{key}' for key in (
                         'n_source_grid', 'rho_source_grid',
                         'sigma_source_grid', 'pixels_wn_source_grid',
                     )
                 )
-            else:
-                for index, source_model in enumerate(param_list.get('source_light_params_list', [])):
-                    if isinstance(source_model, dict):
-                        order.extend(
-                            f'{prefix}source_{key}_{index}' for key in source_model
-                        )
+            for index, source_model in enumerate(param_list.get('source_light_params_list', [])):
+                if index != pixelated_source_index and isinstance(source_model, dict):
+                    order.extend(
+                        f'{prefix}source_{key}_{index}' for key in source_model
+                    )
 
             for index, point_source_model in enumerate(param_list.get('point_source_params_list', [])):
                 if isinstance(point_source_model, dict):
@@ -302,12 +311,12 @@ def _create_fully_shared_multidata_prob_model(
                     )
                 else:
                     order.extend(f'lens_light_{key}_{index}' for key in light_model)
-        if reference_type_list.get('source_light_type_list') == ['PIXELATED']:
+        pixelated_source_index = _pixelated_source_index(reference_type_list)
+        if pixelated_source_index is not None:
             order.extend(('n_source_grid', 'rho_source_grid', 'sigma_source_grid', 'pixels_wn_source_grid'))
-        else:
-            for index, source_model in enumerate(reference_param_list.get('source_light_params_list', [])):
-                if isinstance(source_model, dict):
-                    order.extend(f'source_{key}_{index}' for key in source_model)
+        for index, source_model in enumerate(reference_param_list.get('source_light_params_list', [])):
+            if index != pixelated_source_index and isinstance(source_model, dict):
+                order.extend(f'source_{key}_{index}' for key in source_model)
         for index, point_source_model in enumerate(reference_param_list.get('point_source_params_list', [])):
             if isinstance(point_source_model, dict):
                 order.extend(f'ps_{key}_{index}' for key in point_source_model)
@@ -360,11 +369,12 @@ def _shared_site_name(component, key, index):
 def _shareable_entries(param_list, type_list, component):
     """Return ordinary NumPyro sites which can be tied across observations."""
     list_key, _ = _SHARED_COMPONENT_CONFIG[component]
-    if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
-        return []
+    pixelated_source_index = _pixelated_source_index(type_list)
     entries = []
     for index, model in enumerate(param_list.get(list_key, [])):
         if not isinstance(model, dict):
+            continue
+        if component == 'source_light' and index == pixelated_source_index:
             continue
         for key, prior in model.items():
             if component == 'point_source' and key in ('n_images', 'sigma_image', 'sigma_source'):
@@ -378,12 +388,11 @@ def _shareable_entries(param_list, type_list, component):
 def _local_site_order(param_list, type_list):
     order = []
     for component in _SHARED_COMPONENT_CONFIG:
-        if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
+        if component == 'source_light' and _pixelated_source_index(type_list) is not None:
             order.extend((
                 'n_source_grid', 'rho_source_grid', 'sigma_source_grid',
                 'pixels_wn_source_grid',
             ))
-            continue
         order.extend(entry[-1] for entry in _shareable_entries(param_list, type_list, component))
     return order
 
@@ -412,9 +421,14 @@ def _parse_shared_specs(shared_specs, param_list, type_list):
                 'source_light, or point_source.'
             )
         selector = selector_text.strip() if separator else ''
-        if component == 'source_light' and type_list.get('source_light_type_list') == ['PIXELATED']:
+        if (
+            component == 'source_light'
+            and _pixelated_source_index(type_list) is not None
+            and (not selector or selector.lower() in {'all', 'pixelated', 'pixels'})
+        ):
             requested_pixelated_source = True
-            continue
+            if selector.lower() in {'pixelated', 'pixels'}:
+                continue
         requested_keys = None if not selector or selector.lower() == 'all' else {
             value.strip() for value in selector.split(',') if value.strip()
         }
@@ -447,7 +461,7 @@ def _all_existing_components_requested(shared_specs, param_list, type_list):
         for entry in _shareable_entries(param_list, type_list, component)
     ]
     all_standard_sites = {entry[-1] for entry in all_entries}
-    source_is_pixelated = type_list.get('source_light_type_list') == ['PIXELATED']
+    source_is_pixelated = _pixelated_source_index(type_list) is not None
     return (
         set(selected) == all_standard_sites
         and (not source_is_pixelated or pixelated_source)

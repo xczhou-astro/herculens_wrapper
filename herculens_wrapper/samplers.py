@@ -98,6 +98,14 @@ def median_deterministics_from_samples(samples, active_sites=None):
     return deterministics
 
 
+def _pixelated_kwargs_index(kwargs_source):
+    """Locate a pixelated entry in a mixed source-light kwargs list."""
+    return next((
+        index for index, values in enumerate(kwargs_source or [])
+        if isinstance(values, dict) and 'pixels' in values
+    ), None)
+
+
 def kwargs_with_deterministics(prob_model, params, deterministics=None, rng_seed=0, active_sites=None):
     """
     Convert constrained parameters to kwargs, replacing model-derived outputs
@@ -108,11 +116,9 @@ def kwargs_with_deterministics(prob_model, params, deterministics=None, rng_seed
         deterministics = {}
 
     kwargs_source = kwargs.get('kwargs_source', None)
+    pixelated_source_index = _pixelated_kwargs_index(kwargs_source)
     needs_pixels = (
-        kwargs_source is not None
-        and len(kwargs_source) > 0
-        and isinstance(kwargs_source[0], dict)
-        and 'pixels' in kwargs_source[0]
+        pixelated_source_index is not None
         and 'pixels_source_grid' not in deterministics
     )
     if 'model_image' not in deterministics or needs_pixels:
@@ -126,12 +132,10 @@ def kwargs_with_deterministics(prob_model, params, deterministics=None, rng_seed
         deterministics = computed_deterministics
 
     if (
-        kwargs_source is not None
-        and len(kwargs_source) > 0
-        and isinstance(kwargs_source[0], dict)
+        pixelated_source_index is not None
         and 'pixels_source_grid' in deterministics
     ):
-        kwargs_source[0]['pixels'] = deterministics['pixels_source_grid']
+        kwargs_source[pixelated_source_index]['pixels'] = deterministics['pixels_source_grid']
 
     return kwargs, deterministics
 
@@ -195,8 +199,11 @@ def evaluate_parameter_components(prob_model, params, *, rng_seed=0):
     if image_data is not None:
         derived["data_minus_lens_light"] = np.asarray(image_data) - lens_light
     source_kwargs = kwargs.get("kwargs_source", [])
-    if source_kwargs and isinstance(source_kwargs[0], dict) and "pixels" in source_kwargs[0]:
-        derived["source_plane"] = np.asarray(source_kwargs[0]["pixels"])
+    pixelated_source_index = _pixelated_kwargs_index(source_kwargs)
+    if pixelated_source_index is not None:
+        derived["source_plane"] = np.asarray(
+            source_kwargs[pixelated_source_index]["pixels"]
+        )
     return derived
 
 
@@ -1854,7 +1861,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 prob_model, temp_samples, diag_dir, save_npy=False,
             )
             if source_summary is not None and temp_kwargs.get('kwargs_source'):
-                temp_kwargs['kwargs_source'][0]['pixels'] = source_summary[0]
+                pixelated_source_index = _pixelated_kwargs_index(temp_kwargs['kwargs_source'])
+                if pixelated_source_index is not None:
+                    temp_kwargs['kwargs_source'][pixelated_source_index]['pixels'] = source_summary[0]
 
             from herculens_wrapper.visualizations import (
                 plot_composite_2x3_panel,

@@ -18,6 +18,20 @@ _PROFILE_PARAMETERS = {
 }
 
 
+def _pixelated_source_kwargs(kwargs):
+    return next((
+        values for values in kwargs.get("kwargs_source", [])
+        if isinstance(values, Mapping) and "pixels" in values
+    ), {})
+
+
+def _analytic_source_kwargs(kwargs, parameter_names):
+    return next((
+        values for values in kwargs.get("kwargs_source", [])
+        if isinstance(values, Mapping) and all(name in values for name in parameter_names)
+    ), {})
+
+
 def _read_truth(value: Mapping[str, Any] | str | Path | None) -> dict[str, Any] | None:
     if value is None:
         return None
@@ -244,8 +258,8 @@ def _truth_map(
     truth_data = _read_truth(truth)
     if truth_data is None:
         return None, None, None
-    source_truth = (truth_data.get("kwargs_source") or [{}])[0]
     for profile, names in _PROFILE_PARAMETERS.items():
+        source_truth = _analytic_source_kwargs(truth_data, names)
         if all(name in source_truth for name in names):
             values = dict(source_truth)
             if coordinate_center is not None:
@@ -603,7 +617,7 @@ def fit_analytic_pixelated_source(
         raise FileNotFoundError("hmc_run must contain hmc_samples.h5, kwargs_result.json, and kwargs_source_pixels.fits.")
     with kwargs_path.open() as stream:
         result_kwargs = json.load(stream)
-    source_kwargs = (result_kwargs.get("kwargs_source") or [{}])[0]
+    source_kwargs = _pixelated_source_kwargs(result_kwargs)
     if model is not None:
         if getattr(model.lens_image, "_rtu_grid_source", False):
             raise NotImplementedError("Strict analytic source fitting currently supports uniform grids only.")
@@ -632,7 +646,7 @@ def fit_analytic_pixelated_source(
         for index in selected:
             draw = {name: np.asarray(values)[index] for name, values in samples.items()}
             kwargs = model.prob_model.params2kwargs(draw)
-            pixels = np.asarray(kwargs["kwargs_source"][0]["pixels"])
+            pixels = np.asarray(_pixelated_source_kwargs(kwargs)["pixels"])
             sx, sy, _ = model.lens_image.get_source_coordinates(
                 kwargs.get("kwargs_lens"), force=True, npix_src=pixels.shape[0],
                 source_grid_scale=model.source_grid_scale,
@@ -671,7 +685,7 @@ def fit_analytic_pixelated_source(
     truth_data = _read_truth(truth)
     truth_values = None
     if truth_data is not None:
-        source_truth = (truth_data.get("kwargs_source") or [{}])[0]
+        source_truth = _analytic_source_kwargs(truth_data, parameter_names)
         if all(name in source_truth for name in parameter_names):
             truth_values = np.asarray([source_truth[name] for name in parameter_names], dtype=float)
 

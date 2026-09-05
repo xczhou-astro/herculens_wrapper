@@ -320,6 +320,37 @@ source = PixelatedSource(
 
 `prior_type` 支持 `matern`、`wavelet_sparsity` 和 `wavelet_penalty`。
 
+### Parametric + pixelated light
+
+Lens light 和 source light 都可以同时包含 parametric profile 与一个
+pixelated profile；各分量的亮度会相加：
+
+```python
+from herculens_wrapper.api import PixelatedLensLight, PixelatedSource
+
+profiles = LensProfileCollection(
+    lens_mass=lens_mass,
+    lens_light=[
+        lens_bulge,  # 例如 LightProfile("SERSIC_ELLIPSE", ...)
+        PixelatedLensLight(
+            scale_factor=1.0,
+            matern_prior={"positive": True},
+        ),
+    ],
+    source_light=[
+        source_core,  # 例如 LightProfile("SERSIC_ELLIPSE", ...)
+        PixelatedSource(
+            pixel_grid={"pixel_grid_shape": 80},
+            pixelated_prior={"prior_type": "matern", "positive": True},
+        ),
+    ],
+)
+```
+
+每个 light block 目前最多包含一个 `PIXELATED` profile，但可以同时包含任意数量的
+parametric profiles，且 `PIXELATED` 可以位于列表中的任意位置。RTU source grid 目前仍要求
+source light 中只有 `PixelatedSource`；uniform/adaptive pixel grid 支持上述混合模型。
+
 ## 6. SingleBandModel
 
 ### 创建和查看模型

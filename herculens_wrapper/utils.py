@@ -753,10 +753,16 @@ def kwargs_best_to_json_pixelated_npy(
 ):
     import copy
     out = copy.deepcopy(kwargs_best)
-    if type_list.get('source_light_type_list') == ['PIXELATED']:
+    source_types = type_list.get('source_light_type_list', [])
+    pixelated_source_indices = [
+        index for index, profile_type in enumerate(source_types)
+        if str(profile_type).upper() == 'PIXELATED'
+    ]
+    if pixelated_source_indices:
+        pixelated_source_index = pixelated_source_indices[0]
         ks = out.get('kwargs_source', [])
-        if ks and isinstance(ks[0], dict):
-            ks0 = dict(ks[0])
+        if len(ks) > pixelated_source_index and isinstance(ks[pixelated_source_index], dict):
+            ks0 = dict(ks[pixelated_source_index])
             if 'pixels' in ks0 and ks0['pixels'] is not None:
                 if save_pixel_arrays:
                     pixels = np.asarray(ks0['pixels'])
@@ -792,7 +798,7 @@ def kwargs_best_to_json_pixelated_npy(
                         **({} if pixels_wn_hdu in (0, 'PRIMARY') else {'hdu': pixels_wn_hdu}),
                     }
             ks = list(ks)
-            ks[0] = ks0
+            ks[pixelated_source_index] = ks0
             out['kwargs_source'] = ks
     lens_types = type_list.get('lens_light_type_list', [])
     lens_kwargs = out.get('kwargs_lens_light', [])

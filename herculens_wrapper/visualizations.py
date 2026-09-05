@@ -31,6 +31,14 @@ _MATERN_HYPERPARAMETER_SITES = frozenset({
 })
 
 
+def _pixelated_source_entry(kwargs):
+    values = kwargs.get('kwargs_source', []) if isinstance(kwargs, dict) else []
+    return next((
+        (index, source) for index, source in enumerate(values)
+        if isinstance(source, dict) and 'pixels' in source
+    ), (None, None))
+
+
 def _is_matern_hyperparameter(name):
     """Match local Matérn sites, including scoped multi-band names."""
     base_name = str(name).split('[', 1)[0]
@@ -448,17 +456,13 @@ def plot_source_plane(
     source_arc_mask=None,
 ):
     """Plot source-plane values in Herculens image-data-pixel flux units."""
-    is_pixelated = (
-        'kwargs_source' in kwargs_result
-        and len(kwargs_result['kwargs_source']) > 0
-        and isinstance(kwargs_result['kwargs_source'][0], dict)
-        and 'pixels' in kwargs_result['kwargs_source'][0]
-    )
+    _, pixelated_source = _pixelated_source_entry(kwargs_result)
+    is_pixelated = pixelated_source is not None
     is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
 
     is_adaptive = False
     if is_pixelated:
-        source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
+        source_for_plot = np.asarray(pixelated_source['pixels'])
         if is_rtu:
             xx, yy = lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens', None))
             xx, yy = np.asarray(xx), np.asarray(yy)
@@ -731,15 +735,11 @@ def plot_composite_2x3_panel(
     subtracted = image_data - model_lens_light
 
     # 2. Evaluate source plane reconstruction
-    is_pixelated = (
-        'kwargs_source' in kwargs_result
-        and len(kwargs_result['kwargs_source']) > 0
-        and isinstance(kwargs_result['kwargs_source'][0], dict)
-        and 'pixels' in kwargs_result['kwargs_source'][0]
-    )
+    _, pixelated_source = _pixelated_source_entry(kwargs_result)
+    is_pixelated = pixelated_source is not None
 
     if is_pixelated:
-        source_for_plot = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
+        source_for_plot = np.asarray(pixelated_source['pixels'])
         if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             kwargs_lens = kwargs_result.get('kwargs_lens', None)
             npix_src = source_for_plot.shape[0]
@@ -978,8 +978,8 @@ def plot_multiband_composite(
         chi2 = float(np.sum(residual ** 2))
         data_minus_lens = image_data - model_lens_light
 
-        source = kwargs_result.get('kwargs_source', [{}])[0]
-        source_pixels = source.get('pixels')
+        _, pixelated_source = _pixelated_source_entry(kwargs_result)
+        source_pixels = None if pixelated_source is None else pixelated_source.get('pixels')
         if source_pixels is not None and getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             source_pixels = np.asarray(source_pixels)
             _, _, extent_src = lens_image.get_source_coordinates(
@@ -1200,7 +1200,9 @@ def plot_hmc_chain_comparison(
             prob_model, chain_samples, save_path=None, save_npy=False,
         )
         if source_summary is not None and kwargs_result.get('kwargs_source'):
-            kwargs_result['kwargs_source'][0]['pixels'] = source_summary[0]
+            pixelated_index, _ = _pixelated_source_entry(kwargs_result)
+            if pixelated_index is not None:
+                kwargs_result['kwargs_source'][pixelated_index]['pixels'] = source_summary[0]
 
         component_medians = evaluate_mcmc_component_medians(
             prob_model,
@@ -1232,8 +1234,8 @@ def plot_hmc_chain_comparison(
 def plot_multiband_source_reconstructions(band_results, save_path, output_filename):
     """Plot one initial or final pixelated source reconstruction per band."""
     def has_pixels(band):
-        source = band['kwargs_result'].get('kwargs_source', [])
-        return bool(source) and isinstance(source[0], dict) and source[0].get('pixels') is not None
+        _, source = _pixelated_source_entry(band['kwargs_result'])
+        return source is not None and source.get('pixels') is not None
 
     pixelated_bands = [band for band in band_results if has_pixels(band)]
     if not pixelated_bands:
@@ -1243,7 +1245,8 @@ def plot_multiband_source_reconstructions(band_results, save_path, output_filena
     for row, band in enumerate(pixelated_bands):
         lens_image = band['lens_image']
         kwargs_result = band['kwargs_result']
-        source_pixels = np.asarray(kwargs_result['kwargs_source'][0]['pixels'])
+        _, pixelated_source = _pixelated_source_entry(kwargs_result)
+        source_pixels = np.asarray(pixelated_source['pixels'])
         if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             _, _, extent = lens_image.get_source_coordinates(
                 kwargs_result.get('kwargs_lens'), npix_src=source_pixels.shape[0],
@@ -1720,12 +1723,8 @@ def display_init(
         residual_vis_max=residual_vis_max,
     )
 
-    is_pixelated = (
-        'kwargs_source' in kwargs_init
-        and len(kwargs_init['kwargs_source']) > 0
-        and isinstance(kwargs_init['kwargs_source'][0], dict)
-        and 'pixels' in kwargs_init['kwargs_source'][0]
-    )
+    _, pixelated_source = _pixelated_source_entry(kwargs_init)
+    is_pixelated = pixelated_source is not None
     if is_pixelated:
         try:
             plot_source_plane(

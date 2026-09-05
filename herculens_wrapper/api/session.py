@@ -416,8 +416,13 @@ class SingleBandModel:
             # from the median Fourier coefficients.
             if kwargs.get("kwargs_source"):
                 kwargs = deepcopy(kwargs)
-                kwargs["kwargs_source"][0]["pixels"] = median
-                derived["kwargs"] = kwargs
+                pixelated_index = next((
+                    index for index, values in enumerate(kwargs["kwargs_source"])
+                    if isinstance(values, Mapping) and "pixels" in values
+                ), None)
+                if pixelated_index is not None:
+                    kwargs["kwargs_source"][pixelated_index]["pixels"] = median
+                    derived["kwargs"] = kwargs
 
         details = dict(self._loaded_hmc_details or {})
         details["derived"] = derived
@@ -547,7 +552,12 @@ class SingleBandModel:
                 lens_image=self.lens_image,
             )
             type_list, param_list = self.definition.as_dicts()
-            is_pixelated = type_list.get("source_light_type_list") == ["PIXELATED"]
+            source_types = type_list.get("source_light_type_list", [])
+            pixelated_source_index = next((
+                index for index, profile_type in enumerate(source_types)
+                if profile_type == "PIXELATED"
+            ), None)
+            is_pixelated = pixelated_source_index is not None
             if pixelated_init_match not in {"image", "source"}:
                 raise ValueError("pixelated_init_match must be 'image' or 'source'.")
             if is_pixelated and pixelated_init_match == "source":
@@ -557,7 +567,9 @@ class SingleBandModel:
                 if not isinstance(iterations, int) or iterations <= 0:
                     raise ValueError("num_iterations_warmup must be a positive integer for source matching.")
                 ny, nx = self.lens_image.SourceModel.pixel_grid.num_pixel_axes
-                pixelated_prior = param_list["source_light_params_list"][0].get("pixelated_prior", {})
+                pixelated_prior = param_list["source_light_params_list"][pixelated_source_index].get(
+                    "pixelated_prior", {}
+                )
                 print(
                     f"[pixelated-init: source] Fitting Matérn parameters "
                     f"({iterations} iterations) from the inherited analytic source..."

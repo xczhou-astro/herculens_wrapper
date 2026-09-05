@@ -25,6 +25,13 @@ _FILES = {
 }
 
 
+def _pixelated_source_kwargs_index(kwargs_source):
+    return next((
+        index for index, values in enumerate(kwargs_source or [])
+        if isinstance(values, Mapping) and "pixels" in values
+    ), None)
+
+
 class MultiBandData:
     """Ordered band-name to :class:`SingleBandData` collection.
 
@@ -277,8 +284,9 @@ class MultiBandFitResult:
             directory.mkdir(parents=True, exist_ok=True)
             components = hmc_components.get(name)
             kwargs_for_plots = deepcopy(kwargs)
-            if components is not None and kwargs_for_plots.get("kwargs_source"):
-                kwargs_for_plots["kwargs_source"][0]["pixels"] = components["source_plane"]
+            pixelated_index = _pixelated_source_kwargs_index(kwargs_for_plots.get("kwargs_source"))
+            if components is not None and pixelated_index is not None:
+                kwargs_for_plots["kwargs_source"][pixelated_index]["pixels"] = components["source_plane"]
             best = np.asarray(components["total"]) if components is not None else np.asarray(band["lens_image"].model(**kwargs))
             residual = (best - band["image_data"]) / band["noise_map"]
             valid = np.isfinite(residual)
@@ -290,14 +298,14 @@ class MultiBandFitResult:
             kwargs_json_by_band[name] = kwargs_json
             with (directory / "kwargs_result.json").open("w") as stream:
                 json.dump(kwargs_json, stream, indent=2, default=json_serializer)
-            if getattr(band["lens_image"], "_rtu_grid_source", False) and kwargs_for_plots.get("kwargs_source"):
+            if getattr(band["lens_image"], "_rtu_grid_source", False) and pixelated_index is not None:
                 try:
                     x_corners, y_corners = band["lens_image"].get_rtu_source_plane_grid(
                         kwargs_for_plots.get("kwargs_lens"),
                     )
                     save_rtu_source_fits(
                         directory / "kwargs_source_pixels.fits",
-                        kwargs_for_plots["kwargs_source"][0]["pixels"], x_corners, y_corners,
+                        kwargs_for_plots["kwargs_source"][pixelated_index]["pixels"], x_corners, y_corners,
                         polynomial_order=getattr(band["lens_image"], "_rtu_polynomial_order", None),
                     )
                 except Exception as error:
@@ -598,14 +606,16 @@ class MultiBandModel:
             self._apply_inherited_parametric_kwargs(kwargs_by_band)
             source_kind = "pixelated SVI" if any(
                 (source_values := values.get("kwargs_source", []))
-                and isinstance(source_values[0], Mapping)
-                and "pixels_wn" in source_values[0]
+                and any(
+                    isinstance(source_value, Mapping) and "pixels_wn" in source_value
+                    for source_value in source_values
+                )
                 for values in kwargs_by_band.values()
             ) else "parametric SVI"
             print(f"[Init] Loaded {source_kind} result from {self.initialization_path}")
 
             is_pixelated = all(
-                band["type_list"].get("source_light_type_list") == ["PIXELATED"]
+                "PIXELATED" in band["type_list"].get("source_light_type_list", [])
                 for band in self.bands
             )
             if pixelated_init_match not in {"image"}:
@@ -733,9 +743,27 @@ class MultiBandModel:
                     site = f"{prefix}lens_light_{key}_{index}"
                     if isinstance(specification, (list, tuple)) and key in values[index] and site in initial:
                         initial[site] = jnp.asarray(values[index][key])
-            source = inherited.get("kwargs_source", [{}])
-            if source and isinstance(source[0], Mapping):
-                source_values = source[0]
+            source = inherited.get("kwargs_source", [])
+            source_types = band["type_list"].get("source_light_type_list", [])
+            for source_index, definition in enumerate(
+                band["param_list"].get("source_light_params_list", [])
+            ):
+                if source_index >= len(source) or not isinstance(source[source_index], Mapping):
+                    continue
+                source_values = source[source_index]
+                if (
+                    source_index >= len(source_types)
+                    or str(source_types[source_index]).upper() != "PIXELATED"
+                ):
+                    for key, specification in definition.items():
+                        site = f"{prefix}source_{key}_{source_index}"
+                        if (
+                            isinstance(specification, (list, tuple))
+                            and key in source_values
+                            and site in initial
+                        ):
+                            initial[site] = jnp.asarray(source_values[key])
+                    continue
                 for key in ("n_source_grid", "rho_source_grid", "sigma_source_grid"):
                     site = f"{prefix}{key}"
                     if key in source_values and site in initial:
@@ -874,7 +902,9 @@ class MultiBandModel:
             kwargs = deepcopy(kwargs_by_band[name])
             source = components_by_band[name].get("source_plane")
             if source is not None and kwargs.get("kwargs_source"):
-                kwargs["kwargs_source"][0]["pixels"] = source
+                pixelated_index = _pixelated_source_kwargs_index(kwargs["kwargs_source"])
+                if pixelated_index is not None:
+                    kwargs["kwargs_source"][pixelated_index]["pixels"] = source
             plot_rows.append({
                 "name": name, "lens_image": band["lens_image"],
                 "kwargs_result": kwargs,
@@ -943,7 +973,12 @@ class MultiBandModel:
                     ))
                 else:
                     no_lens_light, point_source = source, jnp.zeros_like(total)
-                source_plane = kwargs.get("kwargs_source", [{}])[0].get("pixels")
+                source_values = kwargs.get("kwargs_source", [])
+                pixelated_index = _pixelated_source_kwargs_index(source_values)
+                source_plane = (
+                    source_values[pixelated_index].get("pixels")
+                    if pixelated_index is not None else None
+                )
                 if source_plane is None:
                     source_plane = jnp.zeros((1, 1), dtype=total.dtype)
                 return total, source, lens_light, no_lens_light, point_source, jnp.asarray(source_plane)
@@ -1016,7 +1051,9 @@ class MultiBandModel:
             kwargs = self.prob_model.params2kwargs_by_band(chain_parameters)[band["name"]]
             if kwargs.get("kwargs_source"):
                 kwargs = deepcopy(kwargs)
-                kwargs["kwargs_source"][0]["pixels"] = components["source_plane"]
+                pixelated_index = _pixelated_source_kwargs_index(kwargs["kwargs_source"])
+                if pixelated_index is not None:
+                    kwargs["kwargs_source"][pixelated_index]["pixels"] = components["source_plane"]
             chain_rows.append({
                 "name": f"chain {chain}", "lens_image": band["lens_image"],
                 "kwargs_result": kwargs, "image_data": band["image_data"],
