@@ -575,19 +575,79 @@ def _sample_param_from_prior(site_name, key, param):
         return param
 
 
+_Q_PHI_MASS_PROFILES = frozenset({'EPL', 'SIE'})
+
+
+def _mass_q_phi_to_e1_e2(q, phi):
+    """Convert API ``q`` and degree-valued ``phi`` to native ellipticity."""
+    q = jnp.asarray(q)
+    phi_rad = jnp.deg2rad(jnp.asarray(phi))
+    ellipticity = (1.0 - q) / (1.0 + q)
+    return (
+        ellipticity * jnp.cos(2.0 * phi_rad),
+        ellipticity * jnp.sin(2.0 * phi_rad),
+    )
+
+
+def _materialize_mass_ellipticity(profile_type, values):
+    """Return native mass kwargs, converting an API q/phi declaration."""
+    result = dict(values)
+    if str(profile_type).upper() not in _Q_PHI_MASS_PROFILES:
+        return result
+    uses_q_phi = 'q' in result or 'phi' in result
+    if not uses_q_phi:
+        return result
+    e1, e2 = _mass_q_phi_to_e1_e2(result.pop('q'), result.pop('phi'))
+    result['e1'], result['e2'] = e1, e2
+    return result
+
+
+def _phi_in_declared_branch(phi_degrees, specification):
+    """Choose the 180-degree-equivalent angle inside a declared phi prior."""
+    phi_degrees = float(np.asarray(phi_degrees))
+    if isinstance(specification, (list, tuple)):
+        if len(specification) == 2:
+            lower, upper = map(float, specification)
+        elif len(specification) == 4:
+            lower, upper = float(specification[2]), float(specification[3])
+        else:
+            return phi_degrees
+        candidates = [phi_degrees + 180.0 * turn for turn in range(-3, 4)]
+        inside = [angle for angle in candidates if lower <= angle <= upper]
+        if inside:
+            midpoint = 0.5 * (lower + upper)
+            return min(inside, key=lambda angle: abs(angle - midpoint))
+    return phi_degrees
+
+
+def _mass_e1_e2_to_q_phi(e1, e2, *, phi_specification=None):
+    """Convert saved native ellipticity into API q and degree-valued phi."""
+    e1, e2 = np.asarray(e1), np.asarray(e2)
+    ellipticity = np.hypot(e1, e2)
+    q = (1.0 - ellipticity) / (1.0 + ellipticity)
+    phi = np.degrees(0.5 * np.arctan2(e2, e1))
+    if np.asarray(phi).ndim == 0:
+        phi = _phi_in_declared_branch(phi, phi_specification)
+    return q, phi
+
+
 def param_list_to_init_kwargs(param_list, type_list, lens_image):
     kwargs = {}
     
     # 1. Lens mass
     kwargs['kwargs_lens'] = []
-    for model in param_list.get('lens_mass_params_list', []):
+    lens_mass_types = type_list.get('lens_mass_type_list', [])
+    for index, model in enumerate(param_list.get('lens_mass_params_list', [])):
         kwargs_model = {}
         for k, v in model.items():
-            if isinstance(v, list):
+            if isinstance(v, (list, tuple)):
                 kwargs_model[k] = v[0]
             else:
                 kwargs_model[k] = v
-        kwargs['kwargs_lens'].append(kwargs_model)
+        profile_type = lens_mass_types[index] if index < len(lens_mass_types) else ''
+        kwargs['kwargs_lens'].append(
+            _materialize_mass_ellipticity(profile_type, kwargs_model)
+        )
         
     # 2. Lens light
     kwargs['kwargs_lens_light'] = []
@@ -803,7 +863,9 @@ def create_prob_model(
                         else:
                             model[key] = param
 
-                    prior_lens_mass.append(model)
+                    prior_lens_mass.append(_materialize_mass_ellipticity(
+                        type_list['lens_mass_type_list'][i], model,
+                    ))
 
             prior_lens_light = []
             if fix_lens_light and kwargs_lens_light_fixed is not None:
@@ -1136,11 +1198,13 @@ def create_prob_model(
                         link_spec = _normalize_link_spec(param)
                         if link_spec is not None:
                             kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs lens_mass[{i}].{key}")
-                        elif isinstance(param, list):
+                        elif isinstance(param, (list, tuple)):
                             kw[key] = params[f'lens_{key}_{i}']
                         else:
                             kw[key] = param
-                    kwargs_lens.append(kw)
+                    kwargs_lens.append(_materialize_mass_ellipticity(
+                        type_list['lens_mass_type_list'][i], kw,
+                    ))
 
             kwargs_lens_light = []
             if fix_lens_light and kwargs_lens_light_fixed is not None:
@@ -1471,13 +1535,35 @@ def kwargs2params(
     params = {}
     if not fix_lens_mass:
         for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
+            saved_mass = (
+                kwargs['kwargs_lens'][i]
+                if 'kwargs_lens' in kwargs and i < len(kwargs['kwargs_lens'])
+                else {}
+            )
+            profile_type = (
+                type_list.get('lens_mass_type_list', [None] * len(param_list['lens_mass_params_list']))[i]
+                if type_list is not None else None
+            )
+            restored_q_phi = None
+            if (
+                str(profile_type).upper() in _Q_PHI_MASS_PROFILES
+                and ('q' in lens_mass_model or 'phi' in lens_mass_model)
+                and {'e1', 'e2'}.issubset(saved_mass)
+            ):
+                restored_q_phi = _mass_e1_e2_to_q_phi(
+                    saved_mass['e1'], saved_mass['e2'],
+                    phi_specification=lens_mass_model.get('phi'),
+                )
             for key, param in lens_mass_model.items():
-                if _normalize_link_spec(param) is None and isinstance(param, list):
-                    if 'kwargs_lens' not in kwargs or i >= len(kwargs['kwargs_lens']):
+                if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
+                    if restored_q_phi is not None and key in {'q', 'phi'}:
+                        params[f'lens_{key}_{i}'] = jnp.asarray(
+                            restored_q_phi[0 if key == 'q' else 1]
+                        )
                         continue
-                    if key not in kwargs['kwargs_lens'][i]:
+                    if key not in saved_mass:
                         continue
-                    params[f'lens_{key}_{i}'] = jnp.asarray(kwargs['kwargs_lens'][i][key])
+                    params[f'lens_{key}_{i}'] = jnp.asarray(saved_mass[key])
     if (
         not fix_lens_light
         and 'lens_light_params_list' in param_list
@@ -2377,6 +2463,39 @@ def validate_param_list(type_list, param_list):
         type_list.get("lens_mass_type_list", []),
         param_list.get("lens_mass_params_list", []),
     )):
+        if str(profile_type).upper() in _Q_PHI_MASS_PROFILES:
+            uses_q_phi = "q" in params or "phi" in params
+            uses_e = "e1" in params or "e2" in params
+            if uses_q_phi and uses_e:
+                raise ValueError(
+                    f"{profile_type} mass component {index} must use either "
+                    "('q', 'phi') or ('e1', 'e2'), not both."
+                )
+            if uses_q_phi and not {"q", "phi"}.issubset(params):
+                raise ValueError(
+                    f"{profile_type} mass component {index} requires both 'q' and 'phi'."
+                )
+            if uses_q_phi:
+                q_specification = params["q"]
+                if _normalize_link_spec(q_specification) is None:
+                    if isinstance(q_specification, (list, tuple)):
+                        if len(q_specification) == 2:
+                            q_lower, q_upper = q_specification
+                        elif len(q_specification) == 4:
+                            q_lower, q_upper = q_specification[2], q_specification[3]
+                        else:
+                            q_lower = q_upper = None
+                    else:
+                        q_lower = q_upper = q_specification
+                    if (
+                        q_lower is not None
+                        and (not 0.0 < float(q_lower) <= 1.0
+                             or not 0.0 < float(q_upper) <= 1.0)
+                    ):
+                        raise ValueError(
+                            f"{profile_type} mass component {index} requires 0 < q <= 1; "
+                            f"got {q_specification!r}."
+                        )
         if profile_type == "INCLINED_EXPONENTIAL_DISK":
             if "n_gaussians" not in params:
                 raise ValueError(

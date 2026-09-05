@@ -83,6 +83,36 @@ def _truth_mapping(truth: Mapping[str, Any] | str | Path) -> dict[str, Any]:
     raise TypeError("truth must be a mapping or a path to a JSON file.")
 
 
+def _truth_parameter_value(
+    component: str,
+    parameter: str,
+    truth_profile: Mapping[str, Any],
+    posterior: np.ndarray | None = None,
+) -> tuple[bool, Any]:
+    """Read truth directly, or derive API q/phi from native e1/e2."""
+    if parameter in truth_profile and truth_profile[parameter] is not None:
+        return True, truth_profile[parameter]
+    if (
+        component != "lens_mass"
+        or parameter not in {"q", "phi"}
+        or not {"e1", "e2"}.issubset(truth_profile)
+    ):
+        return False, None
+    e1 = np.asarray(truth_profile["e1"])
+    e2 = np.asarray(truth_profile["e2"])
+    ellipticity = np.hypot(e1, e2)
+    if parameter == "q":
+        return True, (1.0 - ellipticity) / (1.0 + ellipticity)
+    phi = np.degrees(0.5 * np.arctan2(e2, e1))
+    if posterior is not None and np.asarray(phi).ndim == 0:
+        # Native e1/e2 stores orientation modulo 180 degrees.  Select the
+        # equivalent branch used by the q/phi posterior (for example +100
+        # rather than -80 degrees).
+        reference = float(np.nanmedian(np.asarray(posterior, dtype=float)))
+        phi = float(phi) + 180.0 * round((reference - float(phi)) / 180.0)
+    return True, phi
+
+
 def _parse_single_band_site(name: str) -> tuple[str, str, int] | None:
     """Map a single-band NumPyro site to component, parameter, profile index."""
     local = str(name).rsplit("/", 1)[-1]
@@ -400,7 +430,13 @@ def compare_hmc_truth(
             skipped.append(f"{site}: missing {kwargs_key}[{profile_index}] in truth")
             continue
         truth_profile = truth_profiles[profile_index]
-        if not isinstance(truth_profile, Mapping) or parameter not in truth_profile:
+        if not isinstance(truth_profile, Mapping):
+            skipped.append(f"{site}: missing truth profile")
+            continue
+        found_truth, truth_parameter = _truth_parameter_value(
+            component, parameter, truth_profile, site_values,
+        )
+        if not found_truth:
             skipped.append(f"{site}: missing truth parameter {parameter!r}")
             continue
         posterior = np.asarray(site_values)
@@ -410,7 +446,7 @@ def compare_hmc_truth(
             # Pixel fields and other high-dimensional nuisance variables are
             # intentionally not suitable for a parameter recovery corner plot.
             continue
-        truth_value = np.asarray(truth_profile[parameter]).reshape(-1)
+        truth_value = np.asarray(truth_parameter).reshape(-1)
         if posterior.shape[1] != truth_value.size:
             skipped.append(f"{site}: posterior/truth shape mismatch")
             continue
@@ -816,11 +852,14 @@ class FitResult:
                         # Correlated and fixed parameters intentionally have
                         # no independent NumPyro posterior coordinate.
                         continue
-                    if parameter not in truth_profile or truth_profile[parameter] is None:
+                    found_truth, truth_parameter = _truth_parameter_value(
+                        component, parameter, truth_profile, samples[site],
+                    )
+                    if not found_truth:
                         skipped.append(f"{component}[{profile_index}].{parameter}: missing truth value")
                         continue
                     posterior = np.asarray(samples[site])
-                    truth_value = np.asarray(truth_profile[parameter])
+                    truth_value = np.asarray(truth_parameter)
                     if posterior.ndim == 1:
                         posterior = posterior[:, None]
                     elif posterior.ndim > 2:

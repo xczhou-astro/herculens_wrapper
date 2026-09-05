@@ -6,6 +6,7 @@ import numpyro
 from herculens.Inference.ProbModel.numpyro import NumpyroModel
 
 from herculens_wrapper.models import (
+    _materialize_mass_ellipticity,
     _normalize_link_spec,
     _resolve_link,
     _sample_param_from_prior,
@@ -113,7 +114,9 @@ def create_multiband_prob_model(
                         kwargs[key] = params[site]
                 else:
                     kwargs[key] = param
-            kwargs_lens.append(kwargs)
+            kwargs_lens.append(_materialize_mass_ellipticity(
+                lens_mass_type_list[index], kwargs,
+            ))
         return kwargs_lens
 
     def fixed_mass_for_band(band):

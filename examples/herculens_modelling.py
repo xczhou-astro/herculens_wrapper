@@ -112,7 +112,7 @@ def make_profiles(
     from herculens_wrapper.api import LensProfileCollection, LightProfile, MassProfile, PixelatedSource
     lens_mass = MassProfile(["SIE", "SHEAR"], prior=[
         {"theta_E": [1.0, 2.0], "center_x": [0.0, 0.1, -0.3, 0.3],
-         "center_y": [0.0, 0.1, -0.3, 0.3], "e1": [-0.5, 0.5], "e2": [-0.5, 0.5]},
+         "center_y": [0.0, 0.1, -0.3, 0.3], "q": [0.2, 1.0], "phi": [-90.0, 90.0]},
         {"ra_0": 0.0, "dec_0": 0.0, "gamma1": [-0.3, 0.3], "gamma2": [-0.3, 0.3]},
     ])
     

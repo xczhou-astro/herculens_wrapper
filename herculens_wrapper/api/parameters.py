@@ -230,7 +230,12 @@ class ProfileCollection(Sequence[Profile]):
 
 
 class MassProfile(Profile):
-    """Lens-mass profile, or a component-agnostic multi-profile collection."""
+    """Lens-mass profile, or a component-agnostic multi-profile collection.
+
+    EPL and SIE accept either native ``e1``/``e2`` or the API-facing ``q`` and
+    degree-valued ``phi``.  The latter are sampled directly and converted to
+    native ellipticity immediately before evaluating the Herculens model.
+    """
 
     def __new__(
         cls,
