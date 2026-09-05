@@ -689,7 +689,7 @@ class MultiBandModel:
     def _apply_inherited_parametric_kwargs(self, kwargs_by_band: Mapping[str, Any]) -> None:
         """Map saved physical kwargs onto the joint NumPyro site names."""
         import jax.numpy as jnp
-        from ..models import _mass_e1_e2_to_q_phi
+        from ..models import _mass_e1_e2_to_q_phi, _mass_phi_m_rad_to_deg
 
         initial = dict(self.initial_parameters)
         for band in self.bands:
@@ -698,11 +698,22 @@ class MultiBandModel:
                 values = inherited.get("kwargs_lens", [])
                 if index >= len(values):
                     continue
+                profile_type = band["type_list"]["lens_mass_type_list"][index]
                 for key, specification in definition.items():
                     if not isinstance(specification, (list, tuple)):
                         continue
                     site = f"{prefix}lens_{key}_{index}" if key in {"center_x", "center_y"} else f"lens_{key}_{index}"
-                    if key in values[index] and site in initial:
+                    if (
+                        str(profile_type).upper() == "MPPL"
+                        and key == "phi_m"
+                        and key in values[index]
+                        and site in initial
+                    ):
+                        initial[site] = jnp.asarray(_mass_phi_m_rad_to_deg(
+                            values[index][key], definition["m"],
+                            phi_specification=specification,
+                        ))
+                    elif key in values[index] and site in initial:
                         initial[site] = jnp.asarray(values[index][key])
                     elif (
                         key in {"q", "phi"}

@@ -589,35 +589,42 @@ def _mass_q_phi_to_e1_e2(q, phi):
     )
 
 
-def _materialize_mass_ellipticity(profile_type, values):
-    """Return native mass kwargs, converting an API q/phi declaration."""
+def _materialize_mass_parameters(profile_type, values):
+    """Return native Herculens kwargs from API-facing mass parameters."""
     result = dict(values)
-    if str(profile_type).upper() not in _Q_PHI_MASS_PROFILES:
-        return result
-    uses_q_phi = 'q' in result or 'phi' in result
-    if not uses_q_phi:
-        return result
-    e1, e2 = _mass_q_phi_to_e1_e2(result.pop('q'), result.pop('phi'))
-    result['e1'], result['e2'] = e1, e2
+    normalized_type = str(profile_type).upper()
+    if normalized_type in _Q_PHI_MASS_PROFILES:
+        uses_q_phi = 'q' in result or 'phi' in result
+        if uses_q_phi:
+            e1, e2 = _mass_q_phi_to_e1_e2(result.pop('q'), result.pop('phi'))
+            result['e1'], result['e2'] = e1, e2
+    elif normalized_type == 'MPPL' and 'phi_m' in result:
+        # The public API consistently exposes angles in degrees.  MPPL's
+        # profile equation continues to receive and calculate in radians.
+        result['phi_m'] = jnp.deg2rad(jnp.asarray(result['phi_m']))
     return result
 
 
-def _phi_in_declared_branch(phi_degrees, specification):
-    """Choose the 180-degree-equivalent angle inside a declared phi prior."""
-    phi_degrees = float(np.asarray(phi_degrees))
+def _angle_in_declared_branch(angle_degrees, specification, *, period=180.0):
+    """Choose a periodic angle equivalent inside its declared API prior."""
+    angle_degrees = float(np.asarray(angle_degrees))
     if isinstance(specification, (list, tuple)):
         if len(specification) == 2:
             lower, upper = map(float, specification)
         elif len(specification) == 4:
             lower, upper = float(specification[2]), float(specification[3])
         else:
-            return phi_degrees
-        candidates = [phi_degrees + 180.0 * turn for turn in range(-3, 4)]
+            return angle_degrees
+        midpoint = 0.5 * (lower + upper)
+        central_turn = round((midpoint - angle_degrees) / period)
+        candidates = [
+            angle_degrees + period * turn
+            for turn in range(central_turn - 1, central_turn + 2)
+        ]
         inside = [angle for angle in candidates if lower <= angle <= upper]
         if inside:
-            midpoint = 0.5 * (lower + upper)
             return min(inside, key=lambda angle: abs(angle - midpoint))
-    return phi_degrees
+    return angle_degrees
 
 
 def _mass_e1_e2_to_q_phi(e1, e2, *, phi_specification=None):
@@ -627,8 +634,20 @@ def _mass_e1_e2_to_q_phi(e1, e2, *, phi_specification=None):
     q = (1.0 - ellipticity) / (1.0 + ellipticity)
     phi = np.degrees(0.5 * np.arctan2(e2, e1))
     if np.asarray(phi).ndim == 0:
-        phi = _phi_in_declared_branch(phi, phi_specification)
+        phi = _angle_in_declared_branch(phi, phi_specification)
     return q, phi
+
+
+def _mass_phi_m_rad_to_deg(phi_m, m, *, phi_specification=None):
+    """Convert native MPPL radians to the API's degree-valued phase."""
+    phi_degrees = np.degrees(np.asarray(phi_m))
+    if np.asarray(phi_degrees).ndim == 0:
+        phi_degrees = _angle_in_declared_branch(
+            phi_degrees,
+            phi_specification,
+            period=360.0 / float(m),
+        )
+    return phi_degrees
 
 
 def param_list_to_init_kwargs(param_list, type_list, lens_image):
@@ -646,7 +665,7 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
                 kwargs_model[k] = v
         profile_type = lens_mass_types[index] if index < len(lens_mass_types) else ''
         kwargs['kwargs_lens'].append(
-            _materialize_mass_ellipticity(profile_type, kwargs_model)
+            _materialize_mass_parameters(profile_type, kwargs_model)
         )
         
     # 2. Lens light
@@ -863,7 +882,7 @@ def create_prob_model(
                         else:
                             model[key] = param
 
-                    prior_lens_mass.append(_materialize_mass_ellipticity(
+                    prior_lens_mass.append(_materialize_mass_parameters(
                         type_list['lens_mass_type_list'][i], model,
                     ))
 
@@ -1202,7 +1221,7 @@ def create_prob_model(
                             kw[key] = params[f'lens_{key}_{i}']
                         else:
                             kw[key] = param
-                    kwargs_lens.append(_materialize_mass_ellipticity(
+                    kwargs_lens.append(_materialize_mass_parameters(
                         type_list['lens_mass_type_list'][i], kw,
                     ))
 
@@ -1554,12 +1573,25 @@ def kwargs2params(
                     saved_mass['e1'], saved_mass['e2'],
                     phi_specification=lens_mass_model.get('phi'),
                 )
+            restored_phi_m = None
+            if (
+                str(profile_type).upper() == 'MPPL'
+                and 'phi_m' in lens_mass_model
+                and 'phi_m' in saved_mass
+            ):
+                restored_phi_m = _mass_phi_m_rad_to_deg(
+                    saved_mass['phi_m'], lens_mass_model.get('m', saved_mass.get('m')),
+                    phi_specification=lens_mass_model.get('phi_m'),
+                )
             for key, param in lens_mass_model.items():
                 if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
                     if restored_q_phi is not None and key in {'q', 'phi'}:
                         params[f'lens_{key}_{i}'] = jnp.asarray(
                             restored_q_phi[0 if key == 'q' else 1]
                         )
+                        continue
+                    if restored_phi_m is not None and key == 'phi_m':
+                        params[f'lens_{key}_{i}'] = jnp.asarray(restored_phi_m)
                         continue
                     if key not in saved_mass:
                         continue

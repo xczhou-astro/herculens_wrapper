@@ -241,13 +241,12 @@ print(profiles.values)
 ## 4. MPPL multipole
 
 推荐直接输入 `a_m` 和 `phi_m`。模型使用
-`cos[m(theta - phi_m)]`：`phi_m` 从图像 `+x` 轴逆时针测量，单位为弧度，
-等价方向的周期为 `2π/m`。`m` 必须是固定正整数。两元素列表
+`cos[m(theta - phi_m)]`：API 中的 `phi_m` 从模型坐标 `+x` 轴逆时针测量，
+单位为度，等价方向的周期为 `360°/m`。进入 MPPL 内部计算前会自动转换为弧度。
+`m` 必须是固定正整数。两元素列表
 `[low, high]` 表示该区间上的均匀 prior。
 
 ```python
-import numpy as np
-
 epl = MassProfile("EPL", prior=epl_prior)
 
 multipole = MassProfile(
@@ -255,7 +254,7 @@ multipole = MassProfile(
     prior={
         "m": 4,
         "a_m": [0.02, 0.01, 0.0, 0.10],
-        "phi_m": [0.0, 0.1, -np.pi / 4, np.pi / 4],
+        "phi_m": [0.0, 10.0, -45.0, 45.0],
     },
 )
 
@@ -274,13 +273,13 @@ profiles = LensProfileCollection(
 例如，对 `m=1` 将方向限制在 80°–100°：
 
 ```python
-"phi_m": [np.deg2rad(80), np.deg2rad(100)]
+"phi_m": [80.0, 100.0]
 ```
 
 如果需要把方向固定为单一角度，应使用标量：
 
 ```python
-"phi_m": np.deg2rad(90)
+"phi_m": 90.0
 ```
 
 也支持等价的 `e_x`、`e_y` 输入，但不能与 `a_m`、`phi_m` 同时使用：

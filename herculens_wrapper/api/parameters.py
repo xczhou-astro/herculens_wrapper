@@ -235,6 +235,8 @@ class MassProfile(Profile):
     EPL and SIE accept either native ``e1``/``e2`` or the API-facing ``q`` and
     degree-valued ``phi``.  The latter are sampled directly and converted to
     native ellipticity immediately before evaluating the Herculens model.
+    MPPL similarly exposes ``phi_m`` in degrees and converts it to radians for
+    its internal profile calculation.
     """
 
     def __new__(

@@ -89,9 +89,17 @@ def _truth_parameter_value(
     truth_profile: Mapping[str, Any],
     posterior: np.ndarray | None = None,
 ) -> tuple[bool, Any]:
-    """Read truth directly, or derive API q/phi from native e1/e2."""
+    """Read truth, converting native angular kwargs to API degrees."""
     if parameter in truth_profile and truth_profile[parameter] is not None:
-        return True, truth_profile[parameter]
+        value = truth_profile[parameter]
+        if component == "lens_mass" and parameter == "phi_m":
+            value = np.degrees(np.asarray(value))
+            if posterior is not None and np.asarray(value).ndim == 0:
+                multipole_order = float(truth_profile.get("m", 1))
+                period = 360.0 / multipole_order
+                reference = float(np.nanmedian(np.asarray(posterior, dtype=float)))
+                value = float(value) + period * round((reference - float(value)) / period)
+        return True, value
     if (
         component != "lens_mass"
         or parameter not in {"q", "phi"}
