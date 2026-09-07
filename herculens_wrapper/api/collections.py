@@ -41,9 +41,22 @@ class LensProfileCollection:
     ) -> ProfileCollection | None:
         if profiles is None:
             return None
-        collection = profiles if isinstance(profiles, ProfileCollection) else ProfileCollection(
-            [profiles] if isinstance(profiles, Profile) else list(profiles)
-        )
+        if isinstance(profiles, ProfileCollection):
+            collection = profiles
+        elif isinstance(profiles, Profile):
+            collection = ProfileCollection([profiles])
+        else:
+            # Multi-profile constructors such as
+            # ``LightProfile(["GAUSSIAN_ELLIPSE"] * 3, ...)`` return a
+            # ProfileCollection.  Allow it to be combined naturally with
+            # another profile, e.g. ``[mge_bulge, PixelatedLensLight()]``.
+            flattened = []
+            for profile in profiles:
+                if isinstance(profile, ProfileCollection):
+                    flattened.extend(profile)
+                else:
+                    flattened.append(profile)
+            collection = ProfileCollection(flattened)
         expected = MassProfile if component == "lens_mass" else PointSourceProfile if component == "point_source" else LightProfile
         if any(not isinstance(profile, expected) for profile in collection):
             raise TypeError(f"{component} requires {expected.__name__} instances.")

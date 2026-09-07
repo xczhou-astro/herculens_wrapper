@@ -7,6 +7,7 @@ import pytest
 
 from herculens_wrapper.api import (
     LensProfileCollection,
+    LightProfile,
     MassProfile,
     PixelatedLensLight,
     PixelatedSource,
@@ -170,3 +171,22 @@ def test_profile_configuration_keeps_real_pixelated_settings():
     assert configuration["source_light"][0]["pixel_grid"]["pixel_grid_shape"] == 24
     assert configuration["source_light"][0]["pixelated_prior"]["prior_type"] == "matern"
     assert configuration["lens_light"][0]["pixel_grid"]["pixel_scale_factor"] == 0.75
+
+
+def test_mge_collection_can_be_combined_with_pixelated_lens_light():
+    mge = LightProfile(
+        ["GAUSSIAN_ELLIPSE"] * 3,
+        prior=[{
+            "amp": [2.0, 0.2], "sigma": [0.03, 1.0],
+            "e1": [-0.3, 0.3], "e2": [-0.3, 0.3],
+            "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
+        } for _ in range(3)],
+    )
+
+    profiles = LensProfileCollection(
+        lens_light=[mge, PixelatedLensLight()],
+    )
+
+    assert [profile.profile_type for profile in profiles.lens_light] == [
+        "GAUSSIAN_ELLIPSE", "GAUSSIAN_ELLIPSE", "GAUSSIAN_ELLIPSE", "PIXELATED",
+    ]
