@@ -79,6 +79,42 @@ result.output()
 
 参数使用四元列表 `[mean, sigma, lower, upper]` 表示采样 prior；标量表示固定参数。
 
+### EPL-referenced multipole phase
+
+`MPPL_OFFSET` samples a relative multipole phase while keeping it close to an
+EPL orientation.  All public-facing angles are in degrees.  `phi_ref` is an
+exact link and therefore does not create a second sampled PA:
+
+```python
+epl = MassProfile(
+    "EPL",
+    prior={
+        "theta_E": [0.5, 2.0], "gamma": [1.6, 2.4],
+        "q": [0.3, 0.9], "phi": [-90.0, 90.0],
+        "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
+    },
+)
+mppl4 = MassProfile(
+    "MPPL_OFFSET",
+    prior={
+        "m": 4,
+        "a_m": [0.0, 0.03],
+        "delta_phi_m": [0.0, 10.0, -20.0, 20.0],
+    },
+)
+mppl4.phi_ref = epl.phi
+mppl4.gamma = epl.gamma
+mppl4.center_x = epl.center_x
+mppl4.center_y = epl.center_y
+mppl4.b = epl.theta_E
+
+profiles = LensProfileCollection(lens_mass=[epl, mppl4])
+```
+
+At every likelihood evaluation, the profile uses
+`phi_m = phi_ref + delta_phi_m`.  For `m=4`, use a narrow offset prior around
+zero to avoid the 90-degree phase periodicity.
+
 ## 2. 数据 API
 
 ### 从独立 FITS 文件读取

@@ -2594,16 +2594,31 @@ def validate_param_list(type_list, param_list):
                     "n_gaussians to be one of 5, 7, or 9; it cannot be sampled."
                 )
             continue
-        if profile_type != "MPPL":
+        if profile_type not in {"MPPL", "MPPL_OFFSET"}:
             continue
         if "m" not in params:
-            raise ValueError(f"MPPL mass component {index} requires a fixed integer 'm' >= 1.")
+            raise ValueError(f"{profile_type} mass component {index} requires a fixed integer 'm' >= 1.")
         multipole_order = params["m"]
         if isinstance(multipole_order, (list, tuple)) or int(multipole_order) != multipole_order or multipole_order < 1:
             raise ValueError(
-                f"MPPL mass component {index} requires 'm' to be a fixed integer >= 1; "
+                f"{profile_type} mass component {index} requires 'm' to be a fixed integer >= 1; "
                 "multipole order cannot be sampled continuously."
             )
+        if profile_type == "MPPL_OFFSET":
+            required = {"a_m", "phi_ref", "delta_phi_m"}
+            missing = required.difference(params)
+            if missing:
+                raise ValueError(
+                    f"MPPL_OFFSET mass component {index} requires {sorted(required)}; "
+                    f"missing {sorted(missing)}."
+                )
+            forbidden = {"phi_m", "e_x", "e_y"}.intersection(params)
+            if forbidden:
+                raise ValueError(
+                    f"MPPL_OFFSET mass component {index} uses ('a_m', 'phi_ref', 'delta_phi_m'); "
+                    f"do not also provide {sorted(forbidden)}."
+                )
+            continue
         uses_amplitude_phase = "a_m" in params or "phi_m" in params
         uses_ellipticity = "e_x" in params or "e_y" in params
         if uses_amplitude_phase and uses_ellipticity:

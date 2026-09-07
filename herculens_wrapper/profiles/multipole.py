@@ -164,3 +164,67 @@ class MPPL:
             signature="(),()->(i,i)",
         )(x, y)
         return hessian[..., 0, 0], hessian[..., 1, 1], hessian[..., 0, 1]
+
+
+class MPPLOffset:
+    """MPPL whose phase is an offset from a reference position angle.
+
+    ``phi_ref`` and ``delta_phi_m`` use degrees in the wrapper API.  The
+    reference angle is normally linked to an EPL ``phi`` parameter; only the
+    relative offset is sampled.  Internally,
+    ``phi_m = deg2rad(phi_ref + delta_phi_m)``.
+    """
+
+    param_names = [
+        "m", "a_m", "phi_ref", "delta_phi_m", "gamma", "center_x", "center_y", "b",
+    ]
+    lower_limit_default = {
+        "m": 1, "a_m": 0, "phi_ref": -360, "delta_phi_m": -180,
+        "gamma": 1.0, "center_x": -100, "center_y": -100, "b": 1e-6,
+    }
+    upper_limit_default = {
+        "m": 100, "a_m": 100, "phi_ref": 360, "delta_phi_m": 180,
+        "gamma": 3.0, "center_x": 100, "center_y": 100, "b": 100,
+    }
+    fixed_default = {
+        "m": True, "a_m": False, "phi_ref": False, "delta_phi_m": False,
+        "gamma": False, "center_x": False, "center_y": False, "b": True,
+    }
+
+    @staticmethod
+    def function(
+        x, y, m, a_m, phi_ref, delta_phi_m, gamma=2.0,
+        center_x=0.0, center_y=0.0, b=1.0,
+    ):
+        """Return the lensing potential with a dynamically linked phase."""
+        return MPPL.function(
+            x, y, m=m, a_m=a_m,
+            phi_m=jnp.deg2rad(phi_ref + delta_phi_m), gamma=gamma,
+            center_x=center_x, center_y=center_y, b=b,
+        )
+
+    @staticmethod
+    def _gradient_at_point(x, y, **kwargs):
+        return jnp.array(jax.grad(MPPLOffset.function, argnums=(0, 1))(x, y, **kwargs))
+
+    @staticmethod
+    def derivatives(x, y, **kwargs):
+        """Return the x and y deflection angles."""
+        gradient = jnp.vectorize(
+            lambda x_value, y_value: MPPLOffset._gradient_at_point(x_value, y_value, **kwargs),
+            signature="(),()->(i)",
+        )(x, y)
+        return gradient[..., 0], gradient[..., 1]
+
+    @staticmethod
+    def _hessian_at_point(x, y, **kwargs):
+        return jnp.array(jax.hessian(MPPLOffset.function, argnums=(0, 1))(x, y, **kwargs))
+
+    @staticmethod
+    def hessian(x, y, **kwargs):
+        """Return ``f_xx, f_yy, f_xy`` as required by Herculens."""
+        hessian = jnp.vectorize(
+            lambda x_value, y_value: MPPLOffset._hessian_at_point(x_value, y_value, **kwargs),
+            signature="(),()->(i,i)",
+        )(x, y)
+        return hessian[..., 0, 0], hessian[..., 1, 1], hessian[..., 0, 1]
