@@ -46,6 +46,20 @@ class Parameter:
     __str__ = __repr__
 
 
+class DerivedParameter(Parameter):
+    """A linkable parameter derived by the backend, rather than sampled.
+
+    EPL/SIE expose native ``e1``/``e2`` as well as API-facing ``q``/``phi``.
+    When the native convention is declared, a reference to ``profile.phi``
+    can still be linked by another profile without inserting an extra ``phi``
+    parameter into the source profile.  The mass-link bank supplies that
+    derived value during model evaluation.
+    """
+
+    def __init__(self, profile: "Profile", name: str) -> None:
+        self._profile, self.name = profile, name
+
+
 class Profile:
     """Profile with parameter-object access, e.g. ``epl.theta_E.prior = ...``."""
 
@@ -68,6 +82,15 @@ class Profile:
 
     def __getattr__(self, name: str) -> Parameter:
         if name.startswith("_"): raise AttributeError(name)
+        # Do not register a conflicting public q/phi parameter when an EPL or
+        # SIE was declared natively with e1/e2.  The model builder derives
+        # these aliases exclusively for parameter links.
+        if (
+            name in {"q", "phi"}
+            and {"e1", "e2"}.issubset(self._parameters)
+            and name not in self._parameters
+        ):
+            return DerivedParameter(self, name)
         return self.parameter(name)
 
     def __setattr__(self, name: str, value: Any) -> None:

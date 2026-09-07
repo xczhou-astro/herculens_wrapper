@@ -113,7 +113,10 @@ profiles = LensProfileCollection(lens_mass=[epl, mppl4])
 
 At every likelihood evaluation, the profile uses
 `phi_m = phi_ref + delta_phi_m`.  For `m=4`, use a narrow offset prior around
-zero to avoid the 90-degree phase periodicity.
+zero to avoid the 90-degree phase periodicity.  The same
+`mppl4.phi_ref = epl.phi` link also works when the EPL is declared with
+native `e1`/`e2`: in that case `phi` is derived internally as
+`0.5 * atan2(e2, e1)` and is used only for the link.
 
 ## 2. 数据 API
 

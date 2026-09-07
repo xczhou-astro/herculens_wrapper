@@ -603,6 +603,48 @@ def _mass_q_phi_to_e1_e2(q, phi):
     )
 
 
+def _mass_e1_e2_to_q_phi_jax(e1, e2):
+    """Convert native ellipticity to API-facing ``q`` and degree-valued ``phi``.
+
+    This JAX version is used only for the parameter-link bank.  It lets a
+    downstream profile link to ``EPL.phi`` even if that EPL was declared with
+    native ``e1``/``e2`` rather than API ``q``/``phi``.
+    """
+    e1 = jnp.asarray(e1)
+    e2 = jnp.asarray(e2)
+    ellipticity = jnp.hypot(e1, e2)
+    return (
+        (1.0 - ellipticity) / (1.0 + ellipticity),
+        jnp.rad2deg(0.5 * jnp.arctan2(e2, e1)),
+    )
+
+
+def _linkable_mass_parameters(profile_type, values):
+    """Return mass parameters augmented with both ellipticity conventions.
+
+    Herculens receives only native ``e1``/``e2`` for EPL/SIE.  Links, however,
+    are part of the public wrapper API and must be able to target either
+    ``q``/``phi`` or ``e1``/``e2`` irrespective of the convention used to
+    declare the upstream component.  This helper is intentionally used only
+    in the link bank; its additional aliases are never passed to Herculens.
+    """
+    result = dict(values)
+    if str(profile_type).upper() not in _Q_PHI_MASS_PROFILES:
+        return result
+
+    has_q_phi = {"q", "phi"}.issubset(result)
+    has_e1_e2 = {"e1", "e2"}.issubset(result)
+    if has_q_phi:
+        e1, e2 = _mass_q_phi_to_e1_e2(result["q"], result["phi"])
+        result.setdefault("e1", e1)
+        result.setdefault("e2", e2)
+    elif has_e1_e2:
+        q, phi = _mass_e1_e2_to_q_phi_jax(result["e1"], result["e2"])
+        result.setdefault("q", q)
+        result.setdefault("phi", phi)
+    return result
+
+
 def _materialize_mass_parameters(profile_type, values):
     """Return native Herculens kwargs from API-facing mass parameters."""
     result = dict(values)
@@ -882,7 +924,13 @@ def create_prob_model(
             if fix_lens_mass and kwargs_lens_fixed is not None:
                 prior_lens_mass = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
             
-            bank = {'lens': prior_lens_mass}
+            lens_link_bank = [
+                _linkable_mass_parameters(profile_type, values)
+                for profile_type, values in zip(
+                    type_list.get('lens_mass_type_list', []), prior_lens_mass,
+                )
+            ]
+            bank = {'lens': lens_link_bank}
             
             if not (fix_lens_mass and kwargs_lens_fixed is not None):
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
@@ -901,9 +949,9 @@ def create_prob_model(
                         else:
                             model[key] = param
 
-                    prior_lens_mass.append(_materialize_mass_parameters(
-                        type_list['lens_mass_type_list'][i], model,
-                    ))
+                    profile_type = type_list['lens_mass_type_list'][i]
+                    lens_link_bank.append(_linkable_mass_parameters(profile_type, model))
+                    prior_lens_mass.append(_materialize_mass_parameters(profile_type, model))
 
             prior_lens_light = []
             if fix_lens_light and kwargs_lens_light_fixed is not None:
@@ -1228,7 +1276,13 @@ def create_prob_model(
             elif fix_lens_mass and kwargs_lens_fixed is not None:
                 kwargs_lens = _kwargs_list_to_jax(_get_fixed_lens_kwargs())
             
-            bank = {'lens': kwargs_lens}
+            lens_link_bank = [
+                _linkable_mass_parameters(profile_type, values)
+                for profile_type, values in zip(
+                    type_list.get('lens_mass_type_list', []), kwargs_lens,
+                )
+            ]
+            bank = {'lens': lens_link_bank}
             
             if kwargs_lens_override is None and not (fix_lens_mass and kwargs_lens_fixed is not None):
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
@@ -1241,9 +1295,9 @@ def create_prob_model(
                             kw[key] = params[f'lens_{key}_{i}']
                         else:
                             kw[key] = param
-                    kwargs_lens.append(_materialize_mass_parameters(
-                        type_list['lens_mass_type_list'][i], kw,
-                    ))
+                    profile_type = type_list['lens_mass_type_list'][i]
+                    lens_link_bank.append(_linkable_mass_parameters(profile_type, kw))
+                    kwargs_lens.append(_materialize_mass_parameters(profile_type, kw))
 
             kwargs_lens_light = []
             if fix_lens_light and kwargs_lens_light_fixed is not None:
