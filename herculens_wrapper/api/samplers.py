@@ -1468,6 +1468,7 @@ class FitResult:
         components = self.derived.get("components") or self.derived.get("component_medians")
         if components is not None:
             best_fit_model = np.asarray(components["total"])
+        output_noise = model.data.noise_from_model(best_fit_model)
         kwargs_for_plots = kwargs_best
         skipped: dict[str, str] = {}
         source_plane = self.derived.get("source_plane") if self.samples is not None else None
@@ -1608,7 +1609,7 @@ class FitResult:
                 plot_details.pop("result", None)
             generate_run_plots(
                 lens_image=model.lens_image, kwargs_best=kwargs_for_plots,
-                image_data=model.data.likelihood_image, noise_map=model.data.likelihood_noise,
+                image_data=model.data.likelihood_image, noise_map=output_noise,
                 psf_data=model.data.psf, pixel_scale=model.data.pixel_scale,
                 save_path=str(directory), sampler=(
                     "hmc" if self.samples is not None
@@ -1632,7 +1633,7 @@ class FitResult:
         save_named_arrays_fits(directory / "modeling_result.fits", {
             "best_fit_model": best_fit_model,
             "image_data": model.data.likelihood_image,
-            "noise_map": model.data.likelihood_noise,
+            "noise_map": output_noise,
             "source_arc_mask": model.data.source_arc_mask,
             "contaminate_mask": model.data.contaminate_mask,
             "fit_mask_bool": model.data.likelihood_mask,

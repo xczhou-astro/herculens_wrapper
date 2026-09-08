@@ -120,6 +120,11 @@ class SingleBandModel:
                 "noise_shape": data.noise.shape,
                 "psf_shape": data.psf.shape,
                 "pixel_scale": data.pixel_scale,
+                "noise_model": (
+                    {"kind": "poisson_gaussian", "background_rms": data.background_rms,
+                     "exposure_time": data.exposure_time}
+                    if data.uses_poisson_noise else {"kind": "fixed_noise_map"}
+                ),
                 "psf_supersampling_factor": data.psf_supersampling_factor,
                 "crop_size": data.crop_size,
                 "background_subtract": data.background_subtract,
@@ -200,7 +205,7 @@ class SingleBandModel:
         n_runs: int = 1,
         gpus: str | int | None = None,
         init_params_path: str | Path | None = None,
-        residual_vis_max: float = 0.0,
+        residual_vis_max: float = 3.0,
         wrapper_options: Mapping[str, Any] | None = None,
     ) -> Path:
         """Export this API declaration as a runnable legacy-wrapper config.
@@ -462,11 +467,15 @@ class SingleBandModel:
             psf_supersampling_factor=self.data.psf_supersampling_factor,
             kwargs_numerics=self.numerics, source_arc_mask=self.data.source_arc_mask,
             source_grid_scale=self.source_grid_scale,
+            exposure_time=self.data.exposure_time,
+            background_rms=self.data.background_rms,
         )
         self.prob_model = create_prob_model(
             param_list, type_list, self.lens_image, self.data.likelihood_image,
             self.data.likelihood_noise, likelihood_mask=self.data.likelihood_mask,
             args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
+            exposure_time=self.data.exposure_time,
+            background_rms=self.data.background_rms,
         )
 
     def _declared_pixelated_lens_light_path(self) -> Path | None:
@@ -596,6 +605,8 @@ class SingleBandModel:
                     kwargs_lens_fixed=initial_kwargs.get("kwargs_lens"),
                     fix_lens_light=bool(initial_kwargs.get("kwargs_lens_light")),
                     kwargs_lens_light_fixed=initial_kwargs.get("kwargs_lens_light"),
+                    exposure_time=self.data.exposure_time,
+                    background_rms=self.data.background_rms,
                     init_params_path=str(init_params_path),
                     likelihood_mask=self.data.likelihood_mask,
                     args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
@@ -769,7 +780,7 @@ class SingleBandModel:
         gpus: str | Sequence[str] | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
-        residual_vis_max: float = 0.0,
+        residual_vis_max: float = 3.0,
     ) -> FitResult | "SingleBandResultsCombination":
         """Run inference from supplied or automatically initialized parameters.
 
@@ -1003,7 +1014,7 @@ class SingleBandModel:
         result["total"] = np.asarray(self.lens_image.MassModel.kappa(x_grid, y_grid, kwargs_lens))
         return result
     def plot_fit(self, parameters: Mapping[str, Any] | None = None, *, scale: PlotScale = "linear",
-                 residual_vis_max: float = 0.0, save_path: str | Path | None = None):
+                 residual_vis_max: float = 3.0, save_path: str | Path | None = None):
         """Plot data, model image, and normalized residual for a parameter set.
 
         ``scale`` applies to data and model; the normalized residual remains
@@ -1014,7 +1025,8 @@ class SingleBandModel:
             raise ValueError("scale must be either 'linear' or 'log'.")
         if residual_vis_max < 0:
             raise ValueError("residual_vis_max must be non-negative.")
-        model = self.model_image(parameters); residual = (model - self.data.likelihood_image) / self.data.likelihood_noise
+        model = self.model_image(parameters)
+        residual = (model - self.data.likelihood_image) / self.data.noise_from_model(model)
         valid = np.isfinite(residual)
         if self.data.likelihood_mask is not None:
             valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
@@ -1102,10 +1114,11 @@ class SingleBandModel:
         if self.prob_model is None:
             raise RuntimeError("Call build() before evaluating metrics.")
         model_image = self.model_image(parameters)
-        valid = np.isfinite(self.data.likelihood_image) & np.isfinite(self.data.likelihood_noise) & (self.data.likelihood_noise > 0)
+        model_noise = self.data.noise_from_model(model_image)
+        valid = np.isfinite(self.data.likelihood_image) & np.isfinite(model_noise) & (model_noise > 0)
         if self.data.likelihood_mask is not None:
             valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
-        residual = (self.data.likelihood_image - model_image) / self.data.likelihood_noise
+        residual = (self.data.likelihood_image - model_image) / model_noise
         chi2 = float(np.sum(np.square(residual[valid])))
         n_data = int(np.sum(valid))
         n_free = int(sum(np.asarray(value).size for value in parameters.values()))

@@ -4,6 +4,7 @@ from pathlib import Path
 import sys
 
 import pytest
+import numpy as np
 
 from herculens_wrapper.api import (
     LensProfileCollection,
@@ -11,6 +12,8 @@ from herculens_wrapper.api import (
     MassProfile,
     PixelatedLensLight,
     PixelatedSource,
+    SingleBandData,
+    SingleBandModel,
 )
 from herculens_wrapper.api._logging import (
     RunContext,
@@ -46,6 +49,35 @@ class _Result:
     def output(self, save_path=None):
         print("result body")
         return Path(save_path)
+
+
+def test_uniform_exposure_poisson_noise_uses_the_model_prediction():
+    """The Poisson correction is active in the actual likelihood LensImage."""
+    data = SingleBandData(
+        image=np.zeros((7, 7)), noise=None, psf=np.eye(3), pixel_scale=0.1,
+        background_rms=2.0, exposure_time=10.0,
+    )
+    source = LightProfile(
+        "SERSIC_ELLIPSE",
+        prior={"amp": [1.0, 0.1], "R_sersic": [0.1, 0.2], "n_sersic": [1.0, 0.2],
+               "e1": [-0.1, 0.1], "e2": [-0.1, 0.1], "center_x": [-0.1, 0.1],
+               "center_y": [-0.1, 0.1]},
+    )
+    model = SingleBandModel(
+        profiles=LensProfileCollection(source_light=source), observation=data,
+    )
+    variance = np.asarray(model.lens_image.Noise.C_D_model(np.full((7, 7), 5.0)))
+    assert data.uses_poisson_noise
+    assert np.allclose(variance, 4.5)  # 2**2 + 5 e-/s / (10 s)
+    assert np.allclose(data.noise_from_model(np.full((7, 7), 5.0)), np.sqrt(4.5))
+
+
+def test_noise_map_and_poisson_noise_are_mutually_exclusive():
+    with pytest.raises(ValueError, match="either noise"):
+        SingleBandData(
+            image=np.zeros((3, 3)), noise=np.ones((3, 3)), psf=np.eye(3), pixel_scale=0.1,
+            background_rms=1.0, exposure_time=10.0,
+        )
 
 
 def _worker_log(directory, run_id):

@@ -177,6 +177,25 @@ noise = data.likelihood_noise
 mask = data.likelihood_mask
 ```
 
+### 均匀 exposure time 的 Poisson 修正
+
+若图像和模型的单位都是电子计数率（例如 `e-/s`），可不用固定
+`noise` map，而是给定背景 RMS（同为 `e-/s`）和统一曝光时间（秒）：
+
+```python
+data = SingleBandData.from_fits(
+    "image.fits", None, "psf.fits",
+    pixel_scale=0.03,
+    background_rms=0.012,  # e-/s
+    exposure_time=1200.0,  # s
+)
+```
+
+似然采用模型依赖的 Gaussian--Poisson 方差
+`background_rms**2 + maximum(model, 0) / exposure_time`。`noise` map 与
+`background_rms`/`exposure_time` 两种输入互斥；原有的 `noise` map 接口完全保留。
+当前只支持标量、空间均匀的 exposure time，暂不支持 variance boost map。
+
 ## 3. Profile API
 
 ### Mass 和 light profiles

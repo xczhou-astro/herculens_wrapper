@@ -801,8 +801,15 @@ def create_prob_model(
     additional_observations=None,
     param_overrides=None,
     likelihood_mask=None,
+    exposure_time=None,
+    background_rms=None,
 ):
-    noise = Noise(nx=image_data.shape[0], ny=image_data.shape[0], noise_map=noise_map)
+    noise = Noise(
+        nx=image_data.shape[0], ny=image_data.shape[0],
+        noise_map=noise_map if exposure_time is None else None,
+        exposure_time=exposure_time,
+        background_rms=background_rms,
+    )
 
     # For wavelet_sparsity prior, we need to initialize the RegularizationModel
     source_types = type_list.get('source_light_type_list', [])
@@ -1478,6 +1485,7 @@ def create_prob_model(
     model_instance.lens_image = lens_image
     model_instance.image_data = image_data
     model_instance.noise_map = noise_map
+    model_instance.noise_model = noise
     model_instance.likelihood_mask = likelihood_mask
     model_instance.likelihood_scale = float(getattr(args, 'likelihood_scale', 1.0))
     model_instance.param_list = param_list
@@ -2430,6 +2438,8 @@ def create_lens_image(
     source_arc_mask=None,
     source_grid_scale=1.0,
     conjugate_points=None,
+    exposure_time=None,
+    background_rms=None,
 ):
     num_pixels = image_data.shape[0]
 
@@ -2465,7 +2475,12 @@ def create_lens_image(
         pixel_size=pixel_scale,
         kernel_supersampling_factor=psf_supersampling_factor,
     )
-    noise = Noise(nx=num_pixels, ny=num_pixels, noise_map=noise_map)
+    noise = Noise(
+        nx=num_pixels, ny=num_pixels,
+        noise_map=noise_map if exposure_time is None else None,
+        exposure_time=exposure_time,
+        background_rms=background_rms,
+    )
     pixel_grid, ps_grid = create_pixel_grids(num_pixels, pixel_scale)
 
     lens_mass_model = MassModel(type_list['lens_mass_type_list'])

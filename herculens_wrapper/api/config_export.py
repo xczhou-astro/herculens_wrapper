@@ -85,6 +85,11 @@ def export_wrapper_config(
         raise TypeError("sampler must be a SamplerConfig instance.")
     if not isinstance(n_runs, int) or isinstance(n_runs, bool) or n_runs < 1:
         raise ValueError("n_runs must be a positive integer.")
+    if model.data.uses_poisson_noise:
+        raise NotImplementedError(
+            "Legacy wrapper config export does not support model-dependent Poisson noise. "
+            "Run the API model directly instead."
+        )
 
     data_paths = getattr(model.data, "_input_paths", {})
     missing = [name for name in ("image", "noise", "psf") if name not in data_paths]

@@ -276,6 +276,7 @@ def evaluate_mcmc_component_medians(
     totals_list, sources_list, lens_lights_list, no_lens_lights_list, point_sources_list = [], [], [], [], []
     image_data = getattr(prob_model, "image_data", None)
     noise_map = getattr(prob_model, "noise_map", None)
+    noise_model = getattr(prob_model, "noise_model", None)
     likelihood_mask = getattr(prob_model, "likelihood_mask", None)
     valid = None
     log_normalization = 0.0
@@ -284,7 +285,8 @@ def evaluate_mcmc_component_medians(
         valid = np.isfinite(image_data) & np.isfinite(noise_map) & (noise_map > 0)
         if likelihood_mask is not None:
             valid &= np.asarray(likelihood_mask, dtype=bool)
-        log_normalization = float(np.sum(np.log(2.0 * np.pi * noise_map[valid] ** 2)))
+        if noise_model is None or getattr(noise_model, "_noise_map", None) is not None:
+            log_normalization = float(np.sum(np.log(2.0 * np.pi * noise_map[valid] ** 2)))
     likelihood_scale = float(getattr(prob_model, "likelihood_scale", 1.0))
     max_log_likelihood, chi2_at_max_loglike, max_sample_index = -np.inf, None, None
     for b_start in range(0, n_total_samples, batch_size):
@@ -301,9 +303,17 @@ def evaluate_mcmc_component_medians(
         no_lens_lights_list.append(np.asarray(b_no_lens_light))
         point_sources_list.append(np.asarray(b_point_source))
         if valid is not None:
-            residual = (total_cpu - image_data[None, ...]) / noise_map[None, ...]
+            if noise_model is not None and getattr(noise_model, "_noise_map", None) is None:
+                noise_batch = np.sqrt(np.asarray(noise_model.C_D_model(jnp.asarray(total_cpu))))
+                normalization = np.sum(
+                    np.log(2.0 * np.pi * noise_batch[..., valid] ** 2), axis=1,
+                )
+            else:
+                noise_batch = noise_map[None, ...]
+                normalization = log_normalization
+            residual = (total_cpu - image_data[None, ...]) / noise_batch
             chi2_batch = np.sum(np.square(residual[..., valid]), axis=1)
-            loglike_batch = -0.5 * likelihood_scale * (chi2_batch + log_normalization)
+            loglike_batch = -0.5 * likelihood_scale * (chi2_batch + normalization)
             local_index = int(np.argmax(loglike_batch))
             local_loglike = float(loglike_batch[local_index])
             if local_loglike > max_log_likelihood:

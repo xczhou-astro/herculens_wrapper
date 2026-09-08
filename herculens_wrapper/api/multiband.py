@@ -81,9 +81,15 @@ class MultiBandData:
         if scale is None:
             raise ValueError(f"{name}: pixel_scale is required.")
         data, noise, psf = (spec.pop(key, None) for key in ("data", "noise", "psf"))
-        if any(item is None for item in (data, noise, psf)):
-            raise ValueError(f"{name}: dictionary input requires data, noise, and psf.")
-        if all(isinstance(item, (str, Path)) for item in (data, noise, psf)):
+        poisson = spec.get("background_rms") is not None or spec.get("exposure_time") is not None
+        if data is None or psf is None or (noise is None and not poisson):
+            raise ValueError(
+                f"{name}: dictionary input requires data, psf, and either noise or "
+                "background_rms plus exposure_time."
+            )
+        if all(isinstance(item, (str, Path)) for item in (data, psf)) and (
+            noise is None or isinstance(noise, (str, Path))
+        ):
             return SingleBandData.from_fits(data, noise, psf, pixel_scale=scale, **spec)
         return SingleBandData(image=data, noise=noise, psf=psf, pixel_scale=scale, **spec)
 
@@ -229,11 +235,13 @@ class MultiBandFitResult:
         """Return joint and per-band Gaussian-residual fit metrics."""
         per_band, total_chi2, total_pixels, log_likelihood = {}, 0.0, 0, 0.0
         for band, kwargs in zip(self._model.bands, self.kwargs_by_band().values()):
-            residual = (np.asarray(band["lens_image"].model(**kwargs)) - band["image_data"]) / band["noise_map"]
+            prediction = np.asarray(band["lens_image"].model(**kwargs))
+            noise_map = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(prediction)))
+            residual = (prediction - band["image_data"]) / noise_map
             valid = np.isfinite(residual)
             if band["fit_mask_bool"] is not None: valid &= np.asarray(band["fit_mask_bool"], bool)
             chi2, n_pixels = float(np.sum(residual[valid] ** 2)), int(np.sum(valid))
-            noise = np.asarray(band["noise_map"])[valid]
+            noise = noise_map[valid]
             per_band[band["name"]] = {"chi2": chi2, "n_data_pixels": n_pixels}
             total_chi2 += chi2; total_pixels += n_pixels
             log_likelihood += float(
@@ -288,7 +296,8 @@ class MultiBandFitResult:
             if components is not None and pixelated_index is not None:
                 kwargs_for_plots["kwargs_source"][pixelated_index]["pixels"] = components["source_plane"]
             best = np.asarray(components["total"]) if components is not None else np.asarray(band["lens_image"].model(**kwargs))
-            residual = (best - band["image_data"]) / band["noise_map"]
+            output_noise = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(best)))
+            residual = (best - band["image_data"]) / output_noise
             valid = np.isfinite(residual)
             if band["fit_mask_bool"] is not None: valid &= np.asarray(band["fit_mask_bool"], bool)
             chi2 = float(np.sum(residual[valid] ** 2))
@@ -315,7 +324,7 @@ class MultiBandFitResult:
             try:
                 generate_run_plots(
                     lens_image=band["lens_image"], kwargs_best=kwargs_for_plots, image_data=band["image_data"],
-                    noise_map=band["noise_map"], psf_data=self._model.observations[name].psf,
+                    noise_map=output_noise, psf_data=self._model.observations[name].psf,
                     pixel_scale=self._model.observations[name].pixel_scale, save_path=str(directory),
                     sampler="hmc" if self.samples is not None else "svi",
                     best_fit_model=best, chi2=chi2, reduced_chi2=None, extra=None,
@@ -326,13 +335,13 @@ class MultiBandFitResult:
                 )
             except Exception as error: skipped[f"{name}_plots"] = str(error)
             band_results.append({"name": name, "lens_image": band["lens_image"], "kwargs_result": kwargs_for_plots,
-                                 "image_data": band["image_data"], "noise_map": band["noise_map"],
+                                 "image_data": band["image_data"], "noise_map": output_noise,
                                  "pixel_scale": self._model.observations[name].pixel_scale,
                                  "model_total": components["total"] if components is not None else None,
                                  "model_lensed_source": components["source"] if components is not None else None,
                                  "model_lens_light": components["lens_light"] if components is not None else None})
             arrays.update({f"{name}_best_fit_model": best, f"{name}_image_data": band["image_data"],
-                           f"{name}_noise_map": band["noise_map"], f"{name}_fit_mask_bool": valid})
+                           f"{name}_noise_map": output_noise, f"{name}_fit_mask_bool": valid})
             files[f"{name}_kwargs"] = directory / "kwargs_result.json"
         with (root / "kwargs_result.json").open("w") as stream:
             json.dump(
@@ -549,10 +558,12 @@ class MultiBandModel:
                 psf_supersampling_factor=data.psf_supersampling_factor,
                 kwargs_numerics=self.numerics, source_arc_mask=data.source_arc_mask,
                 source_grid_scale=self.source_grid_scale,
+                exposure_time=data.exposure_time, background_rms=data.background_rms,
             )
             bands.append({"name": name, "site_prefix": band_site_prefix(index, name), "lens_image": lens_image,
                 "image_data": data.likelihood_image, "noise_map": data.likelihood_noise, "fit_mask_bool": data.likelihood_mask,
-                "param_list": params, "type_list": types, "args": SimpleNamespace(likelihood_scale=self.likelihood_scale)})
+                "param_list": params, "type_list": types, "args": SimpleNamespace(likelihood_scale=self.likelihood_scale),
+                "exposure_time": data.exposure_time, "background_rms": data.background_rms})
         self.bands = bands
         self.prob_model = create_multiband_prob_model(bands, shared_params, shared_types, SimpleNamespace(likelihood_scale=self.likelihood_scale))
 
@@ -988,7 +999,7 @@ class MultiBandModel:
             valid = np.isfinite(data) & np.isfinite(noise) & (noise > 0)
             if band["fit_mask_bool"] is not None:
                 valid &= np.asarray(band["fit_mask_bool"], dtype=bool)
-            band_likelihood[name] = (data, noise, valid, float(np.sum(np.log(2 * np.pi * noise[valid] ** 2))))
+            band_likelihood[name] = (data, noise, valid)
 
         best_loglike, best_chi2, best_index = -np.inf, None, None
         for start in range(0, n_samples, batch_size):
@@ -998,16 +1009,19 @@ class MultiBandModel:
                 for key, value in samples.items()
             }
             joint_chi2 = np.zeros(stop - start, dtype=float)
-            joint_normalization = 0.0
+            joint_normalization = np.zeros(stop - start, dtype=float)
             for name, evaluator in evaluators.items():
                 values = evaluator(device_draws)
                 for label, image_stack in zip(outputs[name], values):
                     outputs[name][label].append(np.asarray(image_stack))
-                data, noise, valid, normalization = band_likelihood[name]
+                data, noise, valid = band_likelihood[name]
                 total = np.asarray(values[0])
-                residual = (total - data[None, ...]) / noise[None, ...]
+                noise_batch = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(jnp.asarray(total))))
+                residual = (total - data[None, ...]) / noise_batch
                 joint_chi2 += np.sum(np.square(residual[..., valid]), axis=1)
-                joint_normalization += normalization
+                joint_normalization += np.sum(
+                    np.log(2 * np.pi * noise_batch[..., valid] ** 2), axis=1,
+                )
             joint_loglike = -0.5 * self.likelihood_scale * (joint_chi2 + joint_normalization)
             local_index = int(np.argmax(joint_loglike))
             if float(joint_loglike[local_index]) > best_loglike:
