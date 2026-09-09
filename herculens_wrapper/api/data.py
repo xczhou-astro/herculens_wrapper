@@ -13,6 +13,7 @@ class SingleBandData:
     psf: np.ndarray
     pixel_scale: float
     background_rms: float | None = None
+    background_rms_prior: dict[str, Any] | tuple[float, float] | list[float] | None = None
     exposure_time: float | None = None
     psf_supersampling_factor: int = 1
     crop_size: int | None = None
@@ -61,25 +62,33 @@ class SingleBandData:
     def __post_init__(self) -> None:
         self.image, self.psf = np.asarray(self.image, dtype=float), np.asarray(self.psf, dtype=float)
         if self.image.ndim != 2 or self.image.shape[0] != self.image.shape[1]: raise ValueError("image must be a square 2-D array.")
-        poisson_settings = (self.background_rms is not None, self.exposure_time is not None)
-        if any(poisson_settings) and not all(poisson_settings):
-            raise ValueError("background_rms and exposure_time must be supplied together.")
-        if self.noise is not None and all(poisson_settings):
+        has_fixed_background = self.background_rms is not None
+        has_sampled_background = self.background_rms_prior is not None
+        if has_fixed_background and has_sampled_background:
+            raise ValueError("Specify either background_rms or background_rms_prior, not both.")
+        if has_sampled_background:
+            self.background_rms_prior = self._coerce_background_rms_prior(self.background_rms_prior)
+        has_poisson_noise = has_fixed_background or has_sampled_background
+        if has_poisson_noise != (self.exposure_time is not None):
+            raise ValueError(
+                "exposure_time must be supplied with either background_rms or background_rms_prior."
+            )
+        if self.noise is not None and has_poisson_noise:
             raise ValueError(
                 "Specify either noise (a complete fixed noise map) or "
-                "background_rms plus exposure_time (model-dependent Poisson noise), not both."
+                "a background RMS noise model plus exposure_time, not both."
             )
-        if self.noise is None and not all(poisson_settings):
-            raise ValueError("Supply noise, or supply both background_rms and exposure_time.")
+        if self.noise is None and not has_poisson_noise:
+            raise ValueError("Supply noise, or supply exposure_time plus background_rms/background_rms_prior.")
         if self.noise is None:
-            if not np.isfinite(self.background_rms) or self.background_rms <= 0:
+            if has_fixed_background and (not np.isfinite(self.background_rms) or self.background_rms <= 0):
                 raise ValueError("background_rms must be finite and positive.")
             if not np.isfinite(self.exposure_time) or self.exposure_time <= 0:
                 raise ValueError("exposure_time must be finite and positive.")
             # Keep a positive reference noise image for display, masking, and
             # backwards-compatible diagnostic APIs. The likelihood itself
             # obtains its variance from the current model prediction.
-            self.noise = np.full(self.image.shape, float(self.background_rms))
+            self.noise = np.full(self.image.shape, self.reference_background_rms)
         else:
             self.noise = np.asarray(self.noise, dtype=float)
         if self.noise.shape != self.image.shape: raise ValueError("noise must have the same shape as image.")
@@ -88,6 +97,29 @@ class SingleBandData:
         self._apply_background_subtraction()
         self._source_arc_mask: np.ndarray | None = None
         self._contaminate_mask: np.ndarray | None = None
+
+    @staticmethod
+    def _coerce_background_rms_prior(value: dict[str, Any] | tuple[float, float] | list[float]) -> dict[str, float | str]:
+        """Normalize the positive scalar prior used for a sampled background RMS."""
+        if isinstance(value, dict):
+            kind = str(value.get("kind", "log_uniform")).lower().replace("-", "_")
+            low, high = value.get("low"), value.get("high")
+        elif isinstance(value, (tuple, list)) and len(value) == 2:
+            kind, low, high = "log_uniform", value[0], value[1]
+        else:
+            raise TypeError(
+                "background_rms_prior must be {'kind': 'log_uniform', 'low': ..., 'high': ...} "
+                "or a two-element [low, high] sequence."
+            )
+        if kind != "log_uniform":
+            raise ValueError("background_rms_prior currently supports only kind='log_uniform'.")
+        try:
+            low, high = float(low), float(high)
+        except (TypeError, ValueError) as error:
+            raise TypeError("background_rms_prior limits must be numeric.") from error
+        if not np.isfinite(low) or not np.isfinite(high) or low <= 0 or high <= low:
+            raise ValueError("background_rms_prior requires finite limits with 0 < low < high.")
+        return {"kind": kind, "low": low, "high": high}
 
     def _apply_crop(self) -> None:
         if self.crop_size is None:
@@ -131,6 +163,7 @@ class SingleBandData:
                   source_arc_mask_path: str | None = None, source_arc_mask_radius: dict | None = None,
                   contaminate_mask_path: str | None = None,
                   background_rms: float | None = None,
+                  background_rms_prior: dict[str, Any] | tuple[float, float] | list[float] | None = None,
                   exposure_time: float | None = None) -> "SingleBandData":
         from astropy.io import fits
         instance = cls(
@@ -142,7 +175,8 @@ class SingleBandData:
                 {"num_pixels": 0, "corner": "upper left"} if background_subtract is None else background_subtract
             ), source_arc_mask_path=source_arc_mask_path, source_arc_mask_radius=source_arc_mask_radius,
             contaminate_mask_path=contaminate_mask_path,
-            background_rms=background_rms, exposure_time=exposure_time,
+            background_rms=background_rms, background_rms_prior=background_rms_prior,
+            exposure_time=exposure_time,
         )
         instance._input_paths = {
             "image": Path(image_path).expanduser(),
@@ -172,6 +206,7 @@ class SingleBandData:
         background_subtract: dict[str, Any] | None = None,
         source_arc_mask_radius: dict | None = None,
         background_rms: float | None = None,
+        background_rms_prior: dict[str, Any] | tuple[float, float] | list[float] | None = None,
         exposure_time: float | None = None,
     ) -> "SingleBandData":
         """Load image products stored as HDUs in one FITS container.
@@ -230,6 +265,7 @@ class SingleBandData:
             ),
             source_arc_mask_radius=source_arc_mask_radius,
             background_rms=background_rms,
+            background_rms_prior=background_rms_prior,
             exposure_time=exposure_time,
         )
         # A mask held in the container must receive exactly the same crop as
@@ -414,7 +450,22 @@ class SingleBandData:
         """Whether variance is evaluated from the current model brightness."""
         return self.exposure_time is not None
 
-    def noise_from_model(self, model: np.ndarray) -> np.ndarray:
+    @property
+    def samples_background_rms(self) -> bool:
+        """Whether the background Gaussian RMS is a likelihood latent variable."""
+        return self.background_rms_prior is not None
+
+    @property
+    def reference_background_rms(self) -> float:
+        """A display-only representative RMS when the physical RMS is sampled."""
+        if self.background_rms is not None:
+            return float(self.background_rms)
+        prior = self.background_rms_prior
+        if prior is None:
+            raise RuntimeError("No background RMS is configured.")
+        return float(np.sqrt(float(prior["low"]) * float(prior["high"])))
+
+    def noise_from_model(self, model: np.ndarray, *, background_rms: float | None = None) -> np.ndarray:
         """Return the likelihood RMS for a predicted image.
 
         In Poisson mode image/model/background_rms share one linear flux unit
@@ -425,7 +476,13 @@ class SingleBandData:
             raise ValueError("model must have the same shape as image.")
         if not self.uses_poisson_noise:
             return self.likelihood_noise
-        variance = float(self.background_rms) ** 2 + np.maximum(model, 0.0) / float(self.exposure_time)
+        if self.samples_background_rms:
+            if background_rms is None:
+                raise ValueError("background_rms is required when background_rms_prior is sampled.")
+            rms_background = float(np.asarray(background_rms).reshape(-1)[0])
+        else:
+            rms_background = float(self.background_rms)
+        variance = rms_background ** 2 + np.maximum(model, 0.0) / float(self.exposure_time)
         rms = np.sqrt(variance)
         mask = self.likelihood_mask
         return np.where(mask, rms, 1e10) if mask is not None else rms

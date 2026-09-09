@@ -803,12 +803,14 @@ def create_prob_model(
     likelihood_mask=None,
     exposure_time=None,
     background_rms=None,
+    background_rms_prior=None,
 ):
     noise = Noise(
         nx=image_data.shape[0], ny=image_data.shape[0],
         noise_map=noise_map if exposure_time is None else None,
         exposure_time=exposure_time,
         background_rms=background_rms,
+        verbose=background_rms is not None,
     )
 
     # For wavelet_sparsity prior, we need to initialize the RegularizationModel
@@ -1183,7 +1185,17 @@ def create_prob_model(
 
             model_image = lens_image.model(**model_params)
             numpyro.deterministic('model_image', model_image)
-            model_var = noise.C_D_model(model_image)
+            if background_rms_prior is not None:
+                background_rms_model = numpyro.sample(
+                    'background_rms',
+                    dist.LogUniform(
+                        float(background_rms_prior['low']),
+                        float(background_rms_prior['high']),
+                    ),
+                )
+                model_var = noise.C_D_model(model_image, background_rms=background_rms_model)
+            else:
+                model_var = noise.C_D_model(model_image)
             model_std = jnp.sqrt(model_var)
             data = jnp.asarray(image_data)
 
@@ -1486,6 +1498,7 @@ def create_prob_model(
     model_instance.image_data = image_data
     model_instance.noise_map = noise_map
     model_instance.noise_model = noise
+    model_instance.background_rms_prior = background_rms_prior
     model_instance.likelihood_mask = likelihood_mask
     model_instance.likelihood_scale = float(getattr(args, 'likelihood_scale', 1.0))
     model_instance.param_list = param_list
@@ -2480,6 +2493,7 @@ def create_lens_image(
         noise_map=noise_map if exposure_time is None else None,
         exposure_time=exposure_time,
         background_rms=background_rms,
+        verbose=background_rms is not None,
     )
     pixel_grid, ps_grid = create_pixel_grids(num_pixels, pixel_scale)
 

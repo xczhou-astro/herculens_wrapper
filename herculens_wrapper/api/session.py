@@ -122,6 +122,7 @@ class SingleBandModel:
                 "pixel_scale": data.pixel_scale,
                 "noise_model": (
                     {"kind": "poisson_gaussian", "background_rms": data.background_rms,
+                     "background_rms_prior": data.background_rms_prior,
                      "exposure_time": data.exposure_time}
                     if data.uses_poisson_noise else {"kind": "fixed_noise_map"}
                 ),
@@ -476,6 +477,7 @@ class SingleBandModel:
             args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
             exposure_time=self.data.exposure_time,
             background_rms=self.data.background_rms,
+            background_rms_prior=self.data.background_rms_prior,
         )
 
     def _declared_pixelated_lens_light_path(self) -> Path | None:
@@ -607,6 +609,7 @@ class SingleBandModel:
                     kwargs_lens_light_fixed=initial_kwargs.get("kwargs_lens_light"),
                     exposure_time=self.data.exposure_time,
                     background_rms=self.data.background_rms,
+                    background_rms_prior=self.data.background_rms_prior,
                     init_params_path=str(init_params_path),
                     likelihood_mask=self.data.likelihood_mask,
                     args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
@@ -984,6 +987,11 @@ class SingleBandModel:
             else: parameters = {}
         return np.asarray(self.lens_image.model(**self.prob_model.params2kwargs(parameters)))
 
+    def noise_from_model(self, model_image: np.ndarray, parameters: Mapping[str, Any]) -> np.ndarray:
+        """Evaluate diagnostic/output noise, including a sampled background RMS."""
+        sampled_rms = parameters.get("background_rms") if self.data.samples_background_rms else None
+        return self.data.noise_from_model(model_image, background_rms=sampled_rms)
+
     def mass_component_convergence(
         self, parameters: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
@@ -1025,8 +1033,12 @@ class SingleBandModel:
             raise ValueError("scale must be either 'linear' or 'log'.")
         if residual_vis_max < 0:
             raise ValueError("residual_vis_max must be non-negative.")
+        if parameters is None:
+            if self.result is None:
+                raise RuntimeError("Supply parameters or call run() first.")
+            parameters = self.result.parameters
         model = self.model_image(parameters)
-        residual = (model - self.data.likelihood_image) / self.data.noise_from_model(model)
+        residual = (model - self.data.likelihood_image) / self.noise_from_model(model, parameters)
         valid = np.isfinite(residual)
         if self.data.likelihood_mask is not None:
             valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
@@ -1114,7 +1126,7 @@ class SingleBandModel:
         if self.prob_model is None:
             raise RuntimeError("Call build() before evaluating metrics.")
         model_image = self.model_image(parameters)
-        model_noise = self.data.noise_from_model(model_image)
+        model_noise = self.noise_from_model(model_image, parameters)
         valid = np.isfinite(self.data.likelihood_image) & np.isfinite(model_noise) & (model_noise > 0)
         if self.data.likelihood_mask is not None:
             valid &= np.asarray(self.data.likelihood_mask, dtype=bool)

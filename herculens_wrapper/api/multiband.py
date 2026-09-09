@@ -550,6 +550,10 @@ class MultiBandModel:
         definitions = self.profiles.band_definitions(); bands = []
         shared_types = shared_params = None
         for index, (name, data) in enumerate(self.observations.items()):
+            if data.samples_background_rms:
+                raise NotImplementedError(
+                    "background_rms_prior is currently supported by SingleBandModel only."
+                )
             types, params = definitions[name]; validate_param_list(types, params)
             if shared_types is None: shared_types, shared_params = types["lens_mass_type_list"], params["lens_mass_params_list"]
             lens_image = create_lens_image(

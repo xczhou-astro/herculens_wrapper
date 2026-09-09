@@ -196,6 +196,28 @@ data = SingleBandData.from_fits(
 `background_rms`/`exposure_time` 两种输入互斥；原有的 `noise` map 接口完全保留。
 当前只支持标量、空间均匀的 exposure time，暂不支持 variance boost map。
 
+### 采样 background RMS
+
+若背景 Gaussian RMS 本身不确定，可令它成为一个全图共享的 SVI/HMC
+参数。此模式仍需要已知的曝光时间：
+
+```python
+data = SingleBandData.from_fits(
+    "image.fits", None, "psf.fits",
+    pixel_scale=0.03,
+    exposure_time=1200.0,
+    background_rms_prior={
+        "kind": "log_uniform",
+        "low": 5e-5,
+        "high": 2e-4,
+    },
+)
+```
+
+简写 `background_rms_prior=[5e-5, 2e-4]` 等价于上述 LogUniform prior。
+结果参数中会包含 `background_rms`。它与固定 `noise` map、固定
+`background_rms` 两种输入均互斥；目前仅支持 `SingleBandModel`。
+
 ## 3. Profile API
 
 ### Mass 和 light profiles

@@ -277,6 +277,7 @@ def evaluate_mcmc_component_medians(
     image_data = getattr(prob_model, "image_data", None)
     noise_map = getattr(prob_model, "noise_map", None)
     noise_model = getattr(prob_model, "noise_model", None)
+    background_rms_prior = getattr(prob_model, "background_rms_prior", None)
     likelihood_mask = getattr(prob_model, "likelihood_mask", None)
     valid = None
     log_normalization = 0.0
@@ -304,7 +305,15 @@ def evaluate_mcmc_component_medians(
         point_sources_list.append(np.asarray(b_point_source))
         if valid is not None:
             if noise_model is not None and getattr(noise_model, "_noise_map", None) is None:
-                noise_batch = np.sqrt(np.asarray(noise_model.C_D_model(jnp.asarray(total_cpu))))
+                if background_rms_prior is not None:
+                    background_rms = np.asarray(b_samples["background_rms"])
+                    background_rms = background_rms.reshape((-1, 1, 1))
+                    exposure_time = float(getattr(noise_model, "_exp_map"))
+                    noise_batch = np.sqrt(
+                        background_rms ** 2 + np.maximum(total_cpu, 0.0) / exposure_time,
+                    )
+                else:
+                    noise_batch = np.sqrt(np.asarray(noise_model.C_D_model(jnp.asarray(total_cpu))))
                 normalization = np.sum(
                     np.log(2.0 * np.pi * noise_batch[..., valid] ** 2), axis=1,
                 )

@@ -1468,7 +1468,7 @@ class FitResult:
         components = self.derived.get("components") or self.derived.get("component_medians")
         if components is not None:
             best_fit_model = np.asarray(components["total"])
-        output_noise = model.data.noise_from_model(best_fit_model)
+        output_noise = model.noise_from_model(best_fit_model, self.parameters)
         kwargs_for_plots = kwargs_best
         skipped: dict[str, str] = {}
         source_plane = self.derived.get("source_plane") if self.samples is not None else None

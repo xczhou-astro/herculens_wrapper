@@ -80,6 +80,29 @@ def test_noise_map_and_poisson_noise_are_mutually_exclusive():
         )
 
 
+def test_sampled_background_rms_is_a_single_likelihood_latent():
+    import jax
+    from numpyro import handlers
+
+    data = SingleBandData(
+        image=np.zeros((7, 7)), noise=None, psf=np.eye(3), pixel_scale=0.1,
+        background_rms_prior=[1.0, 4.0], exposure_time=10.0,
+    )
+    source = LightProfile(
+        "SERSIC_ELLIPSE",
+        prior={"amp": [1.0, 0.1], "R_sersic": [0.1, 0.2], "n_sersic": [1.0, 0.2],
+               "e1": [-0.1, 0.1], "e2": [-0.1, 0.1], "center_x": [-0.1, 0.1],
+               "center_y": [-0.1, 0.1]},
+    )
+    model = SingleBandModel(
+        profiles=LensProfileCollection(source_light=source), observation=data,
+    )
+    trace = handlers.trace(handlers.seed(model.prob_model.model, jax.random.PRNGKey(0))).get_trace()
+    assert "background_rms" in trace
+    assert data.samples_background_rms
+    assert np.allclose(data.noise_from_model(np.full((7, 7), 5.0), background_rms=2.0), np.sqrt(4.5))
+
+
 def _worker_log(directory, run_id):
     context = RunContext(Path(directory) / f"run_{run_id}", console=False, run_id=run_id)
     with context.capture(f"worker {run_id}"):
