@@ -437,6 +437,7 @@ class PowerSpectrum:
         learning_rate=0.01,
         progress_bar=True,
         param_name='source_grid',
+        kwargs_lens=None,
     ):
         if not init_params_path:
             return {}
@@ -447,7 +448,18 @@ class PowerSpectrum:
             print("[power_init] Warning: No kwargs_source found in prior run; skipping power_init.")
             return {}
 
-        source_image = _project_analytic_kwargs_to_pixel_source(lens_image, kwargs_source_analytic)
+        source_image, source_grid_spacing = _project_analytic_kwargs_to_pixel_source(
+            lens_image,
+            kwargs_source_analytic,
+            kwargs_lens=kwargs_lens,
+            return_grid_spacing=True,
+        )
+        if source_grid_spacing is not None:
+            dx, dy = source_grid_spacing
+            print(
+                '[pixelated-init: source] Adaptive source grid from inherited lens mass: '
+                f'dx={dx:.6g} arcsec, dy={dy:.6g} arcsec.'
+            )
 
         return PowerSpectrum.fit_power_spectrum_init(
             source_image,
@@ -1587,6 +1599,8 @@ def _project_analytic_kwargs_to_pixel_source(
     kwargs_source_analytic,
     *,
     source_light_type_list=None,
+    kwargs_lens=None,
+    return_grid_spacing=False,
 ):
     """
     Initialize pixel values from analytic kwargs_source on the PIXELATED grid.
@@ -1595,6 +1609,14 @@ def _project_analytic_kwargs_to_pixel_source(
     flux using the image-data pixel area. This matches Herculens' pixelated
     source convention: ``pixels`` are stored in image-data-pixel flux units,
     regardless of the source-grid sampling.
+
+    For an adaptive grid, ``kwargs_lens`` is required to construct the exact
+    current source-plane coordinates: the source-arc mask is ray-traced by
+    those inherited mass parameters, then enclosed in the target grid shape.
+    The Matérn field itself intentionally remains expressed in grid-pixel
+    units, matching the likelihood implementation's Fourier grid; the
+    physical spacing returned here is therefore diagnostic metadata rather
+    than a change in the unit of ``rho_source_grid``.
     """
     if source_light_type_list is None:
         source_light_type_list = _infer_analytic_source_light_types(kwargs_source_analytic)
@@ -1604,10 +1626,30 @@ def _project_analytic_kwargs_to_pixel_source(
             f'len(kwargs_source)={len(kwargs_source_analytic)}.'
         )
     lm = LightModel(source_light_type_list)
-    x_src, y_src = lens_image.SourceModel.pixel_grid.pixel_coordinates
+    adaptive_grid = bool(getattr(lens_image, '_src_adaptive_grid', False))
+    spacing = None
+    if adaptive_grid:
+        if not kwargs_lens:
+            raise ValueError(
+                'Adaptive source matching requires inherited kwargs_lens to build '
+                'the source-plane grid.'
+            )
+        x_src, y_src, _ = lens_image.get_source_coordinates(kwargs_lens)
+        x_src, y_src = jnp.asarray(x_src), jnp.asarray(y_src)
+        if x_src.ndim == 1 and y_src.ndim == 1:
+            if x_src.size < 2 or y_src.size < 2:
+                raise ValueError('Adaptive source grid requires at least two pixels per axis.')
+            spacing = (
+                float(np.median(np.abs(np.diff(np.asarray(x_src))))),
+                float(np.median(np.abs(np.diff(np.asarray(y_src))))),
+            )
+            x_src, y_src = jnp.meshgrid(x_src, y_src)
+    else:
+        x_src, y_src = lens_image.SourceModel.pixel_grid.pixel_coordinates
     sb = lm.surface_brightness(x_src, y_src, kwargs_source_analytic)
     pa = jnp.asarray(lens_image.Grid.pixel_area, dtype=jnp.float64)
-    return jnp.asarray(sb, dtype=jnp.float64) * pa
+    pixels = jnp.asarray(sb, dtype=jnp.float64) * pa
+    return (pixels, spacing) if return_grid_spacing else pixels
 
 
 def _infer_analytic_light_types(kwargs_light):

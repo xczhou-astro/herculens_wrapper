@@ -585,10 +585,12 @@ class SingleBandModel:
                     f"[pixelated-init: source] Fitting Matérn parameters "
                     f"({iterations} iterations) from the inherited analytic source..."
                 )
+                inherited_kwargs = self.prob_model.params2kwargs(initial)
                 power_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_source(
                     self.lens_image, str(init_params_path),
                     PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
                     seed=seed + 7919, max_iterations=iterations,
+                    kwargs_lens=inherited_kwargs.get("kwargs_lens"),
                 )
                 for name, value in power_values.items():
                     if name in initial:
