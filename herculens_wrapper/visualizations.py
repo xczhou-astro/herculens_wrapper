@@ -1859,7 +1859,7 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
         }
         units = {}
         normalized_type = profile_type.upper()
-        if normalized_type == 'ELL_MPPL':
+        if normalized_type in {'ELL_MPPL', 'EPL_M1M3M4'}:
             for name in ('varphi_m', 'phi_ref'):
                 if name in kwargs_mass:
                     original[name] = float(np.degrees(np.asarray(kwargs_mass[name])))
@@ -1918,7 +1918,7 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                 ),
             })
 
-        if normalized_type == 'ELL_MPPL':
+        if normalized_type in {'ELL_MPPL', 'EPL_M1M3M4'}:
             m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
             if m in {1, 3, 4}:
                 a_m_frac = kwargs_mass.get('a_m_frac')
@@ -1934,13 +1934,13 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                 if a_m_frac is not None:
                     converted['a_m_frac'] = float(np.asarray(a_m_frac))
                 profile['meaning'].update({
-                    'a_m_arcsec': 'ELL_MPPL physical multipole amplitude in arcsec.',
+                    'a_m_arcsec': f'{profile_type} physical multipole amplitude in arcsec.',
                     'a_m_frac': (
                         'Dimensionless fractional elliptical-radius perturbation; '
                         'the profile evaluates a_m_arcsec = a_m_frac * r_E.'
                     ),
                     'varphi_m_deg': (
-                        'ELL_MPPL eccentric anomaly from the reference ellipse semi-major axis; '
+                        f'{profile_type} eccentric anomaly from the reference ellipse semi-major axis; '
                         'it is not a polar position angle.'
                     ),
                     'phi_ref_deg': 'Reference-ellipse polar PA, counter-clockwise from +x.',
@@ -2019,7 +2019,7 @@ def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
                 f"[lens_mass_parameters] {label}: gamma_ext={converted['gamma_ext']:.6g}, "
                 f"PA={converted['PA_deg']:.3f} deg"
             )
-        elif profile['profile'].upper() == 'ELL_MPPL' and 'a_m_arcsec' in converted:
+        elif profile['profile'].upper() in {'ELL_MPPL', 'EPL_M1M3M4'} and 'a_m_arcsec' in converted:
             fraction_text = (
                 f", a_m_frac={converted['a_m_frac']:.6g}"
                 if 'a_m_frac' in converted else ''
@@ -2073,7 +2073,7 @@ def _mass_ellipticity_annotation(summary):
                 f"{label}: gamma_ext={converted['gamma_ext']:.4g}, "
                 f"PA={converted['PA_deg']:.2f} deg"
             )
-        elif profile['profile'].upper() == 'ELL_MPPL' and 'a_m_arcsec' in converted:
+        elif profile['profile'].upper() in {'ELL_MPPL', 'EPL_M1M3M4'} and 'a_m_arcsec' in converted:
             has_elliptical_multipole = True
             fraction_text = (
                 f", a_m_frac={converted['a_m_frac']:.4g}"

@@ -379,40 +379,34 @@ multipole = MassProfile(
 )
 ```
 
-### Elliptical multipole (`ELL_MPPL`)
+### JAXtronomy EPL plus elliptical multipoles (`EPL_MULTIPOLE_M1M3M4_ELL`)
 
-`ELL_MPPL` is separate from `MPPL`: it describes deviations from the
-elliptical isodensity contours of an EPL/SIE-like reference profile.  It has
-strict analytic solutions for fixed `m=1`, `m=3`, and `m=4`.  Keep it as a
-separate lens-mass component and link its geometry to the EPL:
+`EPL_MULTIPOLE_M1M3M4_ELL` is the direct JAXtronomy-style combination of an
+EPL and its elliptical `m=1`, `m=3`, and `m=4` perturbations.  It is one
+mass component; do not add a separate EPL or link geometry to other terms:
 
 ```python
-epl = MassProfile("EPL", prior={
+epl = MassProfile("EPL_MULTIPOLE_M1M3M4_ELL", prior={
     "theta_E": [0.5, 2.0], "gamma": [1.6, 2.4],
     "q": [0.3, 0.9], "phi": [-90.0, 90.0],
     "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
 })
-ell_mppl4 = MassProfile("ELL_MPPL", prior={
-    "m": 4,
-    "a_m": [0.0, 0.05],       # physical amplitude, in arcsec
-    "varphi_m": [-22.5, 22.5], # eccentric anomaly, in degrees
+    "a1_a": [-0.02, 0.02], "delta_phi_m1": [-15.0, 15.0],
+    "a3_a": [-0.02, 0.02], "delta_phi_m3": [-15.0, 15.0],
+    "a4_a": [-0.02, 0.02], "delta_phi_m4": [-15.0, 15.0],
 })
-ell_mppl4.q = epl.q
-ell_mppl4.phi_ref = epl.phi
-ell_mppl4.center_x = epl.center_x
-ell_mppl4.center_y = epl.center_y
-ell_mppl4.r_E = epl.theta_E
-
-profiles = LensProfileCollection(lens_mass=[epl, ell_mppl4])
+profiles = LensProfileCollection(lens_mass=[epl])
 ```
 
-All angles in the API are degrees.  `phi_ref` is the polar PA of the
-reference EPL; `varphi_m` is **not** a polar PA but the eccentric anomaly
-measured from that ellipse's semi-major axis.  Hence it should not be given
-the old `phi_m` prior mechanically.  `a_m` is dimensional (arcsec), unlike
-the dimensionless `a_m` convention of `MPPL` when `b` is linked to
-`theta_E`.  Near `q=1`, `ELL_MPPL` reduces continuously to a circular
-multipole with global phase `phi_ref + varphi_m`.
+All delta angles in the API are degrees and are eccentric anomalies measured
+from the EPL semi-major axis, not sky position angles.  Each dimensionless
+amplitude becomes the physical elliptical-multipole amplitude
+`a_m = a*_a * theta_E` internally.
+
+### Legacy note
+
+Use `EPL_MULTIPOLE_M1M3M4_ELL`; the earlier `ELL_MPPL` and `EPL_M1M3M4`
+public profile names are no longer registered.
 
 ## 5. Pixelated source
 
