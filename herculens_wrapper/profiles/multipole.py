@@ -228,3 +228,175 @@ class MPPLOffset:
             signature="(),()->(i,i)",
         )(x, y)
         return hessian[..., 0, 0], hessian[..., 1, 1], hessian[..., 0, 1]
+
+
+def _elliptical_angle(phi, q):
+    """Eccentric anomaly of a point with polar angle ``phi``."""
+    return jnp.arctan2(jnp.sin(phi), q * jnp.cos(phi))
+
+
+def _phi_ell(phi, q):
+    return phi - jnp.arctan2(jnp.sin(phi), jnp.cos(phi)) + _elliptical_angle(phi, q)
+
+
+def _f_m1(phi, q):
+    log_term = jnp.log(1 + q**2 + (q**2 - 1) * jnp.cos(2 * phi))
+    constant = jnp.log(2) * (1 + q) / 2 - (1 - q**2) * (1 + jnp.log(2) / 4)
+    return -(
+        jnp.cos(phi) * (q * log_term - constant)
+        + 2 * jnp.sin(phi) * (phi - _phi_ell(phi, q))
+    ) / (2 * (1 - q**2))
+
+
+def _f_m3(phi, q):
+    log_term = jnp.log(1 + q**2 + (q**2 - 1) * jnp.cos(2 * phi))
+    constant = (
+        jnp.log(2) * (1 + q) ** 2
+        - 2 * (1 - q) * (1 + q) ** 2 * (1 + jnp.log(2) / 4)
+        + (1 - q**2) ** 2 / 4
+    )
+    return (
+        jnp.cos(phi) * (q * (3 + q**2) * log_term - constant)
+        + 2 * jnp.sin(phi) * (1 + 3 * q**2) * (phi - _phi_ell(phi, q))
+    ) / (2 * (1 - q**2) ** 2)
+
+
+def _f_m4_1(phi, q):
+    denominator = jnp.sqrt(1 + q**2 + (q**2 - 1) * jnp.cos(2 * phi))
+    root = jnp.sqrt(1 - q**2)
+    prefactor = (1 + 6 * q**2 + q**4) / (1 - q**2) ** (5 / 2)
+    atan_term = jnp.arctan(jnp.sqrt(2) * root * jnp.cos(phi) / denominator)
+    log_term = jnp.log(root * jnp.sin(phi) / q + jnp.sqrt(1 + (1 - q**2) * jnp.sin(phi) ** 2 / q**2))
+    return (
+        -4 * jnp.sqrt(2) * (1 + 4 * q**2 + q**4 + (q**4 - 1) * jnp.cos(2 * phi))
+        / (3 * (1 - q**2) ** 2 * denominator)
+        + prefactor * jnp.cos(phi) * atan_term
+        + prefactor * jnp.sin(phi) * log_term
+    )
+
+
+def _f_m4_2(phi, q):
+    denominator = jnp.sqrt(1 + q**2 + (q**2 - 1) * jnp.cos(2 * phi))
+    root = jnp.sqrt(1 - q**2)
+    prefactor = 4 * q * (1 + q**2) / (1 - q**2) ** (5 / 2)
+    atan_term = jnp.arctan(jnp.sqrt(2) * root * jnp.cos(phi) / denominator)
+    log_term = jnp.log(root * jnp.sin(phi) / q + jnp.sqrt(1 + (1 - q**2) * jnp.sin(phi) ** 2 / q**2))
+    return (
+        -4 * jnp.sqrt(2) * q * jnp.sin(2 * phi) / (3 * (1 - q**2) * denominator)
+        - prefactor * jnp.sin(phi) * atan_term
+        + prefactor * jnp.cos(phi) * log_term
+    )
+
+
+class ELLMPPL:
+    """Exact elliptical multipole for SIE-like reference isodensity contours.
+
+    This is a standalone implementation of the ``m=1,3,4`` solutions of
+    Paugnat & Gilman (2025), following JAXtronomy's ``EllipticalMultipole``
+    convention.  It deliberately does *not* combine an EPL with the
+    multipole.  Link ``q``, ``phi_ref``, ``center_x``, ``center_y``, and
+    normally ``r_E`` to the companion EPL in the public API configuration.
+
+    ``varphi_m`` is the eccentric anomaly from the reference ellipse's
+    semi-major axis, not a polar angle.  The native profile receives radians;
+    the wrapper converts the public degree-valued API inputs before calling
+    this class.  ``a_m`` is dimensional (arcsec), as in JAXtronomy.
+    """
+
+    param_names = [
+        "m", "a_m", "varphi_m", "q", "phi_ref", "center_x", "center_y", "r_E",
+    ]
+    lower_limit_default = {
+        "m": 1, "a_m": 0, "varphi_m": -np.pi, "q": 0.001,
+        "phi_ref": -np.pi, "center_x": -100, "center_y": -100, "r_E": 1e-6,
+    }
+    upper_limit_default = {
+        "m": 4, "a_m": 100, "varphi_m": np.pi, "q": 1.0,
+        "phi_ref": np.pi, "center_x": 100, "center_y": 100, "r_E": 100,
+    }
+    fixed_default = {
+        "m": True, "a_m": False, "varphi_m": False, "q": False,
+        "phi_ref": False, "center_x": False, "center_y": False, "r_E": True,
+    }
+
+    @staticmethod
+    def _circular_potential(radius, angle, m, a_m, varphi_m, r_E):
+        radius = jnp.maximum(radius, 1e-6)
+        m_one = radius * jnp.log(radius / r_E) * a_m / 2 * jnp.cos(angle - varphi_m)
+        m_other = radius * a_m / (1 - m**2) * jnp.cos(m * (angle - varphi_m))
+        return jnp.where(m == 1, m_one, m_other)
+
+    @staticmethod
+    def function(x, y, m, a_m, varphi_m, q, phi_ref, center_x=0.0, center_y=0.0, r_E=1.0):
+        """Return the exact elliptical-multipole potential in arcsec squared."""
+        x_shifted, y_shifted = x - center_x, y - center_y
+        radius = jnp.maximum(jnp.hypot(x_shifted, y_shifted), 1e-6)
+        angle = jnp.arctan2(y_shifted, x_shifted)
+        local_angle = angle - phi_ref
+        near_circular = jnp.abs(1 - q**2) ** ((m + 1) / 2) < 1e-8
+
+        def m_one(_):
+            phase_cos, phase_sin = jnp.cos(m * varphi_m), jnp.sin(m * varphi_m)
+            lambda_m = 2 / (1 + q)
+            first = radius * _f_m1(local_angle, q) + lambda_m / 2 * radius * jnp.log(radius / r_E) * jnp.cos(local_angle)
+            second_angle = local_angle + jnp.pi / 2
+            second = radius * _f_m1(second_angle, 1 / q) + (2 / (1 + 1 / q)) / 2 * radius * jnp.log(radius / r_E) * jnp.cos(second_angle)
+            return a_m * jnp.sqrt(q) * (phase_cos * first - phase_sin * second / q)
+
+        def m_three(_):
+            phase_cos, phase_sin = jnp.cos(m * varphi_m), jnp.sin(m * varphi_m)
+            lambda_m = -2 * (1 - q) / (1 + q) ** 2
+            first = radius * _f_m3(local_angle, q) + lambda_m / 2 * radius * jnp.log(radius / r_E) * jnp.cos(local_angle)
+            inverse_q = 1 / q
+            lambda_inverse = -2 * (1 - inverse_q) / (1 + inverse_q) ** 2
+            second_angle = local_angle + jnp.pi / 2
+            second = radius * _f_m3(second_angle, inverse_q) + lambda_inverse / 2 * radius * jnp.log(radius / r_E) * jnp.cos(second_angle)
+            return a_m * jnp.sqrt(q) * (phase_cos * first + phase_sin * second / q)
+
+        def m_four(_):
+            phase_cos, phase_sin = jnp.cos(m * varphi_m), jnp.sin(m * varphi_m)
+            return a_m * jnp.sqrt(q) * radius * (
+                _f_m4_1(local_angle, q) * phase_cos + _f_m4_2(local_angle, q) * phase_sin
+            )
+
+        def invalid(_):
+            return jnp.full_like(radius, jnp.nan)
+
+        case = jnp.where(m == 1, 0, jnp.where(m == 3, 1, jnp.where(m == 4, 2, 3)))
+
+        return jax.lax.cond(
+            near_circular,
+            # At q=1 the reference ellipse has no intrinsic PA.  Preserve
+            # the continuous q->1 limit by converting the relative eccentric
+            # anomaly into its global polar phase before using the circular
+            # solution.
+            lambda _: ELLMPPL._circular_potential(
+                radius, angle, m, a_m, varphi_m + phi_ref, r_E
+            ),
+            lambda _: jax.lax.switch(case, (m_one, m_three, m_four, invalid), operand=None),
+            operand=None,
+        )
+
+    @staticmethod
+    def _gradient_at_point(x, y, **kwargs):
+        return jnp.array(jax.grad(ELLMPPL.function, argnums=(0, 1))(x, y, **kwargs))
+
+    @staticmethod
+    def derivatives(x, y, **kwargs):
+        gradient = jnp.vectorize(
+            lambda x_value, y_value: ELLMPPL._gradient_at_point(x_value, y_value, **kwargs),
+            signature="(),()->(i)",
+        )(x, y)
+        return gradient[..., 0], gradient[..., 1]
+
+    @staticmethod
+    def _hessian_at_point(x, y, **kwargs):
+        return jnp.array(jax.hessian(ELLMPPL.function, argnums=(0, 1))(x, y, **kwargs))
+
+    @staticmethod
+    def hessian(x, y, **kwargs):
+        hessian = jnp.vectorize(
+            lambda x_value, y_value: ELLMPPL._hessian_at_point(x_value, y_value, **kwargs),
+            signature="(),()->(i,i)",
+        )(x, y)
+        return hessian[..., 0, 0], hessian[..., 1, 1], hessian[..., 0, 1]

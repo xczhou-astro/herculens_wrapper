@@ -659,6 +659,13 @@ def _materialize_mass_parameters(profile_type, values):
         # The public API consistently exposes angles in degrees.  MPPL's
         # profile equation continues to receive and calculate in radians.
         result['phi_m'] = jnp.deg2rad(jnp.asarray(result['phi_m']))
+    elif normalized_type == 'ELL_MPPL':
+        # The public API uses degrees for all position angles.  ELL_MPPL
+        # evaluates the Paugnat--Gilman solution in radians; ``varphi_m`` is
+        # an eccentric anomaly, while ``phi_ref`` is the EPL polar PA.
+        for name in ('varphi_m', 'phi_ref'):
+            if name in result:
+                result[name] = jnp.deg2rad(jnp.asarray(result[name]))
     return result
 
 
@@ -1677,6 +1684,13 @@ def kwargs2params(
                     saved_mass['phi_m'], lens_mass_model.get('m', saved_mass.get('m')),
                     phi_specification=lens_mass_model.get('phi_m'),
                 )
+            restored_ell_mppl_angles = None
+            if str(profile_type).upper() == 'ELL_MPPL':
+                restored_ell_mppl_angles = {
+                    name: np.degrees(np.asarray(saved_mass[name]))
+                    for name in ('varphi_m', 'phi_ref')
+                    if name in lens_mass_model and name in saved_mass
+                }
             for key, param in lens_mass_model.items():
                 if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
                     if restored_q_phi is not None and key in {'q', 'phi'}:
@@ -1686,6 +1700,9 @@ def kwargs2params(
                         continue
                     if restored_phi_m is not None and key == 'phi_m':
                         params[f'lens_{key}_{i}'] = jnp.asarray(restored_phi_m)
+                        continue
+                    if restored_ell_mppl_angles is not None and key in restored_ell_mppl_angles:
+                        params[f'lens_{key}_{i}'] = jnp.asarray(restored_ell_mppl_angles[key])
                         continue
                     if key not in saved_mass:
                         continue
@@ -2713,7 +2730,8 @@ def validate_param_list(type_list, param_list):
                     "n_gaussians to be one of 5, 7, or 9; it cannot be sampled."
                 )
             continue
-        if profile_type not in {"MPPL", "MPPL_OFFSET"}:
+        normalized_profile_type = str(profile_type).upper()
+        if normalized_profile_type not in {"MPPL", "MPPL_OFFSET", "ELL_MPPL"}:
             continue
         if "m" not in params:
             raise ValueError(f"{profile_type} mass component {index} requires a fixed integer 'm' >= 1.")
@@ -2723,7 +2741,39 @@ def validate_param_list(type_list, param_list):
                 f"{profile_type} mass component {index} requires 'm' to be a fixed integer >= 1; "
                 "multipole order cannot be sampled continuously."
             )
-        if profile_type == "MPPL_OFFSET":
+        if normalized_profile_type == "ELL_MPPL":
+            if multipole_order not in (1, 3, 4):
+                raise ValueError(
+                    f"ELL_MPPL mass component {index} requires fixed m=1, 3, or 4; "
+                    f"got {multipole_order!r}."
+                )
+            required = {"a_m", "varphi_m", "q", "phi_ref"}
+            missing = required.difference(params)
+            if missing:
+                raise ValueError(
+                    f"ELL_MPPL mass component {index} requires {sorted(required)}; "
+                    f"missing {sorted(missing)}."
+                )
+            q_specification = params["q"]
+            if _normalize_link_spec(q_specification) is None:
+                if isinstance(q_specification, (list, tuple)):
+                    q_lower, q_upper = (
+                        q_specification[:2] if len(q_specification) == 2
+                        else q_specification[2:4] if len(q_specification) == 4
+                        else (None, None)
+                    )
+                else:
+                    q_lower = q_upper = q_specification
+                if (
+                    q_lower is not None
+                    and (not 0.0 < float(q_lower) <= 1.0 or not 0.0 < float(q_upper) <= 1.0)
+                ):
+                    raise ValueError(
+                        f"ELL_MPPL mass component {index} requires 0 < q <= 1; "
+                        f"got {q_specification!r}."
+                    )
+            continue
+        if normalized_profile_type == "MPPL_OFFSET":
             required = {"a_m", "phi_ref", "delta_phi_m"}
             missing = required.difference(params)
             if missing:

@@ -1340,10 +1340,12 @@ def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
 
     A single representative draw supplies high-dimensional pixel latents so
     ``params2kwargs`` can build a valid plotting dictionary.  All scalar and
-    small-vector sites receive their exact posterior median from disk.  The
-    rendered component and source-plane overrides provide the statistically
-    correct image products, so this never requires keeping every pixel latent
-    in host memory.
+    small-vector sites receive their exact posterior median only in the
+    plotting dictionary.  Their full draw arrays are returned separately for
+    ArviZ, which requires a leading draw axis in order to reconstruct chains.
+    The rendered component and source-plane overrides provide the
+    statistically correct image products, so this never requires keeping
+    every pixel latent in host memory.
     """
     with h5py.File(path, 'r') as handle:
         group = handle.get('samples')
@@ -1365,7 +1367,11 @@ def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
             values = np.asarray(dataset)
             median = np.median(values, axis=0)
             samples[site] = median
-            low_dimensional[site] = median
+            # Do not reduce these values: ``save_hmc_diagnostics`` reshapes
+            # them from (draw, ...) to (chain, draw_per_chain, ...) for
+            # ArviZ.  Passing the median here creates a scalar or parameter
+            # vector and used to fail with "tuple index out of range".
+            low_dimensional[site] = values
         health = (
             _hdf5_group_arrays(handle['sampler_health'])
             if 'sampler_health' in handle else {}

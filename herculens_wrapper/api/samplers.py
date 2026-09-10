@@ -102,9 +102,9 @@ def _truth_parameter_value(
     """Read truth, converting native angular kwargs to API degrees."""
     if parameter in truth_profile and truth_profile[parameter] is not None:
         value = truth_profile[parameter]
-        if component == "lens_mass" and parameter == "phi_m":
+        if component == "lens_mass" and parameter in {"phi_m", "varphi_m", "phi_ref"}:
             value = np.degrees(np.asarray(value))
-            if posterior is not None and np.asarray(value).ndim == 0:
+            if parameter == "phi_m" and posterior is not None and np.asarray(value).ndim == 0:
                 multipole_order = float(truth_profile.get("m", 1))
                 period = 360.0 / multipole_order
                 reference = float(np.nanmedian(np.asarray(posterior, dtype=float)))

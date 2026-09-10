@@ -379,6 +379,41 @@ multipole = MassProfile(
 )
 ```
 
+### Elliptical multipole (`ELL_MPPL`)
+
+`ELL_MPPL` is separate from `MPPL`: it describes deviations from the
+elliptical isodensity contours of an EPL/SIE-like reference profile.  It has
+strict analytic solutions for fixed `m=1`, `m=3`, and `m=4`.  Keep it as a
+separate lens-mass component and link its geometry to the EPL:
+
+```python
+epl = MassProfile("EPL", prior={
+    "theta_E": [0.5, 2.0], "gamma": [1.6, 2.4],
+    "q": [0.3, 0.9], "phi": [-90.0, 90.0],
+    "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
+})
+ell_mppl4 = MassProfile("ELL_MPPL", prior={
+    "m": 4,
+    "a_m": [0.0, 0.05],       # physical amplitude, in arcsec
+    "varphi_m": [-22.5, 22.5], # eccentric anomaly, in degrees
+})
+ell_mppl4.q = epl.q
+ell_mppl4.phi_ref = epl.phi
+ell_mppl4.center_x = epl.center_x
+ell_mppl4.center_y = epl.center_y
+ell_mppl4.r_E = epl.theta_E
+
+profiles = LensProfileCollection(lens_mass=[epl, ell_mppl4])
+```
+
+All angles in the API are degrees.  `phi_ref` is the polar PA of the
+reference EPL; `varphi_m` is **not** a polar PA but the eccentric anomaly
+measured from that ellipse's semi-major axis.  Hence it should not be given
+the old `phi_m` prior mechanically.  `a_m` is dimensional (arcsec), unlike
+the dimensionless `a_m` convention of `MPPL` when `b` is linked to
+`theta_E`.  Near `q=1`, `ELL_MPPL` reduces continuously to a circular
+multipole with global phase `phi_ref + varphi_m`.
+
 ## 5. Pixelated source
 
 ```python

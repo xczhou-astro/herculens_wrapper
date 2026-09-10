@@ -1899,7 +1899,25 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                 ),
             })
 
-        if profile_type.upper() == 'MPPL':
+        if profile_type.upper() == 'ELL_MPPL':
+            m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
+            if m in {1, 3, 4}:
+                converted.update({
+                    'a_m_arcsec': float(np.asarray(kwargs_mass.get('a_m', np.nan))),
+                    'varphi_m_deg': float(np.degrees(np.asarray(kwargs_mass.get('varphi_m', np.nan)))),
+                    'phi_ref_deg': float(np.degrees(np.asarray(kwargs_mass.get('phi_ref', np.nan)))),
+                    'axis_ratio_q': float(np.asarray(kwargs_mass.get('q', np.nan))),
+                })
+                profile['meaning'].update({
+                    'a_m_arcsec': 'ELL_MPPL physical multipole amplitude in arcsec.',
+                    'varphi_m_deg': (
+                        'ELL_MPPL eccentric anomaly from the reference ellipse semi-major axis; '
+                        'it is not a polar position angle.'
+                    ),
+                    'phi_ref_deg': 'Reference-ellipse polar PA, counter-clockwise from +x.',
+                    'axis_ratio_q': 'Axis ratio of the reference ellipse.',
+                })
+        elif profile_type.upper() == 'MPPL':
             m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
             if m >= 1:
                 coordinate_magnitude = None
