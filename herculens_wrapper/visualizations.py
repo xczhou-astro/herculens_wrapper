@@ -1840,7 +1840,13 @@ def _normalized_multipole_phase(phi_m, m):
 
 
 def lens_mass_ellipticity_summary(lens_image, kwargs_result):
-    """Return original and converted values for every lens-mass profile."""
+    """Return API-facing, unit-explicit values for every lens-mass profile.
+
+    Herculens evaluates MPPL/ELL_MPPL angles in radians, but public wrapper
+    inputs and all human-facing outputs use degrees.  This summary is never
+    fed back into the solver, so it intentionally converts those native
+    values before serialisation.
+    """
     profile_types = list(getattr(lens_image.MassModel, 'profile_type_list', []))
     profiles = []
     for index, kwargs_mass in enumerate(kwargs_result.get('kwargs_lens', [])):
@@ -1848,15 +1854,28 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
             continue
         profile_type = str(profile_types[index]) if index < len(profile_types) else 'unknown'
         converted = {}
+        original = {
+            key: _plain_mass_parameter(value) for key, value in kwargs_mass.items()
+        }
+        units = {}
+        normalized_type = profile_type.upper()
+        if normalized_type == 'ELL_MPPL':
+            for name in ('varphi_m', 'phi_ref'):
+                if name in kwargs_mass:
+                    original[name] = float(np.degrees(np.asarray(kwargs_mass[name])))
+                    units[name] = 'deg'
+        elif normalized_type == 'MPPL' and 'phi_m' in kwargs_mass:
+            original['phi_m'] = float(np.degrees(np.asarray(kwargs_mass['phi_m'])))
+            units['phi_m'] = 'deg'
         profile = {
             'index': index,
             'profile': profile_type,
-            'original_parameters': {
-                key: _plain_mass_parameter(value) for key, value in kwargs_mass.items()
-            },
+            'original_parameters': original,
             'converted_parameters': converted,
             'meaning': {},
         }
+        if units:
+            profile['parameter_units'] = units
 
         if {'e1', 'e2'}.issubset(kwargs_mass):
             e1 = float(np.asarray(kwargs_mass['e1']))
@@ -1899,17 +1918,27 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                 ),
             })
 
-        if profile_type.upper() == 'ELL_MPPL':
+        if normalized_type == 'ELL_MPPL':
             m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
             if m in {1, 3, 4}:
+                a_m_frac = kwargs_mass.get('a_m_frac')
+                a_m_arcsec = kwargs_mass.get('a_m')
+                if a_m_frac is not None:
+                    a_m_arcsec = np.asarray(a_m_frac) * np.asarray(kwargs_mass.get('r_E', np.nan))
                 converted.update({
-                    'a_m_arcsec': float(np.asarray(kwargs_mass.get('a_m', np.nan))),
+                    'a_m_arcsec': float(np.asarray(a_m_arcsec)),
                     'varphi_m_deg': float(np.degrees(np.asarray(kwargs_mass.get('varphi_m', np.nan)))),
                     'phi_ref_deg': float(np.degrees(np.asarray(kwargs_mass.get('phi_ref', np.nan)))),
                     'axis_ratio_q': float(np.asarray(kwargs_mass.get('q', np.nan))),
                 })
+                if a_m_frac is not None:
+                    converted['a_m_frac'] = float(np.asarray(a_m_frac))
                 profile['meaning'].update({
                     'a_m_arcsec': 'ELL_MPPL physical multipole amplitude in arcsec.',
+                    'a_m_frac': (
+                        'Dimensionless fractional elliptical-radius perturbation; '
+                        'the profile evaluates a_m_arcsec = a_m_frac * r_E.'
+                    ),
                     'varphi_m_deg': (
                         'ELL_MPPL eccentric anomaly from the reference ellipse semi-major axis; '
                         'it is not a polar position angle.'
@@ -1917,7 +1946,7 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                     'phi_ref_deg': 'Reference-ellipse polar PA, counter-clockwise from +x.',
                     'axis_ratio_q': 'Axis ratio of the reference ellipse.',
                 })
-        elif profile_type.upper() == 'MPPL':
+        elif normalized_type == 'MPPL':
             m = int(round(float(np.asarray(kwargs_mass.get('m', 0)))))
             if m >= 1:
                 coordinate_magnitude = None
@@ -1945,7 +1974,6 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                     amplitude_key = f'a_{m} (A_M{m})'
                     converted.update({
                         amplitude_key: a_m,
-                        'phi_m_rad': phi_m_normalized,
                         'phi_m_deg': float(np.degrees(phi_m_normalized)),
                         'orientation_period_deg': phase_period_deg,
                     })
@@ -1953,10 +1981,6 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                         amplitude_key: (
                             'MPPL perturbation strength 2e/(1+e). It is A_Mn when b is linked '
                             'to the companion EPL Einstein radius.'
-                        ),
-                        'phi_m_rad': (
-                            'MPPL orientation in radians in cos[m(theta-phi_m)], measured '
-                            'counter-clockwise from the positive x axis.'
                         ),
                         'phi_m_deg': 'The same MPPL orientation expressed in degrees.',
                         'orientation_period_deg': (
@@ -1995,6 +2019,18 @@ def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
                 f"[lens_mass_parameters] {label}: gamma_ext={converted['gamma_ext']:.6g}, "
                 f"PA={converted['PA_deg']:.3f} deg"
             )
+        elif profile['profile'].upper() == 'ELL_MPPL' and 'a_m_arcsec' in converted:
+            fraction_text = (
+                f", a_m_frac={converted['a_m_frac']:.6g}"
+                if 'a_m_frac' in converted else ''
+            )
+            print(
+                f"[lens_mass_parameters] {label}: m={profile['original_parameters']['m']}, "
+                f"a_m={converted['a_m_arcsec']:.6g} arcsec{fraction_text}, "
+                f"varphi_m={converted['varphi_m_deg']:.3f} deg, "
+                f"phi_ref={converted['phi_ref_deg']:.3f} deg, "
+                f"q={converted['axis_ratio_q']:.5f}"
+            )
         else:
             amplitude_key = next((key for key in converted if key.startswith('a_') and '(A_M' in key), None)
             if amplitude_key is not None:
@@ -2021,6 +2057,7 @@ def _mass_ellipticity_annotation(summary):
 
     lines = ['Human-readable lens-mass parameters:']
     has_multipole = False
+    has_elliptical_multipole = False
     for profile in profiles:
         label = f"{profile['profile']}[{profile['index']}]"
         converted = profile['converted_parameters']
@@ -2035,6 +2072,19 @@ def _mass_ellipticity_annotation(summary):
             lines.append(
                 f"{label}: gamma_ext={converted['gamma_ext']:.4g}, "
                 f"PA={converted['PA_deg']:.2f} deg"
+            )
+        elif profile['profile'].upper() == 'ELL_MPPL' and 'a_m_arcsec' in converted:
+            has_elliptical_multipole = True
+            fraction_text = (
+                f", a_m_frac={converted['a_m_frac']:.4g}"
+                if 'a_m_frac' in converted else ''
+            )
+            lines.append(
+                f"{label}: m={profile['original_parameters']['m']}, "
+                f"a_m={converted['a_m_arcsec']:.4g} arcsec{fraction_text}, "
+                f"varphi_m={converted['varphi_m_deg']:.2f} deg, "
+                f"phi_ref={converted['phi_ref_deg']:.2f} deg, "
+                f"q={converted['axis_ratio_q']:.3f}"
             )
         else:
             amplitude_key = next((key for key in converted if key.startswith('a_') and '(A_M' in key), None)
@@ -2051,6 +2101,11 @@ def _mass_ellipticity_annotation(summary):
         return None
     if has_multipole:
         lines.append('MPPL: a_m is perturbation strength; phi_m is CCW orientation from +x.')
+    if has_elliptical_multipole:
+        lines.append(
+            'ELL_MPPL: varphi_m is an eccentric anomaly relative to the reference ellipse major axis; '
+            'phi_ref is its CCW polar PA from +x.'
+        )
     return '\n'.join(lines)
 
 

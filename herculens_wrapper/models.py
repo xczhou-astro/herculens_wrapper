@@ -2789,12 +2789,19 @@ def validate_param_list(type_list, param_list):
                     f"ELL_MPPL mass component {index} requires fixed m=1, 3, or 4; "
                     f"got {multipole_order!r}."
                 )
-            required = {"a_m", "varphi_m", "q", "phi_ref"}
+            required = {"varphi_m", "q", "phi_ref"}
             missing = required.difference(params)
             if missing:
                 raise ValueError(
                     f"ELL_MPPL mass component {index} requires {sorted(required)}; "
                     f"missing {sorted(missing)}."
+                )
+            has_physical_amplitude = "a_m" in params
+            has_fractional_amplitude = "a_m_frac" in params
+            if has_physical_amplitude == has_fractional_amplitude:
+                raise ValueError(
+                    f"ELL_MPPL mass component {index} requires exactly one of 'a_m' "
+                    "(arcsec) or 'a_m_frac' (dimensionless)."
                 )
             q_specification = params["q"]
             if _normalize_link_spec(q_specification) is None:

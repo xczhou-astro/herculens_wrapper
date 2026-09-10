@@ -300,22 +300,31 @@ class ELLMPPL:
     ``varphi_m`` is the eccentric anomaly from the reference ellipse's
     semi-major axis, not a polar angle.  The native profile receives radians;
     the wrapper converts the public degree-valued API inputs before calling
-    this class.  ``a_m`` is dimensional (arcsec), as in JAXtronomy.
+    this class.
+
+    Supply exactly one amplitude convention:
+
+    * ``a_m`` is the physical amplitude in arcsec, matching JAXtronomy;
+    * ``a_m_frac`` is the paper's dimensionless fractional elliptical-radius
+      perturbation.  It is converted internally as ``a_m = a_m_frac * r_E``.
+
+    The fractional convention can be signed.  In particular, with an aligned
+    ``m=4`` phase, positive/negative values represent disky/boxy contours.
     """
 
     param_names = [
-        "m", "a_m", "varphi_m", "q", "phi_ref", "center_x", "center_y", "r_E",
+        "m", "a_m", "a_m_frac", "varphi_m", "q", "phi_ref", "center_x", "center_y", "r_E",
     ]
     lower_limit_default = {
-        "m": 1, "a_m": 0, "varphi_m": -np.pi, "q": 0.001,
+        "m": 1, "a_m": 0, "a_m_frac": -1, "varphi_m": -np.pi, "q": 0.001,
         "phi_ref": -np.pi, "center_x": -100, "center_y": -100, "r_E": 1e-6,
     }
     upper_limit_default = {
-        "m": 4, "a_m": 100, "varphi_m": np.pi, "q": 1.0,
+        "m": 4, "a_m": 100, "a_m_frac": 1, "varphi_m": np.pi, "q": 1.0,
         "phi_ref": np.pi, "center_x": 100, "center_y": 100, "r_E": 100,
     }
     fixed_default = {
-        "m": True, "a_m": False, "varphi_m": False, "q": False,
+        "m": True, "a_m": False, "a_m_frac": False, "varphi_m": False, "q": False,
         "phi_ref": False, "center_x": False, "center_y": False, "r_E": True,
     }
 
@@ -327,8 +336,18 @@ class ELLMPPL:
         return jnp.where(m == 1, m_one, m_other)
 
     @staticmethod
-    def function(x, y, m, a_m, varphi_m, q, phi_ref, center_x=0.0, center_y=0.0, r_E=1.0):
+    def function(
+        x, y, m, a_m=None, a_m_frac=None, varphi_m=0.0, q=1.0,
+        phi_ref=0.0, center_x=0.0, center_y=0.0, r_E=1.0,
+    ):
         """Return the exact elliptical-multipole potential in arcsec squared."""
+        if (a_m is None) == (a_m_frac is None):
+            raise ValueError(
+                "ELL_MPPL requires exactly one of 'a_m' (arcsec) or "
+                "'a_m_frac' (dimensionless)."
+            )
+        if a_m_frac is not None:
+            a_m = a_m_frac * r_E
         x_shifted, y_shifted = x - center_x, y - center_y
         radius = jnp.maximum(jnp.hypot(x_shifted, y_shifted), 1e-6)
         angle = jnp.arctan2(y_shifted, x_shifted)
