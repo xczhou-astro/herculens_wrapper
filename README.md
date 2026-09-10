@@ -215,6 +215,10 @@ data = SingleBandData.from_fits(
 ```
 
 简写 `background_rms_prior=[5e-5, 2e-4]` 等价于上述 LogUniform prior。
+
+SVI/HMC 的 `kwargs_result.json` 会在 `likelihood_parameters.background_rms`
+记录该参数的后验代表值；将该结果作为 `initialize(init_params_path=...)`
+的输入时会自动恢复，供 HMC 初始状态及其回退路径使用。
 结果参数中会包含 `background_rms`。它与固定 `noise` map、固定
 `background_rms` 两种输入均互斥；目前仅支持 `SingleBandModel`。
 

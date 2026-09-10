@@ -691,6 +691,7 @@ def plot_composite_2x3_panel(
     model_extended_override=None,
     model_lens_light_override=None,
     model_composite_override=None,
+    source_plane_override=None,
     source_arc_mask=None,
 ):
     ny, nx = image_data.shape
@@ -739,7 +740,10 @@ def plot_composite_2x3_panel(
     is_pixelated = pixelated_source is not None
 
     if is_pixelated:
-        source_for_plot = np.asarray(pixelated_source['pixels'])
+        source_for_plot = np.asarray(
+            pixelated_source['pixels'] if source_plane_override is None
+            else source_plane_override
+        )
         if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             kwargs_lens = kwargs_result.get('kwargs_lens', None)
             npix_src = source_for_plot.shape[0]

@@ -1479,6 +1479,15 @@ class FitResult:
             kwargs_for_plots = deepcopy(kwargs_best)
             kwargs_for_plots["kwargs_source"][pixelated_source_index]["pixels"] = source_plane
         kwargs_json = kwargs_best_to_json_pixelated_npy(kwargs_for_plots, str(directory), type_list)
+        # ``background_rms`` belongs to the likelihood rather than to a lens
+        # or light profile, so params2kwargs() intentionally cannot represent
+        # it.  Keep it beside the physical kwargs nevertheless: a subsequent
+        # ``initialize(init_params_path=...)`` must reproduce the SVI median
+        # when the Gaussian background RMS is sampled.
+        if model.data.samples_background_rms and "background_rms" in self.parameters:
+            kwargs_json["likelihood_parameters"] = {
+                "background_rms": self.parameters["background_rms"],
+            }
         kwargs_result_path = directory / "kwargs_result.json"
         with kwargs_result_path.open("w") as stream:
             json.dump(kwargs_json, stream, indent=4, default=json_serializer)

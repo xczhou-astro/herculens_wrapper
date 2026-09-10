@@ -103,6 +103,68 @@ def test_sampled_background_rms_is_a_single_likelihood_latent():
     assert np.allclose(data.noise_from_model(np.full((7, 7), 5.0), background_rms=2.0), np.sqrt(4.5))
 
 
+def test_hmc_component_diagnostics_stream_through_hdf5(tmp_path):
+    """Exact component medians do not require retaining posterior draws in RAM."""
+    import jax
+    from numpyro import handlers
+    from herculens_wrapper.samplers import (
+        _append_hmc_samples_hdf5,
+        _stream_hmc_component_medians_hdf5,
+    )
+
+    data = SingleBandData(
+        image=np.zeros((7, 7)), noise=np.ones((7, 7)), psf=np.eye(3), pixel_scale=0.1,
+    )
+    source = LightProfile(
+        "SERSIC_ELLIPSE",
+        prior={"amp": [1.0, 0.1], "R_sersic": [0.1, 0.2], "n_sersic": [1.0, 0.2],
+               "e1": [-0.1, 0.1], "e2": [-0.1, 0.1], "center_x": [-0.1, 0.1],
+               "center_y": [-0.1, 0.1]},
+    )
+    model = SingleBandModel(
+        profiles=LensProfileCollection(source_light=source), observation=data,
+    )
+    trace = handlers.trace(handlers.seed(model.prob_model.model, jax.random.PRNGKey(0))).get_trace()
+    samples = {
+        name: np.stack([np.asarray(site["value"]), np.asarray(site["value"])])
+        for name, site in trace.items()
+        if site["type"] == "sample" and not site["is_observed"]
+    }
+    posterior_path = tmp_path / "hmc_samples.h5"
+    component_path = tmp_path / "components.h5"
+    _append_hmc_samples_hdf5(posterior_path, samples, {}, num_chains=1)
+    medians = _stream_hmc_component_medians_hdf5(
+        model.prob_model, posterior_path, component_path,
+        sample_chunk_size=1, tile_size=3,
+    )
+    assert medians["total"].shape == (7, 7)
+    assert np.allclose(medians["total"], medians["source"])
+
+
+def test_init_restores_saved_likelihood_background_rms(tmp_path):
+    """A profile-agnostic likelihood latent survives SVI-to-HMC handoff."""
+    import json
+    import jax.numpy as jnp
+    from herculens_wrapper.models import get_init_params
+
+    class _ProbabilityModel:
+        def get_sample(self, _key):
+            return {"background_rms": jnp.asarray(1.0)}
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [],
+        "kwargs_source": [],
+        "likelihood_parameters": {"background_rms": 2.5},
+    }))
+    initial = get_init_params(
+        _ProbabilityModel(),
+        {"lens_mass_params_list": [], "source_light_params_list": []},
+        {"lens_mass_type_list": [], "source_light_type_list": []},
+        init_params_path=tmp_path,
+    )
+    assert float(initial["background_rms"]) == pytest.approx(2.5)
+
+
 def _worker_log(directory, run_id):
     context = RunContext(Path(directory) / f"run_{run_id}", console=False, run_id=run_id)
     with context.capture(f"worker {run_id}"):

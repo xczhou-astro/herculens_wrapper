@@ -214,10 +214,16 @@ def evaluate_mcmc_component_medians(
     active_sites=None,
     kwargs_lens_from_params=None,
     lens_image_override=None,
+    return_samples=False,
+    sample_consumer=None,
 ):
     """
-    Evaluates total, source-only, lens-light-only, and no-lens-light model images 
-    for all MCMC samples using fast vectorized JAX vmap and computes their pixel-by-pixel medians.
+    Evaluates model images for MCMC samples using vectorized JAX.
+
+    By default this returns pixel-by-pixel medians.  ``return_samples=True``
+    returns the per-draw component images.  ``sample_consumer`` receives
+    each CPU component chunk as ``(start, end, values)`` and avoids retaining
+    any image draw in RAM; it is used by HMC's disk-streamed diagnostics.
     """
     import jax
     import jax.numpy as jnp
@@ -238,6 +244,11 @@ def evaluate_mcmc_component_medians(
     type_list = getattr(prob_model, 'type_list', {})
     has_lens_light = bool(type_list.get('lens_light_type_list'))
     has_point_source = bool(type_list.get('point_source_type_list'))
+    pixelated_source_index = next((
+        index for index, profile_type in enumerate(
+            type_list.get('source_light_type_list', [])
+        ) if str(profile_type).upper() == 'PIXELATED'
+    ), None)
 
     def eval_single(sample_dict):
         kwargs_lens = (
@@ -269,11 +280,18 @@ def evaluate_mcmc_component_medians(
             img_no_lens_light = img_source
             img_point_source = jnp.zeros_like(img_total)
 
-        return img_total, img_source, img_lens_light, img_no_lens_light, img_point_source
+        if pixelated_source_index is None:
+            return img_total, img_source, img_lens_light, img_no_lens_light, img_point_source
+        source_plane = jnp.asarray(kw['kwargs_source'][pixelated_source_index]['pixels'])
+        return (
+            img_total, img_source, img_lens_light, img_no_lens_light,
+            img_point_source, source_plane,
+        )
 
     vmap_eval = jax.jit(jax.vmap(eval_single))
 
     totals_list, sources_list, lens_lights_list, no_lens_lights_list, point_sources_list = [], [], [], [], []
+    source_planes_list = []
     image_data = getattr(prob_model, "image_data", None)
     noise_map = getattr(prob_model, "noise_map", None)
     noise_model = getattr(prob_model, "noise_model", None)
@@ -296,13 +314,34 @@ def evaluate_mcmc_component_medians(
             k: jnp.asarray(samples[k][b_start:b_end])
             for k in sample_keys
         }
-        b_total, b_source, b_lens_light, b_no_lens_light, b_point_source = vmap_eval(b_samples)
+        evaluated = vmap_eval(b_samples)
+        if pixelated_source_index is None:
+            b_total, b_source, b_lens_light, b_no_lens_light, b_point_source = evaluated
+        else:
+            (
+                b_total, b_source, b_lens_light, b_no_lens_light,
+                b_point_source, b_source_plane,
+            ) = evaluated
         total_cpu = np.asarray(b_total)
-        totals_list.append(total_cpu)
-        sources_list.append(np.asarray(b_source))
-        lens_lights_list.append(np.asarray(b_lens_light))
-        no_lens_lights_list.append(np.asarray(b_no_lens_light))
-        point_sources_list.append(np.asarray(b_point_source))
+        component_batch = {
+            'total': total_cpu,
+            'source': np.asarray(b_source),
+            'lens_light': np.asarray(b_lens_light),
+            'no_lens_light': np.asarray(b_no_lens_light),
+            'point_source': np.asarray(b_point_source),
+        }
+        if pixelated_source_index is not None:
+            component_batch['source_plane'] = np.asarray(b_source_plane)
+        if sample_consumer is not None:
+            sample_consumer(b_start, b_end, component_batch)
+        else:
+            totals_list.append(component_batch['total'])
+            sources_list.append(component_batch['source'])
+            lens_lights_list.append(component_batch['lens_light'])
+            no_lens_lights_list.append(component_batch['no_lens_light'])
+            point_sources_list.append(component_batch['point_source'])
+            if pixelated_source_index is not None:
+                source_planes_list.append(component_batch['source_plane'])
         if valid is not None:
             if noise_model is not None and getattr(noise_model, "_noise_map", None) is None:
                 if background_rms_prior is not None:
@@ -330,13 +369,21 @@ def evaluate_mcmc_component_medians(
                 chi2_at_max_loglike = float(chi2_batch[local_index])
                 max_sample_index = b_start + local_index
 
-    result = {
-        'total': np.median(np.concatenate(totals_list, axis=0), axis=0),
-        'source': np.median(np.concatenate(sources_list, axis=0), axis=0),
-        'lens_light': np.median(np.concatenate(lens_lights_list, axis=0), axis=0),
-        'no_lens_light': np.median(np.concatenate(no_lens_lights_list, axis=0), axis=0),
-        'point_source': np.median(np.concatenate(point_sources_list, axis=0), axis=0),
-    }
+    if sample_consumer is not None:
+        result = {}
+    else:
+        per_draw = {
+            'total': np.concatenate(totals_list, axis=0),
+            'source': np.concatenate(sources_list, axis=0),
+            'lens_light': np.concatenate(lens_lights_list, axis=0),
+            'no_lens_light': np.concatenate(no_lens_lights_list, axis=0),
+            'point_source': np.concatenate(point_sources_list, axis=0),
+        }
+        if source_planes_list:
+            per_draw['source_plane'] = np.concatenate(source_planes_list, axis=0)
+        result = per_draw if return_samples else {
+            name: np.median(values, axis=0) for name, values in per_draw.items()
+        }
     if valid is not None:
         result['_sample_likelihood_summary'] = {
             'max_log_likelihood': float(max_log_likelihood),
@@ -1288,6 +1335,127 @@ def _load_hmc_samples_hdf5(path):
     return samples, extra_fields
 
 
+def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
+    """Load only low-dimensional samples needed for batch plots and ArviZ.
+
+    A single representative draw supplies high-dimensional pixel latents so
+    ``params2kwargs`` can build a valid plotting dictionary.  All scalar and
+    small-vector sites receive their exact posterior median from disk.  The
+    rendered component and source-plane overrides provide the statistically
+    correct image products, so this never requires keeping every pixel latent
+    in host memory.
+    """
+    with h5py.File(path, 'r') as handle:
+        group = handle.get('samples')
+        if group is None or not group:
+            raise ValueError(f'HMC samples file {path!r} does not contain posterior draws.')
+        samples = {
+            unquote(name): np.asarray(dataset[0])
+            for name, dataset in group.items()
+            if isinstance(dataset, h5py.Dataset)
+        }
+        low_dimensional = {}
+        for name, dataset in group.items():
+            if not isinstance(dataset, h5py.Dataset):
+                continue
+            site = unquote(name)
+            trailing_size = int(np.prod(dataset.shape[1:])) if dataset.ndim > 1 else 1
+            if _is_pixel_wn_site(site) or trailing_size > 32:
+                continue
+            values = np.asarray(dataset)
+            median = np.median(values, axis=0)
+            samples[site] = median
+            low_dimensional[site] = median
+        health = (
+            _hdf5_group_arrays(handle['sampler_health'])
+            if 'sampler_health' in handle else {}
+        )
+    return samples, low_dimensional, health
+
+
+def _stream_hmc_component_medians_hdf5(
+    prob_model,
+    samples_path,
+    temporary_components_path,
+    *,
+    sample_chunk_size=128,
+    tile_size=32,
+):
+    """Compute exact pixelwise component medians with bounded GPU/CPU memory.
+
+    Posterior parameter draws are read from ``samples_path`` one chunk at a
+    time, rendered on device, and appended to a temporary HDF5 component
+    store.  The store is then reduced in spatial tiles.  The caller owns (and
+    removes) the temporary file after using the returned median images.
+    """
+    active_sites = set(get_active_sample_sites(prob_model))
+    with h5py.File(samples_path, 'r') as source:
+        group = source.get('samples')
+        if group is None or not group:
+            raise ValueError(f'HMC samples file {samples_path!r} has no posterior samples.')
+        datasets = {
+            unquote(name): dataset for name, dataset in group.items()
+            if isinstance(dataset, h5py.Dataset) and unquote(name) in active_sites
+        }
+        if not datasets:
+            raise ValueError('No active posterior sample sites were found in HDF5.')
+        lengths = {dataset.shape[0] for dataset in datasets.values()}
+        if len(lengths) != 1:
+            raise ValueError('HDF5 posterior datasets have inconsistent draw counts.')
+        n_draws = lengths.pop()
+
+        with h5py.File(temporary_components_path, 'w') as target:
+            target.attrs['n_draws'] = int(n_draws)
+            component_group = target.create_group('components')
+            def write_component_chunk(start, end, component_samples):
+                for name, values in component_samples.items():
+                    if name.startswith('_'):
+                        continue
+                    values = np.asarray(values)
+                    if name not in component_group:
+                        component_group.create_dataset(
+                            name,
+                            shape=(n_draws,) + values.shape[1:],
+                            dtype=values.dtype,
+                            chunks=(max(1, min(sample_chunk_size, n_draws)),) + values.shape[1:],
+                            compression='gzip',
+                            compression_opts=4,
+                            shuffle=True,
+                        )
+                    component_group[name][start:end] = values
+
+            # Keep one jitted evaluator alive for every HDF5 chunk.  Calling
+            # the public evaluator separately per chunk would recreate and
+            # recompile its vmap transform repeatedly.
+            evaluate_mcmc_component_medians(
+                prob_model,
+                datasets,
+                batch_size=sample_chunk_size,
+                active_sites=active_sites,
+                sample_consumer=write_component_chunk,
+            )
+            target.flush()
+
+    medians = {}
+    with h5py.File(temporary_components_path, 'r') as source:
+        for name, dataset in source['components'].items():
+            if dataset.ndim != 3:
+                # Source-plane components are two-dimensional per draw as
+                # well; keep this explicit guard for unsupported future data.
+                raise ValueError(f'Unexpected component dataset shape for {name!r}: {dataset.shape}')
+            _, ny, nx = dataset.shape
+            median = np.empty((ny, nx), dtype=dataset.dtype)
+            for y_start in range(0, ny, tile_size):
+                y_end = min(y_start + tile_size, ny)
+                for x_start in range(0, nx, tile_size):
+                    x_end = min(x_start + tile_size, nx)
+                    median[y_start:y_end, x_start:x_end] = np.median(
+                        np.asarray(dataset[:, y_start:y_end, x_start:x_end]), axis=0,
+                    )
+            medians[name] = median
+    return medians
+
+
 def _hmc_hdf5_sample_rows(path):
     with h5py.File(path, 'r') as handle:
         if 'samples' not in handle or not handle['samples']:
@@ -1580,8 +1748,6 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     rng_key = jax.random.PRNGKey(args.random_seed)
     rng_key, rng_key_ = jax.random.split(rng_key)
     
-    all_samples = []
-    all_hmc_extra_fields = []
     save_path = getattr(args, 'save_path', '.')
     os.makedirs(save_path, exist_ok=True)
     
@@ -1642,8 +1808,6 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                         legacy_health[batch_index] if record_hmc_health else {},
                         num_chains,
                     )
-                all_samples = legacy_samples
-                all_hmc_extra_fields = legacy_health
                 for batch in legacy_samples:
                     first_value = next(iter(batch.values()))
                     batch_total = int(np.asarray(first_value).shape[0])
@@ -1657,6 +1821,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                     os.remove(legacy_batch_path)
                 if legacy_samples:
                     print('[hmc] Removed legacy per-batch NPZ archives after HDF5 migration.')
+                del legacy_samples, legacy_health
             else:
                 completed_samples = int(ckpt.get('completed_samples_per_chain', 0))
                 if completed_samples and not os.path.isfile(samples_hdf5_path):
@@ -1677,10 +1842,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                         print('[hmc] Discarded an uncheckpointed HDF5 sample tail from an interrupted write.')
                     if _convert_hmc_pixel_latents_hdf5_to_float32(samples_hdf5_path):
                         print('[hmc] Converted archived pixels_wn samples to float32 in HDF5.')
-                    saved_samples, saved_health = _load_hmc_samples_hdf5(samples_hdf5_path)
-                    all_samples = [saved_samples]
-                    all_hmc_extra_fields = [saved_health] if saved_health else [{}]
-                    if not saved_health:
+                    with h5py.File(samples_hdf5_path, 'r') as sample_handle:
+                        has_saved_health = bool(sample_handle.get('sampler_health'))
+                    if not has_saved_health:
                         record_hmc_health = False
                 elif os.path.isfile(samples_hdf5_path):
                     # A checkpoint with zero draws is a fresh start; stale samples must not leak in.
@@ -1810,14 +1974,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         batch_samples = mcmc.get_samples(group_by_chain=False)
         # Convert to CPU NumPy arrays to prevent GPU OOM
         batch_samples = {k: np.asarray(v) for k, v in batch_samples.items()}
-        all_samples.append(batch_samples)
         batch_hmc_extra_fields = {
             key: np.asarray(value)
             for key, value in mcmc.get_extra_fields(group_by_chain=False).items()
             if key in ('diverging', 'accept_prob', 'num_steps', 'energy')
         }
-        all_hmc_extra_fields.append(batch_hmc_extra_fields)
-
         _append_hmc_samples_hdf5(
             samples_hdf5_path,
             batch_samples,
@@ -1839,88 +2000,79 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             print(f"[hmc] Saved checkpoint to: {checkpoint_path}")
         except Exception as e:
             print(f"[warning] Failed to save checkpoint pkl: {e}")
+
+        # The authoritative posterior is now in HDF5.  Release this batch's
+        # host copies before any diagnostic work re-materializes draws.
+        del batch_samples, batch_hmc_extra_fields
             
         if batch_diagnostics_callback is not None:
             try:
+                callback_samples, callback_health = _load_hmc_samples_hdf5(samples_hdf5_path)
                 batch_diagnostics_callback(
-                    _concatenate_batches(all_samples, num_chains),
+                    callback_samples,
                     i,
-                    _concatenate_hmc_extra_fields(all_hmc_extra_fields, num_chains),
+                    callback_health,
                 )
             except Exception as e:
                 print(f"[warning] Failed to generate multi-band batch diagnostics: {e}")
+            finally:
+                if 'callback_samples' in locals():
+                    del callback_samples
+                if 'callback_health' in locals():
+                    del callback_health
             del mcmc
             import gc
             gc.collect()
             continue
 
-        # Generate the compact single-band diagnostic set for this batch.
-        # On small MIG slices this optional model-image evaluation can exceed
-        # memory even though HMC itself fits.  After the first OOM, keep the
-        # sampler running and skip the same optional work for later batches.
+        # Generate bounded-memory single-band diagnostics from the on-disk
+        # posterior.  No cumulative posterior array is retained in RAM or on
+        # device between batches.
         if not intermediate_diagnostics_enabled:
             print('[hmc] Skipping intermediate diagnostics after an earlier device OOM.')
         try:
             if not intermediate_diagnostics_enabled:
                 raise StopIteration
-            temp_samples = _concatenate_batches(all_samples, num_chains)
-            temp_hmc_extra_fields = _concatenate_hmc_extra_fields(
-                all_hmc_extra_fields, num_chains,
-            )
-            temp_medians = {
-                k: np.median(np.asarray(v), axis=0)
-                for k, v in temp_samples.items()
-                if k in active_sites
-            }
-            temp_kwargs = prob_model.params2kwargs(temp_medians)
             diag_dir = os.path.join(save_path, 'diagnostics')
             os.makedirs(diag_dir, exist_ok=True)
-
-            source_summary = evaluate_mcmc_source_pixels_summary(
-                prob_model, temp_samples, diag_dir, save_npy=False,
+            temporary_components_path = os.path.join(
+                diag_dir, f'.component_samples_batch_{i}.h5',
             )
-            if source_summary is not None and temp_kwargs.get('kwargs_source'):
-                pixelated_source_index = _pixelated_kwargs_index(temp_kwargs['kwargs_source'])
-                if pixelated_source_index is not None:
-                    temp_kwargs['kwargs_source'][pixelated_source_index]['pixels'] = source_summary[0]
-
-            from herculens_wrapper.visualizations import (
-                plot_composite_2x3_panel,
-                plot_hmc_chain_comparison,
-            )
+            temp_comp_medians = plot_params = diagnostic_samples = None
+            diagnostic_health = temp_kwargs = None
+            from herculens_wrapper.visualizations import plot_composite_2x3_panel
             img_data = getattr(prob_model, 'image_data', None)
             ns_map = getattr(prob_model, 'noise_map', None)
             l_image = getattr(prob_model, 'lens_image', None)
             p_scale = getattr(prob_model, 'pixel_scale', 0.08)
-            if img_data is not None and l_image is not None:
-                temp_comp_medians = evaluate_mcmc_component_medians(
-                    prob_model, temp_samples,
+            try:
+                temp_comp_medians = _stream_hmc_component_medians_hdf5(
+                    prob_model, samples_hdf5_path, temporary_components_path,
                 )
-                plot_composite_2x3_panel(
-                    l_image, temp_kwargs, p_scale, img_data, ns_map, diag_dir,
-                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
-                    output_filename=f"composite_batch_{i}.png",
-                    model_extended_override=temp_comp_medians['source'],
-                    model_lens_light_override=temp_comp_medians['lens_light'],
-                    model_composite_override=temp_comp_medians['total'],
+                plot_params, diagnostic_samples, diagnostic_health = (
+                    _load_hmc_plot_and_diagnostic_samples_hdf5(samples_hdf5_path)
                 )
-                print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
-                plot_hmc_chain_comparison(
-                    prob_model,
-                    temp_samples,
-                    num_chains,
-                    p_scale,
-                    img_data,
-                    ns_map,
-                    diag_dir,
-                    residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
-                    output_filename=f'hmc_chain_comparison_batch_{i}.png',
+                temp_kwargs = prob_model.params2kwargs(plot_params)
+                if img_data is not None and l_image is not None:
+                    plot_composite_2x3_panel(
+                        l_image, temp_kwargs, p_scale, img_data, ns_map, diag_dir,
+                        residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
+                        output_filename=f"composite_batch_{i}.png",
+                        model_extended_override=temp_comp_medians['source'],
+                        model_lens_light_override=temp_comp_medians['lens_light'],
+                        model_composite_override=temp_comp_medians['total'],
+                        source_plane_override=temp_comp_medians.get('source_plane'),
+                    )
+                    print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
+                save_hmc_diagnostics(
+                    diagnostic_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
+                    hmc_extra_fields=diagnostic_health,
                 )
-                print(f"[hmc] Saved chain comparison diagnostic for batch {i + 1}.")
-            save_hmc_diagnostics(
-                temp_samples, num_chains, diag_dir, f"batch_{i}", prob_model=prob_model,
-                hmc_extra_fields=temp_hmc_extra_fields,
-            )
+            finally:
+                if os.path.exists(temporary_components_path):
+                    os.remove(temporary_components_path)
+                temp_comp_medians = plot_params = diagnostic_samples = None
+                diagnostic_health = temp_kwargs = None
         except StopIteration:
             pass
         except Exception as e:
@@ -1949,9 +2101,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         import gc
         gc.collect()
             
-    # Concatenate all batches along the sample axis
-    samples = _concatenate_batches(all_samples, num_chains)
-    hmc_extra_fields = _concatenate_hmc_extra_fields(all_hmc_extra_fields, num_chains)
+    # The complete posterior remains disk-backed during sampling.  Only after
+    # the final batch do we materialize it for the returned FitResult.
+    samples, hmc_extra_fields = _load_hmc_samples_hdf5(samples_hdf5_path)
         
     param_samples = {k: v for k, v in samples.items() if k in active_sites}
     map_params = tree_median(param_samples)

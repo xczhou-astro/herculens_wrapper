@@ -1,5 +1,6 @@
 import json
 import os
+from collections.abc import Mapping
 from functools import partial
 
 def safe_float(val, default):
@@ -1988,7 +1989,42 @@ def get_init_params(
                 n_matched += 1
             print(f"[Init] Inherited kwargs from prior run: matched={n_matched}, skipped={n_skipped}")
         else:
-            init_params = {k: jnp.asarray(v) for k, v in init_info.items()}
+            init_params = {
+                k: jnp.asarray(v) for k, v in init_info.items()
+                if k != 'likelihood_parameters'
+            }
+
+        # Likelihood-level nuisance parameters are not part of the profile
+        # kwargs converted above.  Restore those that are both saved by the
+        # result and active in the new probabilistic model.  This is currently
+        # used by the sampled global background RMS.
+        likelihood_parameters = init_info.get('likelihood_parameters', {})
+        if likelihood_parameters is not None and not isinstance(likelihood_parameters, Mapping):
+            raise TypeError(
+                "kwargs_result.json field 'likelihood_parameters' must be a mapping."
+            )
+        n_likelihood_matched = 0
+        for k, v in (likelihood_parameters or {}).items():
+            if k not in init_params:
+                continue
+            value = jnp.asarray(v)
+            expected = jnp.asarray(init_params[k])
+            if value.shape != expected.shape:
+                if value.size != expected.size:
+                    raise ValueError(
+                        f"Saved likelihood parameter {k!r} has shape {value.shape}, "
+                        f"but the active model expects {expected.shape}."
+                    )
+                value = jnp.reshape(value, expected.shape)
+            if not bool(jnp.all(jnp.isfinite(value))):
+                raise ValueError(f"Saved likelihood parameter {k!r} is not finite.")
+            init_params[k] = value
+            n_likelihood_matched += 1
+        if n_likelihood_matched:
+            print(
+                "[Init] Restored likelihood-level nuisance parameters: "
+                f"matched={n_likelihood_matched}"
+            )
 
     for k, v in list(init_params.items()):
         if '_amp_' not in k:
