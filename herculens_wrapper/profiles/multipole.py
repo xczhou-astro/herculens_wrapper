@@ -457,6 +457,7 @@ class EPLM1M3M4:
     }
 
     @staticmethod
+    @jax.jit
     def _multipole_kwargs(theta_E, e1, e2, center_x, center_y, a1_a, delta_phi_m1,
                           a3_a, delta_phi_m3, a4_a, delta_phi_m4):
         ellipticity = jnp.sqrt(e1**2 + e2**2)
@@ -470,6 +471,7 @@ class EPLM1M3M4:
         )
 
     @staticmethod
+    @jax.jit
     def function(x, y, theta_E, gamma, e1, e2, a1_a, delta_phi_m1, a3_a,
                  delta_phi_m3, a4_a, delta_phi_m4, center_x=0.0, center_y=0.0):
         from herculens.MassModel.Profiles.epl import EPL
@@ -487,6 +489,7 @@ class EPLM1M3M4:
         return epl + multipole_potential
 
     @staticmethod
+    @jax.jit
     def derivatives(x, y, theta_E, gamma, e1, e2, a1_a, delta_phi_m1, a3_a,
                     delta_phi_m3, a4_a, delta_phi_m4, center_x=0.0, center_y=0.0):
         from herculens.MassModel.Profiles.epl import EPL
@@ -503,6 +506,7 @@ class EPLM1M3M4:
         return alpha_x, alpha_y
 
     @staticmethod
+    @jax.jit
     def hessian(x, y, theta_E, gamma, e1, e2, a1_a, delta_phi_m1, a3_a,
                 delta_phi_m3, a4_a, delta_phi_m4, center_x=0.0, center_y=0.0):
         from herculens.MassModel.Profiles.epl import EPL

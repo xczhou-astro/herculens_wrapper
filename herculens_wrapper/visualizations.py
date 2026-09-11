@@ -454,6 +454,7 @@ def plot_source_plane(
     plot_scale='linear',
     output_filename='source_plane.png',
     source_arc_mask=None,
+    source_for_plot_override=None,
 ):
     """Plot source-plane values in Herculens image-data-pixel flux units."""
     _, pixelated_source = _pixelated_source_entry(kwargs_result)
@@ -509,9 +510,13 @@ def plot_source_plane(
             p_scale,
         )
 
-        source_for_plot = np.asarray(
-            lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
-        ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
+        source_for_plot = (
+            np.asarray(source_for_plot_override)
+            if source_for_plot_override is not None
+            else np.asarray(
+                lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source'])
+            ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
+        )
 
     # Map lensed ring / source_arc_mask boundary back to source plane
     ring_mask = source_arc_mask
@@ -2274,6 +2279,46 @@ def generate_run_plots(
     comp_no_lens = mcmc_component_medians.get('no_lens_light') if mcmc_component_medians else None
     comp_ps = mcmc_component_medians.get('point_source') if mcmc_component_medians else None
 
+    # SVI has one posterior-median parameter set, unlike HMC's cached
+    # component-wise posterior medians.  Evaluate each image component once
+    # here and reuse it for every diagnostic figure below.
+    svi_source_plane = None
+    if sampler == 'svi' and comp_total is None:
+        print('[plots] Evaluating and caching SVI model components once...')
+        comp_total = np.asarray(best_fit_model) if best_fit_model is not None else np.asarray(
+            lens_image.model(**kwargs_best)
+        )
+        comp_src = np.asarray(lens_image.model(
+            **kwargs_best, source_add=True, lens_light_add=False, point_source_add=False,
+        ))
+        if kwargs_best.get('kwargs_lens_light'):
+            comp_lens_light = np.asarray(lens_image.model(
+                **kwargs_best, source_add=False, lens_light_add=True, point_source_add=False,
+            ))
+        else:
+            comp_lens_light = np.zeros_like(comp_total)
+        if kwargs_best.get('kwargs_point_source'):
+            comp_ps = np.asarray(lens_image.model(
+                **kwargs_best, source_add=False, lens_light_add=False, point_source_add=True,
+            ))
+            comp_no_lens = np.asarray(lens_image.model(
+                **kwargs_best, source_add=True, lens_light_add=False, point_source_add=True,
+            ))
+        else:
+            comp_ps = np.zeros_like(comp_total)
+            comp_no_lens = comp_src
+        _, pixelated_source = _pixelated_source_entry(kwargs_best)
+        if pixelated_source is None:
+            p_scale = float(getattr(lens_image.Grid, 'pixel_width', pixel_scale))
+            xx_src, yy_src, _ = _parametric_source_plane_grid(
+                lens_image, kwargs_best.get('kwargs_lens'), 200, 200, p_scale,
+            )
+            svi_source_plane = np.asarray(
+                lens_image.SourceModel.surface_brightness(
+                    xx_src, yy_src, kwargs_best['kwargs_source']
+                )
+            ) * float(getattr(lens_image.Grid, 'pixel_area', p_scale**2))
+
     if comp_total is not None:
         best_fit_model = comp_total
 
@@ -2356,10 +2401,12 @@ def generate_run_plots(
     _try('source_plane_linear.png', lambda: plot_source_plane(
         lens_image, kwargs_best, save_path,
         plot_scale='linear', output_filename='source_plane_linear.png',
+        source_for_plot_override=svi_source_plane,
     ))
     _try('source_plane_log.png', lambda: plot_source_plane(
         lens_image, kwargs_best, save_path,
         plot_scale='log', output_filename='source_plane_log.png',
+        source_for_plot_override=svi_source_plane,
     ))
 
     _try('lens_light_subtracted_image.png', lambda: plot_lens_light_subtracted_image(
@@ -2410,21 +2457,26 @@ def generate_run_plots(
             import numpy as np
             rng_key = jax.random.PRNGKey(42)
             
-            # Run the guide sampling on CPU to avoid GPU Out of Memory (OOM)
-            # especially when pixelated source or large MGE profiles are used.
-            cpu_device = jax.devices('cpu')[0]
-            params_cpu = jax.tree_util.tree_map(lambda x: jax.device_put(x, cpu_device), extra['result'].params)
-            
-            # Reduce sample shape to 5000 to save memory/time while keeping corner plots clean
-            try:
-                with jax.default_device(cpu_device):
+            _, pixelated_source = _pixelated_source_entry(kwargs_best)
+            if pixelated_source is not None:
+                # High-dimensional pixel latents can exhaust GPU memory.  Keep
+                # this exceptional path on CPU, but avoid the former 5000 draws.
+                cpu_device = jax.devices('cpu')[0]
+                params = jax.tree_util.tree_map(lambda x: jax.device_put(x, cpu_device), extra['result'].params)
+                try:
+                    with jax.default_device(cpu_device):
+                        guide_samples = extra['guide'].sample_posterior(
+                            rng_key, params, sample_shape=(2000,)
+                        )
+                except AttributeError:
                     guide_samples = extra['guide'].sample_posterior(
-                        rng_key, params_cpu, sample_shape=(5000,)
+                        rng_key, params, sample_shape=(2000,)
                     )
-            except AttributeError:
-                # Fallback for older JAX versions without jax.default_device
+            else:
+                # Parametric SVI has a modest latent dimension: sample on the
+                # active accelerator and avoid an unnecessary device round-trip.
                 guide_samples = extra['guide'].sample_posterior(
-                    rng_key, params_cpu, sample_shape=(5000,)
+                    rng_key, extra['result'].params, sample_shape=(2000,)
                 )
                 
             guide_samples_np = {k: np.asarray(v) for k, v in guide_samples.items()}
