@@ -602,7 +602,12 @@ def _sample_param_from_prior(site_name, key, param):
         return param
 
 
-_Q_PHI_MASS_PROFILES = frozenset({'EPL', 'SIE'})
+_Q_PHI_MASS_PROFILES = frozenset({
+    'EPL',
+    'SIE',
+    'EPL_MULTIPOLE_M1M3M4_ELL',
+    'EPL_MULTIPOLE_M3M4_ELL',
+})
 
 
 def _mass_q_phi_to_e1_e2(q, phi):
@@ -667,11 +672,11 @@ def _materialize_mass_parameters(profile_type, values):
         if uses_q_phi:
             e1, e2 = _mass_q_phi_to_e1_e2(result.pop('q'), result.pop('phi'))
             result['e1'], result['e2'] = e1, e2
-    elif normalized_type == 'MPPL' and 'phi_m' in result:
+    if normalized_type == 'MPPL' and 'phi_m' in result:
         # The public API consistently exposes angles in degrees.  MPPL's
         # profile equation continues to receive and calculate in radians.
         result['phi_m'] = jnp.deg2rad(jnp.asarray(result['phi_m']))
-    elif normalized_type == 'EPL_MULTIPOLE_M1M3M4_ELL':
+    if normalized_type in {'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL'}:
         # The public API uses degrees for all position angles.  ELL_MPPL
         # evaluates the Paugnat--Gilman solution in radians; ``varphi_m`` is
         # an eccentric anomaly, while ``phi_ref`` is the EPL polar PA.
@@ -1727,7 +1732,7 @@ def kwargs2params(
                     phi_specification=lens_mass_model.get('phi_m'),
                 )
             restored_ell_mppl_angles = None
-            if str(profile_type).upper() == 'EPL_MULTIPOLE_M1M3M4_ELL':
+            if str(profile_type).upper() in {'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL'}:
                 restored_ell_mppl_angles = {
                     name: np.degrees(np.asarray(saved_mass[name]))
                     for name in ('delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4')
@@ -2775,13 +2780,33 @@ def validate_param_list(type_list, param_list):
         normalized_profile_type = str(profile_type).upper()
         if normalized_profile_type == "EPL_MULTIPOLE_M1M3M4_ELL":
             required = {
-                "theta_E", "gamma", "e1", "e2", "center_x", "center_y",
+                "theta_E", "gamma", "center_x", "center_y",
                 "a1_a", "delta_phi_m1", "a3_a", "delta_phi_m3", "a4_a", "delta_phi_m4",
             }
             missing = required.difference(params)
+            has_ellipticity = ({"e1", "e2"}.issubset(params) or {"q", "phi"}.issubset(params))
+            if not has_ellipticity:
+                missing.update({"e1", "e2"})
             if missing:
                 raise ValueError(
                     f"EPL_MULTIPOLE_M1M3M4_ELL mass component {index} requires {sorted(required)}; "
+                    "and either ('e1', 'e2') or API-facing ('q', 'phi'); "
+                    f"missing {sorted(missing)}."
+                )
+            continue
+        if normalized_profile_type == "EPL_MULTIPOLE_M3M4_ELL":
+            required = {
+                "theta_E", "gamma", "center_x", "center_y",
+                "a3_a", "delta_phi_m3", "a4_a", "delta_phi_m4",
+            }
+            missing = required.difference(params)
+            has_ellipticity = ({"e1", "e2"}.issubset(params) or {"q", "phi"}.issubset(params))
+            if not has_ellipticity:
+                missing.update({"e1", "e2"})
+            if missing:
+                raise ValueError(
+                    f"EPL_MULTIPOLE_M3M4_ELL mass component {index} requires {sorted(required)}; "
+                    "and either ('e1', 'e2') or API-facing ('q', 'phi'); "
                     f"missing {sorted(missing)}."
                 )
             continue

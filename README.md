@@ -390,7 +390,6 @@ epl = MassProfile("EPL_MULTIPOLE_M1M3M4_ELL", prior={
     "theta_E": [0.5, 2.0], "gamma": [1.6, 2.4],
     "q": [0.3, 0.9], "phi": [-90.0, 90.0],
     "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
-})
     "a1_a": [-0.02, 0.02], "delta_phi_m1": [-15.0, 15.0],
     "a3_a": [-0.02, 0.02], "delta_phi_m3": [-15.0, 15.0],
     "a4_a": [-0.02, 0.02], "delta_phi_m4": [-15.0, 15.0],
@@ -403,10 +402,29 @@ from the EPL semi-major axis, not sky position angles.  Each dimensionless
 amplitude becomes the physical elliptical-multipole amplitude
 `a_m = a*_a * theta_E` internally.
 
+`mass_profile_convergence.png` automatically expands this joint profile into
+one total-model row and separate `EPL`, `m=1`, `m=3`, and `m=4` rows.  Each
+row contains a convergence map, a magnification map, and a radial convergence
+profile.  The convergence maps add exactly to the joint profile.  The
+multipole magnification panels are their *isolated* lensing responses; only
+the total-model row has physical critical lines and the full-model
+magnification.
+
+The same diagnostic also expands independently declared mass components such
+as `EPL + MPPL(m=1) + MPPL(m=3)`.  A `SHEAR` component remains only in the
+total-model row: its convergence is identically zero, while its physically
+meaningful effect is already present in the total critical lines and
+magnification.
+
 ### Legacy note
 
 Use `EPL_MULTIPOLE_M1M3M4_ELL`; the earlier `ELL_MPPL` and `EPL_M1M3M4`
 public profile names are no longer registered.
+
+`EPL_MULTIPOLE_M3M4_ELL` uses the same JAXtronomy elliptical construction but
+omits m1.  It takes the same parameters except `a1_a` and `delta_phi_m1`:
+`theta_E`, `gamma`, `e1`, `e2`, `center_x`, `center_y`, `a3_a`,
+`delta_phi_m3`, `a4_a`, and `delta_phi_m4`.
 
 ## 5. Pixelated source
 

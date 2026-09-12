@@ -522,3 +522,92 @@ class EPLM1M3M4:
             dx_y = jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dx_y), dx_y)
             f_xx, f_yy, f_xy = f_xx + dx_x, f_yy + dy_y, f_xy + dx_y
         return f_xx, f_yy, f_xy
+
+
+class EPLM3M4:
+    """JAXtronomy's EPL plus elliptical ``m=3,4`` multipoles.
+
+    This is the wrapper equivalent of JAXtronomy's
+    ``EPL_MULTIPOLE_M3M4_ELL``.  It is intentionally a separate profile from
+    :class:`EPLM1M3M4`: omitting ``m=1`` removes both its two nuisance
+    parameters and its analytic evaluation from the compiled lens equation.
+    """
+
+    param_names = [
+        "theta_E", "gamma", "e1", "e2", "center_x", "center_y",
+        "a3_a", "delta_phi_m3", "a4_a", "delta_phi_m4",
+    ]
+    lower_limit_default = {
+        "theta_E": 0.0, "gamma": 1.5, "e1": -0.5, "e2": -0.5,
+        "center_x": -100, "center_y": -100, "a3_a": -0.2,
+        "delta_phi_m3": -np.pi / 6, "a4_a": -0.2,
+        "delta_phi_m4": -np.pi / 8,
+    }
+    upper_limit_default = {
+        "theta_E": 100.0, "gamma": 2.5, "e1": 0.5, "e2": 0.5,
+        "center_x": 100, "center_y": 100, "a3_a": 0.2,
+        "delta_phi_m3": np.pi / 6, "a4_a": 0.2,
+        "delta_phi_m4": np.pi / 8,
+    }
+    fixed_default = {name: False for name in param_names}
+
+    @staticmethod
+    @jax.jit
+    def _multipole_kwargs(theta_E, e1, e2, center_x, center_y, a3_a,
+                          delta_phi_m3, a4_a, delta_phi_m4):
+        ellipticity = jnp.sqrt(e1**2 + e2**2)
+        q = (1.0 - ellipticity) / (1.0 + ellipticity)
+        phi_ref = 0.5 * jnp.arctan2(e2, e1)
+        shared = dict(q=q, phi_ref=phi_ref, center_x=center_x, center_y=center_y, r_E=theta_E)
+        return (
+            dict(m=3, a_m=a3_a * theta_E, varphi_m=delta_phi_m3, **shared),
+            dict(m=4, a_m=a4_a * theta_E, varphi_m=delta_phi_m4, **shared),
+        )
+
+    @staticmethod
+    @jax.jit
+    def function(x, y, theta_E, gamma, e1, e2, a3_a, delta_phi_m3, a4_a,
+                 delta_phi_m4, center_x=0.0, center_y=0.0):
+        from herculens.MassModel.Profiles.epl import EPL
+        epl = EPL().function(x, y, theta_E, e1, e2, gamma, center_x, center_y)
+        m3, m4 = EPLM3M4._multipole_kwargs(
+            theta_E, e1, e2, center_x, center_y, a3_a, delta_phi_m3, a4_a, delta_phi_m4,
+        )
+        multipole_potential = jnp.zeros_like(epl)
+        for multipole in (m3, m4):
+            value = _JAXtronomyEllipticalMultipole.function(x, y, **multipole)
+            multipole_potential = multipole_potential + jnp.where(
+                multipole["a_m"] == 0, jnp.zeros_like(value), value
+            )
+        return epl + multipole_potential
+
+    @staticmethod
+    @jax.jit
+    def derivatives(x, y, theta_E, gamma, e1, e2, a3_a, delta_phi_m3, a4_a,
+                    delta_phi_m4, center_x=0.0, center_y=0.0):
+        from herculens.MassModel.Profiles.epl import EPL
+        alpha_x, alpha_y = EPL().derivatives(x, y, theta_E, e1, e2, gamma, center_x, center_y)
+        m3, m4 = EPLM3M4._multipole_kwargs(
+            theta_E, e1, e2, center_x, center_y, a3_a, delta_phi_m3, a4_a, delta_phi_m4,
+        )
+        for multipole in (m3, m4):
+            dx, dy = _JAXtronomyEllipticalMultipole.derivatives(x, y, **multipole)
+            alpha_x = alpha_x + jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dx), dx)
+            alpha_y = alpha_y + jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dy), dy)
+        return alpha_x, alpha_y
+
+    @staticmethod
+    @jax.jit
+    def hessian(x, y, theta_E, gamma, e1, e2, a3_a, delta_phi_m3, a4_a,
+                delta_phi_m4, center_x=0.0, center_y=0.0):
+        from herculens.MassModel.Profiles.epl import EPL
+        f_xx, f_yy, f_xy = EPL().hessian(x, y, theta_E, e1, e2, gamma, center_x, center_y)
+        m3, m4 = EPLM3M4._multipole_kwargs(
+            theta_E, e1, e2, center_x, center_y, a3_a, delta_phi_m3, a4_a, delta_phi_m4,
+        )
+        for multipole in (m3, m4):
+            dx_x, dx_y, _, dy_y = _JAXtronomyEllipticalMultipole.hessian(x, y, **multipole)
+            f_xx = f_xx + jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dx_x), dx_x)
+            f_yy = f_yy + jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dy_y), dy_y)
+            f_xy = f_xy + jnp.where(multipole["a_m"] == 0, jnp.zeros_like(dx_y), dx_y)
+        return f_xx, f_yy, f_xy

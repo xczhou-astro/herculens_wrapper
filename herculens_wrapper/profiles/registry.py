@@ -1,6 +1,6 @@
 """Register wrapper-local profile names with the installed Herculens package."""
 
-from .multipole import EPLM1M3M4, MPPL, MPPLOffset
+from .multipole import EPLM1M3M4, EPLM3M4, MPPL, MPPLOffset
 from .composite import GNFWMGE, InclinedExponentialDiskMGE, StellarMGE
 
 
@@ -17,6 +17,7 @@ def register_mass_profiles():
         "MPPL": MPPL,
         "MPPL_OFFSET": MPPLOffset,
         "EPL_MULTIPOLE_M1M3M4_ELL": EPLM1M3M4,
+        "EPL_MULTIPOLE_M3M4_ELL": EPLM3M4,
     }.items():
         existing = profile_mapping.STRING_MAPPING.get(name)
         if existing is not None and existing is not profile:

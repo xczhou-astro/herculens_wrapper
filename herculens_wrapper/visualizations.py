@@ -2114,120 +2114,235 @@ def _mass_ellipticity_annotation(summary):
     return '\n'.join(lines)
 
 
+def _maps_from_hessian(f_xx, f_yy, f_xy):
+    """Return convergence and standalone magnification from Hessian terms."""
+    f_xx, f_yy, f_xy = (np.asarray(value) for value in (f_xx, f_yy, f_xy))
+    kappa = 0.5 * (f_xx + f_yy)
+    inverse_magnification = (1.0 - f_xx) * (1.0 - f_yy) - f_xy**2
+    with np.errstate(divide='ignore', invalid='ignore'):
+        magnification = 1.0 / inverse_magnification
+    return kappa, np.abs(magnification)
+
+
+def _joint_epl_multipole_rows(x, y, profile_type, kwargs):
+    """Decompose one joint JAXtronomy EPL-multipole component for plotting.
+
+    This mirrors the joint profile exactly: its potential is the sum of an
+    EPL and independent elliptical m terms with geometry derived from the
+    same EPL parameters.  Magnification is intentionally evaluated for each
+    isolated term, whereas convergence is additive term by term.
+    """
+    from herculens.MassModel.Profiles.epl import EPL
+    from herculens_wrapper.profiles.jaxtronomy_multipole import (
+        EllipticalMultipole,
+    )
+    from herculens_wrapper.profiles.multipole import EPLM1M3M4, EPLM3M4
+
+    normalized_type = str(profile_type).upper()
+    if normalized_type == 'EPL_MULTIPOLE_M1M3M4_ELL':
+        profile_class = EPLM1M3M4
+        orders = ((1, 'a1_a', 'delta_phi_m1'), (3, 'a3_a', 'delta_phi_m3'),
+                  (4, 'a4_a', 'delta_phi_m4'))
+    elif normalized_type == 'EPL_MULTIPOLE_M3M4_ELL':
+        profile_class = EPLM3M4
+        orders = ((3, 'a3_a', 'delta_phi_m3'), (4, 'a4_a', 'delta_phi_m4'))
+    else:
+        return []
+
+    epl_kwargs = {
+        name: kwargs[name] for name in ('theta_E', 'e1', 'e2', 'gamma', 'center_x', 'center_y')
+    }
+    f_xx, f_yy, f_xy = EPL().hessian(x, y, **epl_kwargs)
+    rows = [('EPL', *_maps_from_hessian(f_xx, f_yy, f_xy))]
+
+    multipoles = profile_class._multipole_kwargs(
+        **{name: kwargs[name] for name in profile_class.param_names if name != 'gamma'}
+    )
+    for (m, amplitude_name, phase_name), multipole_kwargs in zip(orders, multipoles):
+        # Skip the analytic evaluation at exactly zero amplitude.  Besides
+        # avoiding an unnecessary JAX compile, this preserves an exact zero
+        # convergence contribution rather than a numerical near-zero map.
+        if float(np.asarray(kwargs[amplitude_name])) == 0.0:
+            zero = np.zeros_like(np.asarray(x), dtype=float)
+            rows.append((f'ELL_MPPL $m={m}$', zero, np.ones_like(zero)))
+            continue
+        f_xx, f_xy, _, f_yy = EllipticalMultipole.hessian(x, y, **multipole_kwargs)
+        rows.append((f'ELL_MPPL $m={m}$', *_maps_from_hessian(f_xx, f_yy, f_xy)))
+    return rows
+
+
+def _radial_kappa_statistics(kappa_map, radius_map):
+    """Azimuthal mean and central 68-percent interval of a convergence map."""
+    valid = np.isfinite(radius_map) & np.isfinite(kappa_map)
+    if not np.any(valid):
+        return np.empty(0), np.empty(0), np.empty(0), np.empty(0)
+    radial_bins = np.linspace(0.0, float(np.nanmax(radius_map[valid])), 61)
+    radial_centers = 0.5 * (radial_bins[:-1] + radial_bins[1:])
+    radial_index = np.digitize(radius_map[valid], radial_bins) - 1
+    mean = np.full(radial_centers.shape, np.nan)
+    p16 = np.full(radial_centers.shape, np.nan)
+    p84 = np.full(radial_centers.shape, np.nan)
+    values = kappa_map[valid]
+    for index in range(radial_centers.size):
+        in_bin = values[radial_index == index]
+        if in_bin.size:
+            mean[index] = np.mean(in_bin)
+            p16[index], p84[index] = np.percentile(in_bin, [16.0, 84.0])
+    return radial_centers, mean, p16, p84
+
+
+def _convergence_map_norm(kappa_map):
+    """Use log scaling for positive mass and symmetric log for perturbations."""
+    values = np.asarray(kappa_map, dtype=float)
+    finite = values[np.isfinite(values)]
+    if finite.size == 0:
+        return None, 'linear'
+    if np.nanmin(finite) >= 0.0:
+        return _norm_from_plot_scale('log', values)
+    magnitude = float(np.percentile(np.abs(finite), 99.0))
+    if not np.isfinite(magnitude) or magnitude == 0.0:
+        return None, 'linear'
+    return SymLogNorm(linthresh=max(magnitude * 1e-3, 1e-12), vmin=-magnitude, vmax=magnitude), 'symlog'
+
+
 def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path, lens_mass_summary=None):
-    """Plot 2D convergence, magnification, and radial convergence profiles."""
+    """Plot total mass plus an exact EPL-elliptical-multipole decomposition.
+
+    For a joint ``EPL_MULTIPOLE_*_ELL`` profile the output has one total-model
+    row followed by EPL and one row per elliptical multipole.  Independently
+    declared mass profiles (for example EPL plus MPPL terms) are likewise
+    evaluated one component at a time.  External shear is intentionally left
+    out of the component rows because it has zero convergence; it remains in
+    the total-model row where its effect on magnification is physical.
+    """
     if lens_mass_summary is None:
         lens_mass_summary = lens_mass_ellipticity_summary(lens_image, kwargs_result)
-    # 1. Evaluate 2D convergence and magnification on image grid
     nx, ny = lens_image.Grid.num_pixel_axes
     x_grid_img, y_grid_img = lens_image.Grid.pixel_coordinates
     kwargs_lens = kwargs_result.get('kwargs_lens', [])
-    
-    kappa_map = np.asarray(lens_image.MassModel.kappa(x_grid_img, y_grid_img, kwargs_lens))
-    mag_map = np.asarray(lens_image.MassModel.magnification(x_grid_img, y_grid_img, kwargs_lens))
-    abs_mag_map = np.abs(mag_map)
-    
-    # 2. Compute critical lines
+    profile_types = list(getattr(lens_image.MassModel, 'profile_type_list', []))
+
+    total_kappa = np.asarray(lens_image.MassModel.kappa(x_grid_img, y_grid_img, kwargs_lens))
+    total_magnification = np.abs(np.asarray(
+        lens_image.MassModel.magnification(x_grid_img, y_grid_img, kwargs_lens)
+    ))
+    rows = [('Total lens model', total_kappa, total_magnification, True)]
+    for index, profile_type in enumerate(profile_types):
+        if index >= len(kwargs_lens) or not isinstance(kwargs_lens[index], dict):
+            continue
+        joint_rows = _joint_epl_multipole_rows(
+            x_grid_img, y_grid_img, profile_type, kwargs_lens[index]
+        )
+        if joint_rows:
+            for label, kappa, magnification in joint_rows:
+                rows.append((f'{label} (joint component {index})', kappa, magnification, False))
+            continue
+
+        # An independently declared component is already represented by one
+        # MassModel index.  Unlike a joint profile it needs no parameter
+        # conversion: Herculens can evaluate its exact Hessian directly.
+        # Shear remains only in the total row (its kappa map is identically
+        # zero and its standalone magnification is not a useful diagnostic).
+        if 'SHEAR' in str(profile_type).upper():
+            continue
+        try:
+            component_kappa = np.asarray(
+                lens_image.MassModel.kappa(x_grid_img, y_grid_img, kwargs_lens, k=index)
+            )
+            component_magnification = np.abs(np.asarray(
+                lens_image.MassModel.magnification(x_grid_img, y_grid_img, kwargs_lens, k=index)
+            ))
+        except Exception as error:
+            print(
+                f"[plot_mass_and_convergence] Could not evaluate {profile_type} "
+                f"component {index}: {error}"
+            )
+            continue
+        rows.append((f'{profile_type} (component {index})', component_kappa,
+                     component_magnification, False))
+
     crit_lines = []
     try:
-        crit_lines, _ = model_util.critical_lines_caustics(
-            lens_image, kwargs_lens, supersampling=5
-        )
-    except Exception as e:
-        print(f"[plot_mass_and_convergence] Could not compute critical lines: {e}")
+        crit_lines, _ = model_util.critical_lines_caustics(lens_image, kwargs_lens, supersampling=5)
+    except Exception as error:
+        print(f"[plot_mass_and_convergence] Could not compute critical lines: {error}")
 
-    # 3. Azimuthally averaged convergence about the primary mass centre.
     primary_mass = kwargs_lens[0] if kwargs_lens else {}
     center_x = float(primary_mass.get('center_x', 0.0))
     center_y = float(primary_mass.get('center_y', 0.0))
     radius_map = np.hypot(np.asarray(x_grid_img) - center_x, np.asarray(y_grid_img) - center_y)
-    valid_kappa = np.isfinite(radius_map) & np.isfinite(kappa_map)
-    radial_bins = np.linspace(0.0, float(np.nanmax(radius_map[valid_kappa])), 61)
-    radial_centers = 0.5 * (radial_bins[:-1] + radial_bins[1:])
-    radial_index = np.digitize(radius_map[valid_kappa], radial_bins) - 1
-    radial_mean = np.full(radial_centers.shape, np.nan)
-    radial_p16 = np.full(radial_centers.shape, np.nan)
-    radial_p84 = np.full(radial_centers.shape, np.nan)
-    kappa_values = kappa_map[valid_kappa]
-    for index in range(radial_centers.size):
-        values = kappa_values[radial_index == index]
-        if values.size:
-            radial_mean[index] = np.mean(values)
-            radial_p16[index], radial_p84[index] = np.percentile(values, [16.0, 84.0])
-
-    # 4. Plotting (1x3 grid)
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     extent = _image_extent(ny, nx, pixel_scale)
-    
-    # --- Panel 0: 2D Convergence Map ---
-    norm_kappa, cbar_label_kappa = _norm_from_plot_scale('log', kappa_map)
-    im_kappa = axes[0].imshow(kappa_map, origin='lower', extent=extent, cmap='twilight', norm=norm_kappa)
-    axes[0].set_xlabel('arcsec')
-    axes[0].set_ylabel('arcsec')
-    axes[0].set_title(r'2D Convergence ($\kappa$) Map')
-    
-    # Overlay critical lines on 2D Convergence
-    for i, (cline_x, cline_y) in enumerate(crit_lines):
-        label = 'Critical Lines' if i == 0 else ""
-        axes[0].plot(cline_x, cline_y, color='cyan', lw=1.5, ls='-', label=label)
-    if crit_lines:
-        axes[0].legend(loc='upper right', fontsize=8)
-    plt.colorbar(im_kappa, ax=axes[0], label=cbar_label_kappa)
-    
-    # --- Panel 1: 2D Magnification Map ---
-    # Robust LogNorm limit selection for absolute magnification
-    valid_mag = abs_mag_map[np.isfinite(abs_mag_map) & (abs_mag_map > 0)]
-    if len(valid_mag) > 0:
-        vmin_mag = max(0.1, float(np.percentile(valid_mag, 10.0)))
-        vmax_mag = min(100.0, float(np.percentile(valid_mag, 99.0)))
-        if vmax_mag <= vmin_mag:
-            vmax_mag = vmin_mag * 10.0
-        norm_mag = LogNorm(vmin=vmin_mag, vmax=vmax_mag)
-    else:
-        norm_mag = LogNorm(vmin=0.1, vmax=100.0)
-        
-    im_mag = axes[1].imshow(abs_mag_map, origin='lower', extent=extent, cmap='twilight', norm=norm_mag)
-    axes[1].set_xlabel('arcsec')
-    axes[1].set_ylabel('arcsec')
-    axes[1].set_title(r'2D Magnification ($|\mu|$) Map')
-    
-    # Overlay critical lines on 2D Magnification
-    for i, (cline_x, cline_y) in enumerate(crit_lines):
-        label = 'Critical Lines' if i == 0 else ""
-        axes[1].plot(cline_x, cline_y, color='red', lw=1.5, ls='-', label=label)
-    if crit_lines:
-        axes[1].legend(loc='upper right', fontsize=8)
-    plt.colorbar(im_mag, ax=axes[1], label=r'log10($|\mu|$)')
+    fig, axes = plt.subplots(len(rows), 3, figsize=(18, max(5.0, 4.4 * len(rows))), squeeze=False)
 
-    # --- Panel 2: Radial convergence profile ---
-    finite_profile = np.isfinite(radial_mean)
-    axes[2].plot(
-        radial_centers[finite_profile], radial_mean[finite_profile],
-        color='black', lw=1.8, label=r'Azimuthal mean $\kappa$',
-    )
-    axes[2].fill_between(
-        radial_centers[finite_profile], radial_p16[finite_profile], radial_p84[finite_profile],
-        color='tab:blue', alpha=0.25, label='16th-84th percentile',
-    )
-    axes[2].axhline(0.0, color='0.5', lw=0.8, ls='--')
-    axes[2].set_xlabel('Radius from primary mass centre (arcsec)')
-    axes[2].set_ylabel(r'Convergence $\kappa$')
-    axes[2].set_title(r'Radial Convergence Profile')
-    axes[2].legend(loc='best', fontsize=8)
-    
+    for row_index, (label, kappa_map, abs_mag_map, is_total) in enumerate(rows):
+        ax_kappa, ax_mag, ax_radial = axes[row_index]
+        norm_kappa, cbar_label_kappa = _convergence_map_norm(kappa_map)
+        kappa_cmap = 'twilight' if cbar_label_kappa != 'symlog' else 'coolwarm'
+        im_kappa = ax_kappa.imshow(
+            kappa_map, origin='lower', extent=extent, cmap=kappa_cmap, norm=norm_kappa,
+        )
+        ax_kappa.set_title(f'{label}: 2D convergence $\\kappa$')
+        ax_kappa.set_xlabel('arcsec')
+        ax_kappa.set_ylabel('arcsec')
+        if is_total:
+            for line_index, (cline_x, cline_y) in enumerate(crit_lines):
+                ax_kappa.plot(
+                    cline_x, cline_y, color='cyan', lw=1.5,
+                    label='Critical lines' if line_index == 0 else None,
+                )
+            if crit_lines:
+                ax_kappa.legend(loc='upper right', fontsize=8)
+        plt.colorbar(im_kappa, ax=ax_kappa, label=cbar_label_kappa)
+
+        valid_mag = abs_mag_map[np.isfinite(abs_mag_map) & (abs_mag_map > 0)]
+        if valid_mag.size:
+            vmin = max(0.1, float(np.percentile(valid_mag, 10.0)))
+            vmax = min(100.0, float(np.percentile(valid_mag, 99.0)))
+            norm_mag = LogNorm(vmin=vmin, vmax=max(vmax, vmin * 1.01))
+        else:
+            norm_mag = LogNorm(vmin=0.1, vmax=100.0)
+        im_mag = ax_mag.imshow(abs_mag_map, origin='lower', extent=extent, cmap='twilight', norm=norm_mag)
+        mag_title = r'2D magnification $|\mu|$' if is_total else r'Isolated $|\mu|$ response'
+        ax_mag.set_title(f'{label}: {mag_title}')
+        ax_mag.set_xlabel('arcsec')
+        ax_mag.set_ylabel('arcsec')
+        if is_total:
+            for cline_x, cline_y in crit_lines:
+                ax_mag.plot(cline_x, cline_y, color='red', lw=1.5)
+        plt.colorbar(im_mag, ax=ax_mag, label=r'$|\mu|$ (log scale)')
+
+        radii, radial_mean, radial_p16, radial_p84 = _radial_kappa_statistics(kappa_map, radius_map)
+        finite = np.isfinite(radial_mean)
+        ax_radial.plot(radii[finite], radial_mean[finite], color='black', lw=1.8, label='azimuthal mean')
+        ax_radial.fill_between(
+            radii[finite], radial_p16[finite], radial_p84[finite],
+            color='tab:blue', alpha=0.25, label='16th--84th percentile',
+        )
+        ax_radial.axhline(0.0, color='0.5', lw=0.8, ls='--')
+        ax_radial.set_title(f'{label}: radial convergence')
+        ax_radial.set_xlabel('radius from primary mass centre (arcsec)')
+        ax_radial.set_ylabel(r'$\kappa$')
+        ax_radial.legend(loc='best', fontsize=8)
+
     annotation = _mass_ellipticity_annotation(lens_mass_summary)
+    if any(not row[3] for row in rows):
+        decomposition_note = (
+            'Joint-profile decomposition: $\\kappa$ is additive.  Multipole $|\\mu|$ maps are '
+            'isolated responses; only the total row has physical critical lines.'
+        )
+        annotation = f'{annotation}\n{decomposition_note}' if annotation else decomposition_note
     if annotation is not None:
         fig.text(
-            0.01, 0.01, annotation, ha='left', va='bottom', fontsize=8,
+            0.01, 0.005, annotation, ha='left', va='bottom', fontsize=8,
             bbox={'facecolor': 'white', 'edgecolor': '0.6', 'alpha': 0.85, 'pad': 3},
         )
         annotation_lines = annotation.count('\n') + 1
-        annotation_margin = min(0.32, 0.055 + 0.035 * annotation_lines)
+        annotation_margin = min(0.32, 0.035 + 0.022 * annotation_lines)
         plt.tight_layout(rect=(0, annotation_margin, 1, 1))
     else:
         plt.tight_layout()
     plt.savefig(os.path.join(save_path, 'mass_profile_convergence.png'), dpi=300, bbox_inches='tight')
-    plt.close()
+    plt.close(fig)
 
 
 def generate_run_plots(
