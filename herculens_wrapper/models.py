@@ -676,11 +676,17 @@ def _materialize_mass_parameters(profile_type, values):
         # The public API consistently exposes angles in degrees.  MPPL's
         # profile equation continues to receive and calculate in radians.
         result['phi_m'] = jnp.deg2rad(jnp.asarray(result['phi_m']))
-    if normalized_type in {'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL'}:
-        # The public API uses degrees for all position angles.  ELL_MPPL
-        # evaluates the Paugnat--Gilman solution in radians; ``varphi_m`` is
-        # an eccentric anomaly, while ``phi_ref`` is the EPL polar PA.
-        for name in ('delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4'):
+    if normalized_type in {
+        'ELL_MPPL', 'ELL_MPPL_OFFSET',
+        'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL',
+    }:
+        # The public API uses degrees for all elliptical-multipole angles.
+        # The Paugnat--Gilman solution receives radians; ``varphi_m`` is an
+        # eccentric anomaly, while ``phi_ref`` is the reference-ellipse PA.
+        for name in (
+            'varphi_m', 'phi_ref', 'delta_varphi_m',
+            'delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4',
+        ):
             if name in result:
                 result[name] = jnp.deg2rad(jnp.asarray(result[name]))
     return result
@@ -1732,10 +1738,16 @@ def kwargs2params(
                     phi_specification=lens_mass_model.get('phi_m'),
                 )
             restored_ell_mppl_angles = None
-            if str(profile_type).upper() in {'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL'}:
+            if str(profile_type).upper() in {
+                'ELL_MPPL', 'ELL_MPPL_OFFSET',
+                'EPL_MULTIPOLE_M1M3M4_ELL', 'EPL_MULTIPOLE_M3M4_ELL',
+            }:
                 restored_ell_mppl_angles = {
                     name: np.degrees(np.asarray(saved_mass[name]))
-                    for name in ('delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4')
+                    for name in (
+                        'varphi_m', 'phi_ref', 'delta_varphi_m',
+                        'delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4',
+                    )
                     if name in lens_mass_model and name in saved_mass
                 }
             for key, param in lens_mass_model.items():
@@ -2810,7 +2822,7 @@ def validate_param_list(type_list, param_list):
                     f"missing {sorted(missing)}."
                 )
             continue
-        if normalized_profile_type not in {"MPPL", "MPPL_OFFSET"}:
+        if normalized_profile_type not in {"MPPL", "MPPL_OFFSET", "ELL_MPPL_OFFSET"}:
             continue
         if "m" not in params:
             raise ValueError(f"{profile_type} mass component {index} requires a fixed integer 'm' >= 1.")
@@ -2820,25 +2832,33 @@ def validate_param_list(type_list, param_list):
                 f"{profile_type} mass component {index} requires 'm' to be a fixed integer >= 1; "
                 "multipole order cannot be sampled continuously."
             )
-        if normalized_profile_type == "ELL_MPPL":
+        if normalized_profile_type == "ELL_MPPL_OFFSET":
             if multipole_order not in (1, 3, 4):
                 raise ValueError(
-                    f"{profile_type} mass component {index} requires fixed m=1, 3, or 4; "
+                    f"ELL_MPPL_OFFSET mass component {index} requires fixed m=1, 3, or 4; "
                     f"got {multipole_order!r}."
                 )
-            required = {"varphi_m", "q", "phi_ref"}
+            required = {
+                "delta_varphi_m", "q", "phi_ref", "center_x", "center_y", "r_E",
+            }
             missing = required.difference(params)
             if missing:
                 raise ValueError(
-                    f"{profile_type} mass component {index} requires {sorted(required)}; "
+                    f"ELL_MPPL_OFFSET mass component {index} requires {sorted(required)}; "
                     f"missing {sorted(missing)}."
                 )
             has_physical_amplitude = "a_m" in params
             has_fractional_amplitude = "a_m_frac" in params
             if has_physical_amplitude == has_fractional_amplitude:
                 raise ValueError(
-                    f"ELL_MPPL mass component {index} requires exactly one of 'a_m' "
+                    f"ELL_MPPL_OFFSET mass component {index} requires exactly one of 'a_m' "
                     "(arcsec) or 'a_m_frac' (dimensionless)."
+                )
+            forbidden = {"gamma", "varphi_m", "phi_m", "e_x", "e_y"}.intersection(params)
+            if forbidden:
+                raise ValueError(
+                    f"ELL_MPPL_OFFSET is an SIE elliptical multipole and has no gamma; "
+                    f"do not provide {sorted(forbidden)}."
                 )
             q_specification = params["q"]
             if _normalize_link_spec(q_specification) is None:
@@ -2855,7 +2875,7 @@ def validate_param_list(type_list, param_list):
                     and (not 0.0 < float(q_lower) <= 1.0 or not 0.0 < float(q_upper) <= 1.0)
                 ):
                     raise ValueError(
-                        f"{profile_type} mass component {index} requires 0 < q <= 1; "
+                        f"ELL_MPPL_OFFSET mass component {index} requires 0 < q <= 1; "
                         f"got {q_specification!r}."
                     )
             continue

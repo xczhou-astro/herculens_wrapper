@@ -423,6 +423,83 @@ class ELLMPPL:
         return hessian[..., 0, 0], hessian[..., 1, 1], hessian[..., 0, 1]
 
 
+class ELLMPPLOffset:
+    """Standalone SIE elliptical multipole with a reference-ellipse phase.
+
+    This is the public, link-friendly form of :class:`ELLMPPL`.  It contains
+    no ``gamma`` because the Paugnat--Gilman elliptical-multipole solution is
+    defined relative to SIE isodensity contours.  Use it with a companion
+    SIE, linking ``q``, ``phi_ref``, centre, and ``r_E`` to that SIE.
+
+    All angle arguments received here are radians.  The wrapper API accepts
+    degree-valued ``phi_ref`` and ``delta_varphi_m`` and converts them before
+    Herculens calls this class.  ``delta_varphi_m`` is an eccentric anomaly
+    from the reference ellipse semi-major axis, rather than a sky PA.
+    """
+
+    param_names = [
+        "m", "a_m", "a_m_frac", "delta_varphi_m", "q", "phi_ref",
+        "center_x", "center_y", "r_E",
+    ]
+    lower_limit_default = {
+        "m": 1, "a_m": 0.0, "a_m_frac": -1.0,
+        "delta_varphi_m": -np.pi, "q": 0.001, "phi_ref": -np.pi,
+        "center_x": -100.0, "center_y": -100.0, "r_E": 1e-6,
+    }
+    upper_limit_default = {
+        "m": 4, "a_m": 100.0, "a_m_frac": 1.0,
+        "delta_varphi_m": np.pi, "q": 1.0, "phi_ref": np.pi,
+        "center_x": 100.0, "center_y": 100.0, "r_E": 100.0,
+    }
+    fixed_default = {
+        "m": True, "a_m": False, "a_m_frac": False,
+        "delta_varphi_m": False, "q": False, "phi_ref": False,
+        "center_x": False, "center_y": False, "r_E": True,
+    }
+
+    @staticmethod
+    def _native_kwargs(
+        m, a_m=None, a_m_frac=None, delta_varphi_m=0.0, q=1.0,
+        phi_ref=0.0, center_x=0.0, center_y=0.0, r_E=1.0,
+    ):
+        if (a_m is None) == (a_m_frac is None):
+            raise ValueError(
+                "ELL_MPPL_OFFSET requires exactly one of 'a_m' (arcsec) or "
+                "'a_m_frac' (dimensionless)."
+            )
+        if a_m_frac is not None:
+            a_m = a_m_frac * r_E
+        return {
+            "m": m, "a_m": a_m, "varphi_m": delta_varphi_m, "q": q,
+            "phi_ref": phi_ref, "center_x": center_x, "center_y": center_y,
+            "r_E": r_E,
+        }
+
+    @staticmethod
+    def function(
+        x, y, m, a_m=None, a_m_frac=None, delta_varphi_m=0.0, q=1.0,
+        phi_ref=0.0, center_x=0.0, center_y=0.0, r_E=1.0,
+    ):
+        return _JAXtronomyEllipticalMultipole.function(
+            x, y, **ELLMPPLOffset._native_kwargs(
+                m, a_m, a_m_frac, delta_varphi_m, q, phi_ref, center_x, center_y, r_E,
+            )
+        )
+
+    @staticmethod
+    def derivatives(x, y, **kwargs):
+        return _JAXtronomyEllipticalMultipole.derivatives(
+            x, y, **ELLMPPLOffset._native_kwargs(**kwargs)
+        )
+
+    @staticmethod
+    def hessian(x, y, **kwargs):
+        f_xx, f_xy, _, f_yy = _JAXtronomyEllipticalMultipole.hessian(
+            x, y, **ELLMPPLOffset._native_kwargs(**kwargs)
+        )
+        return f_xx, f_yy, f_xy
+
+
 class EPLM1M3M4:
     """JAXtronomy's EPL plus elliptical ``m=1,3,4`` multipoles.
 

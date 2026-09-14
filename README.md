@@ -416,10 +416,42 @@ total-model row: its convergence is identically zero, while its physically
 meaningful effect is already present in the total critical lines and
 magnification.
 
+### SIE elliptical multipole with an offset phase (`ELL_MPPL_OFFSET`)
+
+`ELL_MPPL_OFFSET` is a standalone elliptical multipole for an **SIE**
+reference lens.  It deliberately has no `gamma`: link its reference geometry
+to a companion `SIE`, whose slope is fixed to 2.  `delta_varphi_m` and
+`phi_ref` are degrees in the API; the former is an eccentric anomaly from the
+reference ellipse semi-major axis, not a sky PA.
+
+```python
+sie = MassProfile("SIE", prior={
+    "theta_E": [0.5, 2.0],
+    "q": [0.3, 0.9], "phi": [-90.0, 90.0],
+    "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
+})
+ell_m4 = MassProfile("ELL_MPPL_OFFSET", prior={
+    "m": 4,
+    "a_m_frac": [-0.05, 0.05],
+    "delta_varphi_m": [0.0, 10.0, -20.0, 20.0],
+})
+ell_m4.q = sie.q
+ell_m4.phi_ref = sie.phi
+ell_m4.center_x = sie.center_x
+ell_m4.center_y = sie.center_y
+ell_m4.r_E = sie.theta_E
+
+profiles = LensProfileCollection(lens_mass=[sie, ell_m4])
+```
+
+Only `m=1`, `m=3`, and `m=4` are supported.  Supply exactly one of `a_m`
+(arcsec) or `a_m_frac` (dimensionless).  Do not add `gamma`; the profile is
+not a generalized-EPL elliptical multipole.
+
 ### Legacy note
 
-Use `EPL_MULTIPOLE_M1M3M4_ELL`; the earlier `ELL_MPPL` and `EPL_M1M3M4`
-public profile names are no longer registered.
+`ELL_MPPL_OFFSET` supersedes the earlier `ELL_MPPL` public name.  The older
+`ELL_MPPL` and `EPL_M1M3M4` public profile names are not registered.
 
 `EPL_MULTIPOLE_M3M4_ELL` uses the same JAXtronomy elliptical construction but
 omits m1.  It takes the same parameters except `a1_a` and `delta_phi_m1`:
