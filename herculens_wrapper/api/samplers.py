@@ -1364,6 +1364,24 @@ class FitResult:
         self._display_plot(output)
         return output
 
+    def plot_mass_light_overlay(self, *, save_path: str | Path | None = None) -> Path:
+        """Overlay observed-image isophotes with fitted mass convergence.
+
+        The plot uses the exact image grid retained by the built model, so its
+        mass and light orientations follow the fitting-coordinate convention.
+        It is not rotated into a FITS-WCS north-up/east-left display.
+        """
+        from ..visualizations import plot_mass_light_overlay
+
+        model = self._require_model()
+        return self._legacy_plot_result(
+            lambda directory, filename: plot_mass_light_overlay(
+                model.lens_image, self._kwargs_result(), model.data.likelihood_image,
+                str(directory), output_filename=filename,
+            ),
+            save_path, 'mass_light_overlay.png',
+        )
+
     def mass_component_convergence(self) -> dict[str, np.ndarray]:
         """Return cached-parameter stellar, dark-matter, and total κ maps."""
         return self._require_model().mass_component_convergence(self.parameters)

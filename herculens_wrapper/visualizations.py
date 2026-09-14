@@ -6,6 +6,7 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm, SymLogNorm
+from matplotlib.lines import Line2D
 
 try:
     import corner
@@ -2267,6 +2268,135 @@ def _convergence_map_norm(kappa_map):
     return SymLogNorm(linthresh=max(magnitude * 1e-3, 1e-12), vmin=-magnitude, vmax=magnitude), 'symlog'
 
 
+def _enable_mass_plot_x64():
+    """Enable the precision required by Herculens' finite-difference SIE Hessian."""
+    import jax
+
+    # NIE/SIE currently obtains its Hessian with a 1e-10 finite difference.
+    # With JAX float32 this displacement can round to zero, producing a sparse
+    # and invalid convergence map.  ``update`` also affects arrays created by
+    # the MassModel evaluation below when Herculens was imported already.
+    jax.config.update('jax_enable_x64', True)
+
+
+def _mass_grid_maps(lens_image, kwargs_lens, image_shape):
+    """Evaluate κ and inverse magnification on the model's exact image grid."""
+    _enable_mass_plot_x64()
+    x_grid, y_grid = lens_image.Grid.pixel_coordinates
+    x_grid = np.asarray(x_grid, dtype=float)
+    y_grid = np.asarray(y_grid, dtype=float)
+    expected_size = int(np.prod(image_shape))
+    if x_grid.size != expected_size or y_grid.size != expected_size:
+        raise ValueError(
+            'The model image grid does not match the supplied image shape: '
+            f'grid={x_grid.size} pixels, image={expected_size} pixels.'
+        )
+    x_map = x_grid.reshape(image_shape)
+    y_map = y_grid.reshape(image_shape)
+    kappa = np.asarray(
+        lens_image.MassModel.kappa(x_map.ravel(), y_map.ravel(), kwargs_lens), dtype=float,
+    ).reshape(image_shape)
+    inverse_magnification = np.asarray(
+        lens_image.MassModel.inverse_magnification(
+            x_map.ravel(), y_map.ravel(), kwargs_lens,
+        ), dtype=float,
+    ).reshape(image_shape)
+    kappa_finite = float(np.isfinite(kappa).mean())
+    inverse_finite = float(np.isfinite(inverse_magnification).mean())
+    if kappa_finite < 0.99 or inverse_finite < 0.99:
+        raise ValueError(
+            'Mass-model map has non-finite values '
+            f'(κ={kappa_finite:.1%}, det(A)={inverse_finite:.1%} finite).'
+        )
+    return x_map, y_map, kappa, inverse_magnification
+
+
+def _grid_extent(x_map, y_map):
+    """Pixel-edge extent for an image grid, retaining its native orientation."""
+    x_axis = np.asarray(x_map)[0]
+    y_axis = np.asarray(y_map)[:, 0]
+    dx = float(np.median(np.diff(x_axis))) if x_axis.size > 1 else 1.0
+    dy = float(np.median(np.diff(y_axis))) if y_axis.size > 1 else 1.0
+    return [x_axis[0] - dx / 2, x_axis[-1] + dx / 2,
+            y_axis[0] - dy / 2, y_axis[-1] + dy / 2]
+
+
+def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
+                            output_filename='mass_light_overlay.png'):
+    """Overlay observed-image isophotes and the fitted total convergence map.
+
+    The observed image and κ map share ``lens_image.Grid.pixel_coordinates``;
+    their orientation is consequently identical to the one used in fitting.
+    This intentionally represents model coordinates, not a FITS-WCS north-up
+    display.
+    """
+    image = np.asarray(image_data, dtype=float)
+    if image.ndim != 2:
+        raise ValueError('image_data must be a two-dimensional image.')
+    kwargs_lens = kwargs_result.get('kwargs_lens', [])
+    if not kwargs_lens:
+        raise ValueError('kwargs_result must contain a non-empty kwargs_lens list.')
+    x_map, y_map, kappa, inverse_magnification = _mass_grid_maps(
+        lens_image, kwargs_lens, image.shape,
+    )
+    extent = _grid_extent(x_map, y_map)
+    finite_image = image[np.isfinite(image)]
+    if finite_image.size == 0:
+        raise ValueError('image_data contains no finite pixels.')
+    image_median = float(np.median(finite_image))
+    image_scale = max(
+        float(np.percentile(np.abs(finite_image - image_median), 68.0)),
+        np.finfo(float).eps,
+    )
+    displayed_image = np.arcsinh((image - image_median) / image_scale)
+    iso_levels = np.unique(np.percentile(finite_image, [70.0, 85.0, 94.0, 98.0]))
+    kappa_levels = [
+        value for value in (0.2, 0.5, 1.0, 2.0)
+        if np.nanmin(kappa) < value < np.nanmax(kappa)
+    ]
+    norm_kappa, _ = _convergence_map_norm(kappa)
+    cmap_kappa = 'magma' if np.nanmin(kappa) >= 0 else 'coolwarm'
+
+    figure, axes = plt.subplots(1, 2, figsize=(13, 6), constrained_layout=True)
+    axes[0].imshow(displayed_image, origin='lower', extent=extent, cmap='gray')
+    axes[0].set_title('Observed image with mass convergence contours')
+    if kappa_levels:
+        axes[0].contour(x_map, y_map, kappa, levels=kappa_levels,
+                        colors='cyan', linewidths=1.2)
+
+    mass_image = axes[1].imshow(kappa, origin='lower', extent=extent, cmap=cmap_kappa,
+                                norm=norm_kappa)
+    axes[1].set_title(r'Total convergence $\kappa$ with image isophotes')
+    if iso_levels.size > 1:
+        axes[1].contour(x_map, y_map, image, levels=iso_levels,
+                        colors='white', linewidths=1.0)
+    figure.colorbar(mass_image, ax=axes[1], label=r'Convergence $\kappa$')
+
+    if np.nanmin(inverse_magnification) < 0 < np.nanmax(inverse_magnification):
+        for axis in axes:
+            axis.contour(x_map, y_map, inverse_magnification, levels=[0.0],
+                         colors='orange', linewidths=1.25)
+    primary_mass = kwargs_lens[0]
+    center_x = float(primary_mass.get('center_x', 0.0))
+    center_y = float(primary_mass.get('center_y', 0.0))
+    for axis in axes:
+        axis.plot(center_x, center_y, marker='+', color='lime', markersize=10,
+                  markeredgewidth=1.8)
+        axis.set(xlabel='arcsec', ylabel='arcsec', aspect='equal')
+    axes[0].legend(handles=[
+        Line2D([], [], color='cyan', label=r'Mass $\kappa$ contours'),
+        Line2D([], [], color='white', label='Image isophotes'),
+        Line2D([], [], color='orange', label='Critical curve'),
+        Line2D([], [], color='lime', marker='+', linestyle='None',
+               label='Primary mass centre'),
+    ], loc='upper right', fontsize=8, framealpha=0.8)
+    figure.suptitle('Mass--light alignment diagnostic', fontsize=14)
+    output = os.path.join(save_path, output_filename)
+    figure.savefig(output, dpi=300, bbox_inches='tight')
+    plt.close(figure)
+    return output
+
+
 def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path, lens_mass_summary=None):
     """Plot total mass plus an exact EPL-elliptical-multipole decomposition.
 
@@ -2618,6 +2748,10 @@ def generate_run_plots(
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
         lens_image, kwargs_best, pixel_scale, save_path, lens_mass_summary,
+    ))
+
+    _try('mass_light_overlay.png', lambda: plot_mass_light_overlay(
+        lens_image, kwargs_best, image_data, save_path,
     ))
 
     if extra and 'loss_history' in extra:
