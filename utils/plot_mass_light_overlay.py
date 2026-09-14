@@ -129,6 +129,46 @@ def _usable_levels(levels: list[float], values: np.ndarray) -> list[float]:
     return [level for level in levels if lower < level < upper]
 
 
+def _evaluate_on_image_grid(mass_model, x_grid: np.ndarray, y_grid: np.ndarray,
+                            kwargs_lens: list[dict]) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate lensing quantities point-by-point, then restore image layout.
+
+    A Herculens ``PixelGrid`` supplies a flattened list of image coordinates
+    internally.  Most mass profiles also accept 2-D arrays, but this is not
+    true consistently for JAX-compiled composite profiles.  In particular,
+    evaluating a joint elliptical-multipole profile on a 2-D broadcast grid
+    can silently yield a sparse-looking result.  Use the backend's native
+    point-list convention here and make the required reshape explicit.
+    """
+    shape = x_grid.shape
+    x_points = np.asarray(x_grid, dtype=float).reshape(-1)
+    y_points = np.asarray(y_grid, dtype=float).reshape(-1)
+    kappa = np.asarray(mass_model.kappa(x_points, y_points, kwargs_lens), dtype=float)
+    inverse_magnification = np.asarray(
+        mass_model.inverse_magnification(x_points, y_points, kwargs_lens), dtype=float,
+    )
+    expected_size = int(np.prod(shape))
+    if kappa.size != expected_size or inverse_magnification.size != expected_size:
+        raise ValueError(
+            "Mass model evaluation did not return one value per image pixel: "
+            f"expected {expected_size}, got kappa={kappa.size}, "
+            f"inverse_magnification={inverse_magnification.size}."
+        )
+    kappa = kappa.reshape(shape)
+    inverse_magnification = inverse_magnification.reshape(shape)
+    kappa_fraction = float(np.isfinite(kappa).mean())
+    inverse_fraction = float(np.isfinite(inverse_magnification).mean())
+    if kappa_fraction < 0.99 or inverse_fraction < 0.99:
+        raise ValueError(
+            "Mass model returned non-finite values on the image grid "
+            f"(finite fraction: kappa={kappa_fraction:.1%}, "
+            f"inverse_magnification={inverse_fraction:.1%}). This usually means "
+            "that the supplied mass-profile order or kwargs_lens do not match the "
+            "fit, or that a fitted mass parameter is outside its physical domain."
+        )
+    return kappa, inverse_magnification
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--image", type=Path, required=True, help="Observed image-plane FITS file.")
@@ -177,6 +217,14 @@ def main() -> None:
             f"{len(kwargs_lens)} entries."
         )
 
+    # SIE/NIE evaluates its Hessian through a 1e-10 finite difference.  With
+    # JAX's float32 default that displacement is rounded away, producing a
+    # nearly all-zero (and visually sparse) kappa map.  This must run before
+    # importing Herculens, which imports JAX itself.
+    import jax
+
+    jax.config.update("jax_enable_x64", True)
+
     # Register wrapper-local MPPL profiles before constructing MassModel.
     from herculens.MassModel.mass_model import MassModel
     from herculens_wrapper.profiles import register_mass_profiles
@@ -189,9 +237,8 @@ def main() -> None:
         image.shape, args.pixel_scale, args.grid_center_x, args.grid_center_y,
     )
     mass_model = MassModel(mass_profiles)
-    kappa = np.asarray(mass_model.kappa(x_grid, y_grid, kwargs_lens), dtype=float)
-    inverse_magnification = np.asarray(
-        mass_model.inverse_magnification(x_grid, y_grid, kwargs_lens), dtype=float,
+    kappa, inverse_magnification = _evaluate_on_image_grid(
+        mass_model, x_grid, y_grid, kwargs_lens,
     )
 
     figure, axes = plt.subplots(1, 2, figsize=(13, 6), constrained_layout=True)
