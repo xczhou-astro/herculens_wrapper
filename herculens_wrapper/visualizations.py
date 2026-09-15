@@ -503,6 +503,15 @@ def plot_source_plane(
             ny, nx = num_pixel, num_pixel
             p_scale = source_pixel_scale
 
+        # Some diagnostics provide a high-resolution parametric source-plane
+        # image (normally ``num_pixel`` square).  Its coordinate grid must
+        # have the same shape; otherwise the image-plane 61x61 grid is used
+        # here and later cannot be reshaped onto the 200x200 display image.
+        if source_for_plot_override is not None:
+            override = np.asarray(source_for_plot_override)
+            if override.ndim == 2:
+                ny, nx = override.shape
+
         xx, yy, extent = _parametric_source_plane_grid(
             lens_image,
             kwargs_result.get('kwargs_lens'),
