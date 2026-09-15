@@ -448,6 +448,31 @@ class PowerSpectrum:
             print("[power_init] Warning: No kwargs_source found in prior run; skipping power_init.")
             return {}
 
+        return PowerSpectrum.fit_power_spectrum_init_from_source_kwargs(
+            lens_image, kwargs_source_analytic, k_values, pixelated_prior,
+            seed=seed, max_iterations=max_iterations,
+            learning_rate=learning_rate, progress_bar=progress_bar,
+            param_name=param_name, kwargs_lens=kwargs_lens,
+        )
+
+    @staticmethod
+    def fit_power_spectrum_init_from_source_kwargs(
+        lens_image,
+        kwargs_source_analytic,
+        k_values,
+        pixelated_prior,
+        *,
+        seed=42,
+        max_iterations=2000,
+        learning_rate=0.01,
+        progress_bar=True,
+        param_name='source_grid',
+        kwargs_lens=None,
+    ):
+        """Fit a pixel-grid Matérn start to already-loaded analytic source kwargs."""
+        if not kwargs_source_analytic:
+            print("[power_init] Warning: No analytic source kwargs; skipping power_init.")
+            return {}
         source_image, source_grid_spacing = _project_analytic_kwargs_to_pixel_source(
             lens_image,
             kwargs_source_analytic,

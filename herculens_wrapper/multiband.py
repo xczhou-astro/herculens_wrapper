@@ -14,7 +14,10 @@ from herculens_wrapper.models import (
 )
 
 
-_BAND_SPECIFIC_LENS_MASS_KEYS = frozenset({'center_x', 'center_y'})
+# Mass centres have historically been allowed to differ between filters.  The
+# public API may additionally mark individual mass parameters as independent
+# in a named band (for example a chromatic centroid-free shear experiment).
+_DEFAULT_BAND_SPECIFIC_LENS_MASS_KEYS = frozenset({'center_x', 'center_y'})
 
 
 def band_site_prefix(index, band_name):
@@ -51,10 +54,22 @@ def create_multiband_prob_model(
     fixed_lens_mass=None,
     fixed_lens_mass_by_band=None,
     fixed_lens_light_by_band=None,
+    band_specific_lens_mass_parameters=None,
 ):
     """Build a joint likelihood with shared mass shape and per-band mass centres."""
     if not bands:
         raise ValueError('At least one band is required for a multiband model.')
+
+    band_specific = {
+        (index, key)
+        for index, mass_model in enumerate(lens_mass_params_list)
+        for key in mass_model
+        if key in _DEFAULT_BAND_SPECIFIC_LENS_MASS_KEYS
+    }
+    band_specific.update(band_specific_lens_mass_parameters or ())
+
+    def is_band_specific(index, key):
+        return (index, key) in band_specific
 
     holders = []
     band_models = []
@@ -78,6 +93,7 @@ def create_multiband_prob_model(
             likelihood_mask=band.get('fit_mask_bool'),
             exposure_time=band.get('exposure_time'),
             background_rms=band.get('background_rms'),
+            background_rms_prior=band.get('background_rms_prior'),
         ))
 
     def _site_value(params, band, site):
@@ -90,7 +106,7 @@ def create_multiband_prob_model(
         values = {}
         for index, mass_model in enumerate(lens_mass_params_list):
             for key, param in mass_model.items():
-                if key in _BAND_SPECIFIC_LENS_MASS_KEYS:
+                if is_band_specific(index, key):
                     continue
                 if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
                     site = f'lens_{key}_{index}'
@@ -107,14 +123,14 @@ def create_multiband_prob_model(
             for key, shared_param in shared_mass_model.items():
                 param = (
                     band_mass_model.get(key, shared_param)
-                    if key in _BAND_SPECIFIC_LENS_MASS_KEYS else shared_param
+                    if is_band_specific(index, key) else shared_param
                 )
                 link_spec = _normalize_link_spec(param)
                 if link_spec is not None:
                     kwargs[key] = _resolve_link(bank, link_spec, context=f'multiband lens_mass[{index}].{key}')
                 elif isinstance(param, (list, tuple)):
                     site = f'lens_{key}_{index}'
-                    if key in _BAND_SPECIFIC_LENS_MASS_KEYS:
+                    if is_band_specific(index, key):
                         kwargs[key] = (
                             _sample_param_from_prior(site, key, param)
                             if sample_centers else _site_value(params, band, site)
@@ -143,7 +159,7 @@ def create_multiband_prob_model(
             if isinstance(mass_model, dict):
                 order.extend(
                     f'lens_{key}_{index}' for key in mass_model
-                    if key not in _BAND_SPECIFIC_LENS_MASS_KEYS
+                    if not is_band_specific(index, key)
                 )
 
         for band in bands:
@@ -154,7 +170,7 @@ def create_multiband_prob_model(
                     order.extend(
                         f'{prefix}lens_{key}_{index}'
                         for key, value in mass_model.items()
-                        if key in _BAND_SPECIFIC_LENS_MASS_KEYS
+                        if is_band_specific(index, key)
                         and _normalize_link_spec(value) is None
                         and isinstance(value, (list, tuple))
                     )
@@ -244,7 +260,7 @@ def create_multiband_prob_model(
             lambda params, band=band: mass_kwargs_from_params(params, band)
         )
     model.type_list = {'lens_mass_type_list': lens_mass_type_list}
-    model.band_specific_lens_mass_keys = _BAND_SPECIFIC_LENS_MASS_KEYS
+    model.band_specific_lens_mass_parameters = frozenset(band_specific)
     return model
 
 

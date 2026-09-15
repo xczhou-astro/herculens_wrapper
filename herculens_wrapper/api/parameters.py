@@ -162,8 +162,9 @@ class Profile:
         If ``prior`` is omitted, the profile's ordinary prior is copied. A
         batch declaration may be supplied as
         ``{'F277W': {'center_x': [...], 'center_y': [...]}}``. The
-        multiband backend currently supports independent ``center_x`` and
-        ``center_y`` only; validation occurs when building that model.
+        In a multi-band model this creates a distinct latent site for the
+        chosen band while the parameter remains shared by all other bands.
+        Validation occurs when building that model.
         """
         if isinstance(band, Mapping):
             if parameter is not None or prior is not None:

@@ -129,7 +129,7 @@ class MultiBandProfileCollection:
         self.shared, self.bands, self.unshared = shared, dict(bands), deepcopy(unshared or {})
         for name, collection in self.bands.items():
             if collection.lens_mass is not None:
-                raise ValueError(f"{name}: lens_mass belongs in shared; use unshared for centre priors.")
+                raise ValueError(f"{name}: lens_mass belongs in shared; use unshared for band-specific priors.")
 
     def band_definitions(self) -> dict[str, tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]]:
         shared_types, shared_params = self.shared.as_definition().as_dicts()
@@ -149,12 +149,31 @@ class MultiBandProfileCollection:
                 if not isinstance(index, int) or not 0 <= index < len(params["lens_mass_params_list"]):
                     raise IndexError(f"{name}: invalid lens_mass profile index {index!r}.")
                 for key, prior in values.items():
-                    if key not in {"center_x", "center_y"}:
-                        raise ValueError("First multiband API version only permits unshared lens_mass center_x/center_y.")
                     if key not in params["lens_mass_params_list"][index]:
                         raise KeyError(f"{name}: lens_mass[{index}] has no {key!r}.")
                     params["lens_mass_params_list"][index][key] = deepcopy(prior)
             result[name] = types, params
+        return result
+
+    def band_specific_lens_mass_parameters(self) -> set[tuple[int, str]]:
+        """Return mass entries sampled separately in at least one band.
+
+        Centres remain band-specific for backwards compatibility.  Other
+        entries become separate only after ``MassProfile.set_independent`` or
+        the legacy ``unshared`` declaration names them.
+        """
+        result = {
+            (index, key)
+            for index, profile in enumerate(self.shared.lens_mass)
+            for key in profile.parameters
+            if key in {"center_x", "center_y"}
+        }
+        for name, values in self.unshared.items():
+            for index, entries in values.get("lens_mass", {}).items():
+                result.update((index, key) for key in entries)
+        for index, profile in enumerate(self.shared.lens_mass):
+            for entries in profile.independent_parameters.values():
+                result.update((index, key) for key in entries)
         return result
 
     def apply_initializations(self) -> bool:
@@ -191,6 +210,13 @@ class MultiBandFitResult:
     def kwargs_by_band(self) -> dict[str, Any]:
         return self._model.prob_model.params2kwargs_by_band(self.parameters)
 
+    def _noise_for_band(self, band: Mapping[str, Any], model_image: np.ndarray) -> np.ndarray:
+        """Evaluate the same fixed or sampled Poisson noise used in the likelihood."""
+        data = self._model.observations[band["name"]]
+        site = f"{band['site_prefix']}/background_rms"
+        sampled = self.parameters.get(site) if data.samples_background_rms else None
+        return data.noise_from_model(model_image, background_rms=sampled)
+
     def _shared_lens_kwargs(self, kwargs_by_band: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Return the shared lens block, excluding explicitly independent keys."""
         reference_band = self._model.observations.band_names[0]
@@ -199,6 +225,8 @@ class MultiBandFitResult:
         if not isinstance(mass_profiles, (list, tuple)) and not hasattr(mass_profiles, "profiles"):
             mass_profiles = [mass_profiles]
         for index, profile in enumerate(mass_profiles):
+            for key in ("center_x", "center_y"):
+                shared[index].pop(key, None)
             for keys in profile.independent_parameters.values():
                 for key in keys:
                     shared[index].pop(key, None)
@@ -209,14 +237,14 @@ class MultiBandFitResult:
         order: list[str] = []
         for index, definition in enumerate(self._model.prob_model.lens_mass_params_list):
             for key in definition:
-                if key not in {"center_x", "center_y"}:
+                if (index, key) not in self._model.prob_model.band_specific_lens_mass_parameters:
                     order.append(f"lens_{key}_{index}")
         for band in self._model.bands:
             prefix = f"{band['site_prefix']}/"
             parameters = band["param_list"]
             for index, definition in enumerate(parameters.get("lens_mass_params_list", [])):
                 for key in definition:
-                    if key in {"center_x", "center_y"}:
+                    if (index, key) in self._model.prob_model.band_specific_lens_mass_parameters:
                         order.append(f"{prefix}lens_{key}_{index}")
             for index, definition in enumerate(parameters.get("lens_light_params_list", [])):
                 order.extend(f"{prefix}lens_light_{key}_{index}" for key in definition)
@@ -236,7 +264,7 @@ class MultiBandFitResult:
         per_band, total_chi2, total_pixels, log_likelihood = {}, 0.0, 0, 0.0
         for band, kwargs in zip(self._model.bands, self.kwargs_by_band().values()):
             prediction = np.asarray(band["lens_image"].model(**kwargs))
-            noise_map = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(prediction)))
+            noise_map = self._noise_for_band(band, prediction)
             residual = (prediction - band["image_data"]) / noise_map
             valid = np.isfinite(residual)
             if band["fit_mask_bool"] is not None: valid &= np.asarray(band["fit_mask_bool"], bool)
@@ -296,7 +324,7 @@ class MultiBandFitResult:
             if components is not None and pixelated_index is not None:
                 kwargs_for_plots["kwargs_source"][pixelated_index]["pixels"] = components["source_plane"]
             best = np.asarray(components["total"]) if components is not None else np.asarray(band["lens_image"].model(**kwargs))
-            output_noise = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(best)))
+            output_noise = self._noise_for_band(band, best)
             residual = (best - band["image_data"]) / output_noise
             valid = np.isfinite(residual)
             if band["fit_mask_bool"] is not None: valid &= np.asarray(band["fit_mask_bool"], bool)
@@ -344,8 +372,24 @@ class MultiBandFitResult:
                            f"{name}_noise_map": output_noise, f"{name}_fit_mask_bool": valid})
             files[f"{name}_kwargs"] = directory / "kwargs_result.json"
         with (root / "kwargs_result.json").open("w") as stream:
+            likelihood_parameters_by_band = {
+                band["name"]: {
+                    "background_rms": (
+                        float(np.asarray(self.parameters[f"{band['site_prefix']}/background_rms"]).reshape(-1)[0])
+                        if self._model.observations[band["name"]].samples_background_rms
+                        else self._model.observations[band["name"]].background_rms
+                    ),
+                    "exposure_time": self._model.observations[band["name"]].exposure_time,
+                }
+                for band in self._model.bands
+                if self._model.observations[band["name"]].uses_poisson_noise
+            }
             json.dump(
-                {"kwargs_by_band": kwargs_json_by_band, "kwargs_lens": shared_lens},
+                {
+                    "kwargs_by_band": kwargs_json_by_band,
+                    "kwargs_lens": shared_lens,
+                    "likelihood_parameters_by_band": likelihood_parameters_by_band,
+                },
                 stream, indent=2, default=json_serializer,
             )
         with (root / "kwargs_lens_shared.json").open("w") as stream:
@@ -550,10 +594,6 @@ class MultiBandModel:
         definitions = self.profiles.band_definitions(); bands = []
         shared_types = shared_params = None
         for index, (name, data) in enumerate(self.observations.items()):
-            if data.samples_background_rms:
-                raise NotImplementedError(
-                    "background_rms_prior is currently supported by SingleBandModel only."
-                )
             types, params = definitions[name]; validate_param_list(types, params)
             if shared_types is None: shared_types, shared_params = types["lens_mass_type_list"], params["lens_mass_params_list"]
             lens_image = create_lens_image(
@@ -567,9 +607,14 @@ class MultiBandModel:
             bands.append({"name": name, "site_prefix": band_site_prefix(index, name), "lens_image": lens_image,
                 "image_data": data.likelihood_image, "noise_map": data.likelihood_noise, "fit_mask_bool": data.likelihood_mask,
                 "param_list": params, "type_list": types, "args": SimpleNamespace(likelihood_scale=self.likelihood_scale),
-                "exposure_time": data.exposure_time, "background_rms": data.background_rms})
+                "exposure_time": data.exposure_time, "background_rms": data.background_rms,
+                "background_rms_prior": data.background_rms_prior})
         self.bands = bands
-        self.prob_model = create_multiband_prob_model(bands, shared_params, shared_types, SimpleNamespace(likelihood_scale=self.likelihood_scale))
+        self.prob_model = create_multiband_prob_model(
+            bands, shared_params, shared_types,
+            SimpleNamespace(likelihood_scale=self.likelihood_scale),
+            band_specific_lens_mass_parameters=self.profiles.band_specific_lens_mass_parameters(),
+        )
 
     def initialize(
         self,
@@ -577,16 +622,19 @@ class MultiBandModel:
         seed: int = 42,
         run_id: int | str | None = None,
         init_params_path: str | Path | None = None,
+        init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
     ) -> Mapping[str, Any]:
-        """Create a start point, optionally inheriting a parametric multiband fit.
+        """Create a start point, optionally inheriting a prior fit.
 
         A prior ``parametric_svi`` directory (or a specific ``run_i`` within
         it) supplies shared lens mass, band-specific centres, and lens light.
         For a pixelated source, ``pixelated_init_match='image'`` then runs a
         short source-only SVI warmup with those inherited components fixed.
         """
+        if init_params_path is not None and init_lens_mass_path is not None:
+            raise ValueError("Provide only one of init_params_path and init_lens_mass_path.")
         if run_id is not None:
             print("\n========================================")
             print(f"Starting Run {run_id} (seed={seed})")
@@ -599,6 +647,20 @@ class MultiBandModel:
         info = initialize_model(jax.random.PRNGKey(seed), self.prob_model.model, init_strategy=infer.init_to_median(num_samples=25), validate_grad=False)
         self.initial_parameters = {name: site["value"] for name, site in info.model_trace.items() if site["type"] == "sample" and not site["is_observed"]}
         self.initialization_path = None
+        mass_only_warm_start = init_lens_mass_path is not None
+        if mass_only_warm_start:
+            from ..models import load_kwargs_init_json
+            from ..utils import resolve_init_run_dir
+
+            source_path = Path(resolve_init_run_dir(init_lens_mass_path)).expanduser()
+            inherited = load_kwargs_init_json(source_path)
+            kwargs_lens = inherited.get("kwargs_lens")
+            if not isinstance(kwargs_lens, list):
+                raise ValueError(
+                    f"{source_path}: expected kwargs_lens in a prior single- or multi-band result."
+                )
+            self._apply_inherited_lens_mass_kwargs(kwargs_lens)
+            print(f"[Init] Loaded mass-only warm start from {source_path}")
         if init_params_path is not None:
             from ..utils import resolve_init_run_dir
 
@@ -633,9 +695,14 @@ class MultiBandModel:
                 "PIXELATED" in band["type_list"].get("source_light_type_list", [])
                 for band in self.bands
             )
-            if pixelated_init_match not in {"image"}:
-                raise ValueError("Multiband pixelated initialization currently supports pixelated_init_match='image'.")
-            if is_pixelated and num_iterations_warmup > 0:
+            if pixelated_init_match not in {"image", "source"}:
+                raise ValueError("pixelated_init_match must be 'image' or 'source'.")
+            if is_pixelated and pixelated_init_match == "source":
+                self._initialize_pixelated_source_from_parametric(
+                    kwargs_by_band, seed=seed,
+                    num_iterations=num_iterations_warmup or 2_000,
+                )
+            if is_pixelated and pixelated_init_match == "image" and num_iterations_warmup > 0:
                 self._warmup_pixelated_source(
                     kwargs_by_band, seed=seed, num_iterations=num_iterations_warmup,
                 )
@@ -643,7 +710,93 @@ class MultiBandModel:
                 kwargs_by_band, seed=seed,
                 num_iterations=num_iterations_warmup or 2_000,
             )
+        elif mass_only_warm_start:
+            if pixelated_init_match != "image":
+                raise ValueError(
+                    "init_lens_mass_path has no analytic source to match; use pixelated_init_match='image'."
+                )
+            is_pixelated = all(
+                "PIXELATED" in band["type_list"].get("source_light_type_list", [])
+                for band in self.bands
+            )
+            if is_pixelated and num_iterations_warmup > 0:
+                fixed = {
+                    band["name"]: {"kwargs_lens": self.prob_model.params2kwargs_by_band(
+                        self.initial_parameters)[band["name"]]["kwargs_lens"], "kwargs_lens_light": []}
+                    for band in self.bands
+                }
+                self._warmup_pixelated_source(
+                    fixed, seed=seed, num_iterations=num_iterations_warmup,
+                )
         return self.initial_parameters
+
+    def _apply_inherited_lens_mass_kwargs(self, kwargs_lens: list[Mapping[str, Any]]) -> None:
+        """Restore only physical mass values, retaining all sites as free parameters."""
+        import jax.numpy as jnp
+        from ..models import _mass_e1_e2_to_q_phi, _mass_phi_m_rad_to_deg
+
+        initial = dict(self.initial_parameters)
+        band_specific = self.prob_model.band_specific_lens_mass_parameters
+        for index, definition in enumerate(self.prob_model.lens_mass_params_list):
+            if index >= len(kwargs_lens) or not isinstance(kwargs_lens[index], Mapping):
+                continue
+            values = kwargs_lens[index]
+            profile_type = self.prob_model.lens_mass_type_list[index]
+            for key, specification in definition.items():
+                if not isinstance(specification, (list, tuple)):
+                    continue
+                sites = (
+                    [f"{band['site_prefix']}/lens_{key}_{index}" for band in self.bands]
+                    if (index, key) in band_specific else [f"lens_{key}_{index}"]
+                )
+                if str(profile_type).upper() == "MPPL" and key == "phi_m" and key in values:
+                    value = _mass_phi_m_rad_to_deg(values[key], definition["m"], phi_specification=specification)
+                elif key in values:
+                    value = values[key]
+                elif key in {"q", "phi"} and {"e1", "e2"}.issubset(values):
+                    q, phi = _mass_e1_e2_to_q_phi(values["e1"], values["e2"], phi_specification=definition.get("phi"))
+                    value = q if key == "q" else phi
+                else:
+                    continue
+                for site in sites:
+                    if site in initial:
+                        initial[site] = jnp.asarray(value)
+        self.initial_parameters = initial
+
+    def _initialize_pixelated_source_from_parametric(
+        self, kwargs_by_band: Mapping[str, Any], *, seed: int, num_iterations: int,
+    ) -> None:
+        """Project each inherited analytic source onto its own pixel grid."""
+        from ..models import PowerSpectrum
+        if not isinstance(num_iterations, int) or num_iterations <= 0:
+            raise ValueError("num_iterations_warmup must be a positive integer for source matching.")
+        initial = dict(self.initial_parameters)
+        for band_index, band in enumerate(self.bands):
+            source_index = next((
+                index for index, kind in enumerate(
+                    band["type_list"].get("source_light_type_list", [])
+                ) if str(kind).upper() == "PIXELATED"
+            ), None)
+            if source_index is None:
+                continue
+            inherited = kwargs_by_band[band["name"]]
+            analytic = inherited.get("kwargs_source", [])
+            if not analytic or any("pixels" in values for values in analytic if isinstance(values, Mapping)):
+                continue
+            ny, nx = band["lens_image"].SourceModel.pixel_grid.num_pixel_axes
+            prior = band["param_list"]["source_light_params_list"][source_index].get("pixelated_prior", {})
+            print(f"[pixelated-init: source] {band['name']}: fitting Matérn parameters ({num_iterations} iterations)...")
+            fitted = PowerSpectrum.fit_power_spectrum_init_from_source_kwargs(
+                band["lens_image"], analytic, PowerSpectrum.K_grid((ny, nx)).k, prior,
+                seed=seed + 7919 + 101 * band_index, max_iterations=num_iterations,
+                kwargs_lens=inherited.get("kwargs_lens"),
+            )
+            prefix = f"{band['site_prefix']}/"
+            for key, value in fitted.items():
+                site = f"{prefix}{key}"
+                if site in initial:
+                    initial[site] = value
+        self.initial_parameters = initial
 
     def _initialize_pixelated_lens_light_from_parametric(
         self,
@@ -727,7 +880,11 @@ class MultiBandModel:
                 for key, specification in definition.items():
                     if not isinstance(specification, (list, tuple)):
                         continue
-                    site = f"{prefix}lens_{key}_{index}" if key in {"center_x", "center_y"} else f"lens_{key}_{index}"
+                    site = (
+                        f"{prefix}lens_{key}_{index}"
+                        if (index, key) in self.prob_model.band_specific_lens_mass_parameters
+                        else f"lens_{key}_{index}"
+                    )
                     if (
                         str(profile_type).upper() == "MPPL"
                         and key == "phi_m"
@@ -837,13 +994,52 @@ class MultiBandModel:
     def run(
         self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
         save_path: str | Path | None = None, residual_vis_max: float = 0.0,
+        init_lens_mass_path: str | Path | None = None,
+        pixelated_init_match: str = "image",
+        num_iterations_warmup: int = 0,
+        n_runs: int = 1,
     ) -> MultiBandFitResult:
         if sampler.name not in {"svi", "hmc"}:
             raise NotImplementedError("MultiBandModel currently supports SVI and HMC.")
+        if not isinstance(n_runs, int) or n_runs < 1:
+            raise ValueError("n_runs must be a positive integer.")
+        if n_runs > 1:
+            if sampler.name != "svi":
+                raise ValueError("n_runs > 1 is supported only for independent SVI runs.")
+            if save_path is None:
+                raise ValueError("Multi-run SVI requires save_path for run_i outputs.")
+            if init_params is not None:
+                raise ValueError("Do not pass init_params with n_runs > 1; each run receives its own seed.")
+            results = []
+            root = Path(save_path).expanduser()
+            for run_id in range(n_runs):
+                seed = int(sampler.random_seed) + run_id
+                self.initial_parameters = None
+                initial = self.initialize(
+                    seed=seed, run_id=run_id,
+                    init_lens_mass_path=init_lens_mass_path,
+                    pixelated_init_match=pixelated_init_match,
+                    num_iterations_warmup=num_iterations_warmup,
+                )
+                run_sampler = SamplerConfig("svi", random_seed=seed, options=dict(sampler.options))
+                result = self.run(
+                    run_sampler, init_params=initial, save_path=root / f"run_{run_id}",
+                    residual_vis_max=residual_vis_max,
+                )
+                result.output(residual_vis_max=residual_vis_max)
+                results.append(result)
+            return MultiBandResultsCombination(results)
         if residual_vis_max < 0:
             raise ValueError("residual_vis_max must be non-negative.")
         from ..samplers import run_hmc, run_svi
-        initial = dict(init_params or self.initial_parameters or self.initialize(seed=sampler.random_seed))
+        if init_params is not None and init_lens_mass_path is not None:
+            raise ValueError("Provide init_params or init_lens_mass_path, not both.")
+        initial = dict(init_params or self.initial_parameters or self.initialize(
+            seed=sampler.random_seed,
+            init_lens_mass_path=init_lens_mass_path,
+            pixelated_init_match=pixelated_init_match,
+            num_iterations_warmup=num_iterations_warmup,
+        ))
         samples = None
         if sampler.name == "svi":
             parameters, details = run_svi(self.prob_model, None, sampler.to_namespace(), initial)
@@ -1020,7 +1216,13 @@ class MultiBandModel:
                     outputs[name][label].append(np.asarray(image_stack))
                 data, noise, valid = band_likelihood[name]
                 total = np.asarray(values[0])
-                noise_batch = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(jnp.asarray(total))))
+                data_spec = self.observations[name]
+                rms_site = f"{band['site_prefix']}/background_rms"
+                if data_spec.samples_background_rms:
+                    rms = np.asarray(device_draws[rms_site]).reshape((-1, 1, 1))
+                    noise_batch = np.sqrt(rms ** 2 + np.maximum(total, 0) / data_spec.exposure_time)
+                else:
+                    noise_batch = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(jnp.asarray(total))))
                 residual = (total - data[None, ...]) / noise_batch
                 joint_chi2 += np.sum(np.square(residual[..., valid]), axis=1)
                 joint_normalization += np.sum(

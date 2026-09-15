@@ -821,6 +821,54 @@ lens_mass.set_independent("F150W", "center_x", [-0.05, 0.02, -0.2, 0.2])
 lens_mass.set_independent("F150W", "center_y", [0.03, 0.02, -0.2, 0.2])
 ```
 
+任何 mass 参数都可用同一方法设为某个波段独立；未声明的其它波段仍共享：
+
+```python
+lens_mass.set_independent("F150W", "gamma", [1.8, 2.4])
+```
+
+### 从已有质量模型开始 pixelated SVI
+
+`init_lens_mass_path` 只读取已有结果的 `kwargs_lens`，并不固定它们，
+因此新联合拟合仍会重新采样全部质量参数。它可接受 single-band 或
+multi-band result directory：
+
+```python
+result = model.run(
+    SamplerConfig.svi(max_iterations=10_000, random_seed=42),
+    save_path="F150W_F277W/pixelated_svi",
+    init_lens_mass_path="F277W/parametric_svi/run_0",
+    pixelated_init_match="image",
+    num_iterations_warmup=2_000,
+)
+```
+
+若初始化目录是联合 parametric SVI，pixelated source 还可用每个 band 的
+analytic source 进行 power-spectrum 初始化：
+
+```python
+initial = model.initialize(
+    init_params_path="multiband/parametric_svi/run_0",
+    pixelated_init_match="source",
+    num_iterations_warmup=2_000,
+)
+```
+
+多次独立的 joint SVI 可直接运行：
+
+```python
+results = model.run(
+    SamplerConfig.svi(random_seed=42),
+    save_path="multiband/svi_restarts",
+    n_runs=4,
+)
+results.output("multiband/svi_restarts")
+```
+
+每个 band 也可以在 `SingleBandData` 中给出自己的
+`background_rms_prior` 和 `exposure_time`；这会采样独立的
+`F150W/background_rms`、`F277W/background_rms` likelihood nuisance 参数。
+
 ## 12. 多次结果比较
 
 ```python
