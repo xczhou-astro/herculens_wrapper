@@ -653,7 +653,12 @@ def save_array_fits(path, values, *, extname=None):
 
 
 def load_array_file(path, hdu=0):
-    """Load a FITS array (optionally by HDU) or a legacy ``.npy`` array."""
+    """Load a numerical array using the native byte order required by JAX.
+
+    FITS image data are commonly stored big-endian (for example ``>f8``),
+    while JAX accepts only native-endian numerical arrays.  Normalising here
+    makes restored pixelated coefficients usable for both SVI and HMC.
+    """
     path = str(path)
     if path.lower().endswith(('.fits', '.fit', '.fts')):
         from astropy.io import fits
@@ -661,9 +666,15 @@ def load_array_file(path, hdu=0):
             selected = hdul[hdu]
             data = np.asarray(selected.data)
             if selected.header.get('ORIGTYPE') == 'bool':
-                data = data.astype(bool)
-            return data
-    return np.load(path)
+                return data.astype(bool)
+    else:
+        data = np.load(path)
+
+    # ``astype`` performs the byteswap when an on-disk FITS/NPY array has a
+    # non-native byte order.  It is a no-op view for native numerical arrays.
+    if data.dtype.byteorder not in {'=', '|'} and not data.dtype.isnative:
+        data = data.astype(data.dtype.newbyteorder('='), copy=False)
+    return data
 
 
 def append_array_fits(path, values, *, extension_name='SIGMA'):
