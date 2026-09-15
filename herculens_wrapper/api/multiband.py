@@ -262,7 +262,9 @@ class MultiBandFitResult:
     def metrics(self) -> dict[str, Any]:
         """Return joint and per-band Gaussian-residual fit metrics."""
         per_band, total_chi2, total_pixels, log_likelihood = {}, 0.0, 0, 0.0
-        for band, kwargs in zip(self._model.bands, self.kwargs_by_band().values()):
+        kwargs_by_band = self.kwargs_by_band()
+        for band in self._model.bands:
+            kwargs = kwargs_by_band[band["name"]]
             prediction = np.asarray(band["lens_image"].model(**kwargs))
             noise_map = self._noise_for_band(band, prediction)
             residual = (prediction - band["image_data"]) / noise_map
@@ -1263,6 +1265,11 @@ class MultiBandModel:
                     noise_batch = np.sqrt(
                         np.asarray(likelihood["lens_image"].Noise.C_D_model(jnp.asarray(total)))
                     )
+                # Fixed noise maps are two-dimensional.  Residual evaluation
+                # broadcasts them implicitly, but the normalization below is
+                # evaluated per posterior draw and therefore needs an explicit
+                # leading sample axis as well.
+                noise_batch = np.broadcast_to(noise_batch, total.shape)
                 residual = (total - data[None, ...]) / noise_batch
                 joint_chi2 += np.sum(np.square(residual[..., valid]), axis=1)
                 joint_normalization += np.sum(
