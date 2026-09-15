@@ -2005,7 +2005,11 @@ def get_init_params(
                 f"the SVI result at {init_dir!r} has no valid kwargs_lens."
             )
 
-        if isinstance(init_info, dict) and 'kwargs_lens' in init_info:
+        # A component-only fit (for example a lens-light-only SVI) may not
+        # have ``kwargs_lens`` at all.  ``kwargs2params`` already treats each
+        # missing physical component as empty, so do not use lens mass as a
+        # gate for restoring valid lens-light or source-light warm starts.
+        if isinstance(init_info, dict):
             loaded_params = kwargs2params(
                 param_list, init_info, type_list=type_list, fix_lens_light=fix_lens_light,
                 fix_lens_mass=fix_lens_mass, fix_source_light=fix_source_light,

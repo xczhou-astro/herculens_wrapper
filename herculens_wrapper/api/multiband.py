@@ -306,6 +306,26 @@ class MultiBandFitResult:
             })
         return metrics
 
+    def plot_mass_light_overlay(self, *, save_path: str | Path | None = None) -> Path:
+        """Save a multi-row mass--light alignment diagnostic for all bands."""
+        from ..visualizations import plot_multiband_mass_light_overlay
+
+        root = self.run_directory if save_path is None else Path(save_path).expanduser()
+        if root is None:
+            raise ValueError("save_path is required before this result has a run directory.")
+        root.mkdir(parents=True, exist_ok=True)
+        kwargs_by_band = self.kwargs_by_band()
+        rows = [
+            {
+                "name": band["name"],
+                "lens_image": band["lens_image"],
+                "kwargs_result": kwargs_by_band[band["name"]],
+                "image_data": band["image_data"],
+            }
+            for band in self._model.bands
+        ]
+        return Path(plot_multiband_mass_light_overlay(rows, str(root)))
+
     @logged_result_output
     def output(self, save_path: str | Path | None = None, *, residual_vis_max: float = 0.0,
                include_corner: bool = True) -> dict[str, Any]:
@@ -407,43 +427,10 @@ class MultiBandFitResult:
             with (root / "svi_guide_params.pkl").open("wb") as stream: pickle.dump(self.details["result"].params, stream)
         try: plot_multiband_composite(band_results, str(root), residual_vis_max=residual_vis_max)
         except Exception as error: skipped["multiband_composite"] = str(error)
-        if self.initial_parameters is not None:
-            try:
-                initial_by_band = self._model.prob_model.params2kwargs_by_band(
-                    self.initial_parameters,
-                )
-                initial_shared = self._shared_lens_kwargs(initial_by_band)
-                initial_json_by_band = {}
-                for band in self._model.bands:
-                    name = band["name"]
-                    initial_json_by_band[name] = kwargs_best_to_json_pixelated_npy(
-                        initial_by_band[name], str(root / name), band["type_list"],
-                        pixels_filename="kwargs_source_pixels_init.fits",
-                        pixels_wn_filename="kwargs_source_pixels_wn_init.fits",
-                        lens_light_pixels_prefix="kwargs_lens_light_pixels_init",
-                    )
-                with (root / "kwargs_init.json").open("w") as stream:
-                    json.dump(
-                        {"kwargs_lens": initial_shared, "kwargs_by_band": initial_json_by_band},
-                        stream, indent=2, default=json_serializer,
-                    )
-                initial_rows = []
-                for band in self._model.bands:
-                    name = band["name"]
-                    initial_rows.append({
-                        "name": name,
-                        "lens_image": band["lens_image"],
-                        "kwargs_result": initial_by_band[name],
-                        "image_data": band["image_data"],
-                        "noise_map": band["noise_map"],
-                        "pixel_scale": self._model.observations[name].pixel_scale,
-                    })
-                plot_multiband_composite(
-                    initial_rows, str(root), residual_vis_max=residual_vis_max,
-                    output_filename="initial_guess_model.png",
-                )
-            except Exception as error:
-                skipped["initial_guess"] = str(error)
+        try:
+            files["mass_light_overlay_multiband"] = self.plot_mass_light_overlay(save_path=root)
+        except Exception as error:
+            skipped["mass_light_overlay_multiband"] = str(error)
         if self.details.get("guide") is not None and self.details.get("result") is not None:
             try:
                 import jax
@@ -740,6 +727,76 @@ class MultiBandModel:
                     fixed, seed=seed, num_iterations=num_iterations_warmup,
                 )
         return self.initial_parameters
+
+    def save_initialization(
+        self,
+        save_path: str | Path,
+        *,
+        parameters: Mapping[str, Any] | None = None,
+        residual_vis_max: float = 0.0,
+    ) -> dict[str, Path]:
+        """Write the current initial state before inference begins.
+
+        Call this after :meth:`initialize` when initialization is managed
+        explicitly.  :meth:`run` calls it automatically whenever ``save_path``
+        is supplied, after all pixelated-source matching/warmup is complete.
+        """
+        from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy
+        from ..visualizations import plot_multiband_composite
+
+        initial = self.initial_parameters if parameters is None else parameters
+        if initial is None:
+            raise RuntimeError("Call initialize() before save_initialization().")
+        root = Path(save_path).expanduser()
+        root.mkdir(parents=True, exist_ok=True)
+        kwargs_by_band = self.prob_model.params2kwargs_by_band(initial)
+        reference_band = self.observations.band_names[0]
+        shared_lens = deepcopy(kwargs_by_band[reference_band]["kwargs_lens"])
+        mass_profiles = self.profiles.shared.lens_mass
+        if not isinstance(mass_profiles, (list, tuple)) and not hasattr(mass_profiles, "profiles"):
+            mass_profiles = [mass_profiles]
+        for index, profile in enumerate(mass_profiles):
+            for key in ("center_x", "center_y"):
+                shared_lens[index].pop(key, None)
+            for keys in profile.independent_parameters.values():
+                for key in keys:
+                    shared_lens[index].pop(key, None)
+        kwargs_json_by_band, rows = {}, []
+        for band in self.bands:
+            name, directory = band["name"], root / band["name"]
+            directory.mkdir(parents=True, exist_ok=True)
+            kwargs = kwargs_by_band[name]
+            kwargs_json_by_band[name] = kwargs_best_to_json_pixelated_npy(
+                kwargs, str(directory), band["type_list"],
+                pixels_filename="kwargs_source_pixels_init.fits",
+                pixels_wn_filename="kwargs_source_pixels_wn_init.fits",
+                lens_light_pixels_prefix="kwargs_lens_light_pixels_init",
+            )
+            model_image = np.asarray(band["lens_image"].model(**kwargs))
+            observation = self.observations[name]
+            rms_site = f"{band['site_prefix']}/background_rms"
+            background_rms = initial.get(rms_site) if observation.samples_background_rms else None
+            rows.append({
+                "name": name,
+                "lens_image": band["lens_image"],
+                "kwargs_result": kwargs,
+                "image_data": band["image_data"],
+                "noise_map": observation.noise_from_model(model_image, background_rms=background_rms),
+                "pixel_scale": observation.pixel_scale,
+            })
+        kwargs_path = root / "kwargs_init.json"
+        with kwargs_path.open("w") as stream:
+            json.dump(
+                {"kwargs_lens": shared_lens, "kwargs_by_band": kwargs_json_by_band},
+                stream, indent=2, default=json_serializer,
+            )
+        figure_path = root / "initial_guess_model.png"
+        plot_multiband_composite(
+            rows, str(root), residual_vis_max=residual_vis_max,
+            output_filename=figure_path.name,
+        )
+        print(f"[api] Saved initialization products to: {root}")
+        return {"kwargs_init": kwargs_path, "initial_guess_model": figure_path}
 
     def _apply_inherited_lens_mass_kwargs(self, kwargs_lens: list[Mapping[str, Any]]) -> None:
         """Restore only physical mass values, retaining all sites as free parameters."""
@@ -1069,6 +1126,16 @@ class MultiBandModel:
                 pixelated_init_match=pixelated_init_match,
                 num_iterations_warmup=num_iterations_warmup,
             ))
+        if save_path is not None:
+            try:
+                self.save_initialization(
+                    save_path, parameters=initial,
+                    residual_vis_max=residual_vis_max,
+                )
+            except Exception as error:
+                # Initial products are diagnostics; failure to draw them must
+                # not discard a valid initialization or prevent inference.
+                print(f"[api] Warning: could not save initialization products: {error}")
         samples = None
         if sampler.name == "svi":
             parameters, details = run_svi(self.prob_model, None, sampler.to_namespace(), initial)

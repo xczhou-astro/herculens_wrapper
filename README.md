@@ -315,6 +315,50 @@ mass.initialize_from(
 mass.clear_initialization()
 ```
 
+### 从多个已有结果 warm-start，但继续采样
+
+`warm_start_from()` 只提供数值初值；它**不会**修改当前 profile 的
+prior，也不会固定参数。文件可为 `kwargs_result.json`，或包含它的 run
+directory。实际读取在 `model.initialize()`（以及未传 `init_params` 的
+`model.run()`）时发生。
+
+这适合把独立的 lens-light 拟合与 ring/arc 拟合拼成最终联合模型：
+
+```python
+from herculens_wrapper.api import (
+    LensProfileCollection, ProfileCollection,
+    LightProfile, MassProfile, PixelatedLensLight, PixelatedSource,
+)
+
+# 两个 lens-light 成分共享一个保存结果；顺序必须与原拟合一致。
+lens_light = ProfileCollection([
+    LightProfile("SERSIC_ELLIPSE", prior=bulge_prior),
+    PixelatedLensLight(scale_factor=lens_scale, matern_prior=disk_prior),
+]).warm_start_from(
+    "lens_light_pixelated_svi/run_0", component="lens_light",
+)
+
+# 可分别来自另一轮 ring/arc 的结果。
+lens_mass = MassProfile("SIE", prior=mass_prior).warm_start_from(
+    "ring_pixelated_hmc", component="lens_mass",
+)
+source_light = PixelatedSource(
+    pixel_grid=source_grid, pixelated_prior=source_prior,
+).warm_start_from("ring_pixelated_hmc", component="source_light")
+
+profiles = LensProfileCollection(
+    lens_mass=lens_mass,
+    lens_light=lens_light,
+    source_light=source_light,
+)
+```
+
+`ProfileCollection(...).warm_start_from(...)` 是多成分（例如 parametric +
+pixelated lens light）的推荐写法。单一成分可直接调用
+`profile.warm_start_from(...)`。所有当前 profile 的顺序和 pixel grid 必须与
+各自保存结果一致；否则 `initialize()` 会给出具体 latent-site shape 错误。
+使用 `clear_warm_start()` 可撤销声明。
+
 ### 固定 profile 或部分参数
 
 ```python

@@ -65,7 +65,7 @@ class Profile:
 
     _internal_names = frozenset({
         "profile_type", "_specifications", "_parameters", "_independent_by_band",
-        "_initialization",
+        "_initialization", "_warm_start",
     })
 
     def __init__(self, profile_type: str, *, prior: Mapping[str, Any] | None = None,
@@ -77,6 +77,10 @@ class Profile:
         # This is only a declaration.  File I/O and numerical initialization
         # remain the responsibility of SingleBandModel.initialize().
         object.__setattr__(self, "_initialization", None)
+        # Unlike ``_initialization``, a warm start never changes a prior into
+        # a fixed value.  It is resolved after the enclosing model has built
+        # the current NumPyro sample-site layout.
+        object.__setattr__(self, "_warm_start", None)
         for name, item in dict(prior or {}).items(): self.parameter(name).prior = item
         for name, item in {**dict(value or {}), **initial_values}.items(): self.parameter(name).value = item
 
@@ -153,6 +157,23 @@ class Profile:
         self._initialization = None
         return self
 
+    def warm_start_from(self, path: str | Path, *, component: str) -> "Profile":
+        """Use a saved result as a numerical start while keeping this profile free.
+
+        ``path`` may name ``kwargs_result.json`` or a run directory containing
+        it.  The file is read by :meth:`SingleBandModel.initialize`, not here:
+        this keeps profile construction lightweight and allows the current
+        model's priors, links, and pixel grids to remain authoritative.
+        """
+        component = _validate_component_name(component, method="warm_start_from")
+        self._warm_start = {"path": str(Path(path).expanduser()), "component": component}
+        return self
+
+    def clear_warm_start(self) -> "Profile":
+        """Remove a previously declared non-fixed numerical warm start."""
+        self._warm_start = None
+        return self
+
     def set_independent(
         self, band: str | Mapping[str, Mapping[str, Any]], parameter: str | None = None,
         prior: Any = None,
@@ -222,6 +243,7 @@ class ProfileCollection(Sequence[Profile]):
 
     def __init__(self, profiles: Sequence[Profile]) -> None:
         self.profiles = list(profiles)
+        self._warm_start: dict[str, str] | None = None
 
     def __getitem__(self, index: int) -> Profile:
         return self.profiles[index]
@@ -251,6 +273,30 @@ class ProfileCollection(Sequence[Profile]):
             raise IndexError(f"profile_index={profile_index!r} is invalid.")
         self[profile_index].set_independent(band, parameter, prior)
         return self
+
+    def warm_start_from(self, path: str | Path, *, component: str) -> "ProfileCollection":
+        """Declare one non-fixed warm start for this ordered profile group.
+
+        Use this for mixed groups such as a parametric lens-light bulge plus a
+        pixelated lens-light disk.  Their order must match the corresponding
+        saved component order.
+        """
+        component = _validate_component_name(component, method="warm_start_from")
+        self._warm_start = {"path": str(Path(path).expanduser()), "component": component}
+        return self
+
+    def clear_warm_start(self) -> "ProfileCollection":
+        """Remove this collection's non-fixed numerical warm start."""
+        self._warm_start = None
+        return self
+
+
+def _validate_component_name(component: str, *, method: str) -> str:
+    component = str(component)
+    allowed = {"lens_mass", "lens_light", "source_light", "point_source"}
+    if component not in allowed:
+        raise ValueError(f"component must be one of {sorted(allowed)}, got {component!r}.")
+    return component
 
 
 class MassProfile(Profile):

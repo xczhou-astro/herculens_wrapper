@@ -516,6 +516,80 @@ class SingleBandModel:
                 "initialize_from(.../kwargs_result.json) file."
             )
         return Path(next(iter(paths))).expanduser() if paths else None
+
+    @staticmethod
+    def _warm_start_site_matches_component(site: str, component: str) -> bool:
+        """Whether one NumPyro latent site belongs to a physical component."""
+        if component == "lens_mass":
+            return site.startswith("lens_") and not site.startswith("lens_light_")
+        if component == "lens_light":
+            return site.startswith("lens_light_") or site.startswith((
+                "pixels_wn_lens_light_grid_", "n_lens_light_grid_",
+                "rho_lens_light_grid_", "sigma_lens_light_grid_",
+            ))
+        if component == "source_light":
+            return site.startswith("source_") or site.startswith((
+                "pixels_wn_source_grid", "n_source_grid", "rho_source_grid",
+                "sigma_source_grid", "source_scales", "source_coarse",
+            ))
+        if component == "point_source":
+            return site.startswith("ps_")
+        raise ValueError(f"Unknown warm-start component {component!r}.")
+
+    def _apply_declared_warm_starts(
+        self, initial: dict[str, Any], *, seed: int,
+    ) -> dict[str, Any]:
+        """Overlay declared component starts without changing any prior.
+
+        Each saved result is converted by the existing backend conversion
+        path, then only sample sites owned by the declared physical component
+        are copied.  This permits e.g. lens light from one fit and mass/source
+        from another fit to be assembled into a new joint model.
+        """
+        declarations = self.profiles.warm_start_declarations()
+        if not declarations:
+            return initial
+
+        _, _, get_init_params, _ = _model_backend()
+        type_list, param_list = self.definition.as_dicts()
+        from ..utils import resolve_init_run_dir
+        import jax.numpy as jnp
+
+        for component, declaration in declarations.items():
+            requested_path = Path(declaration["path"]).expanduser()
+            resolved_path = Path(resolve_init_run_dir(requested_path)).expanduser()
+            candidate = get_init_params(
+                self.prob_model, param_list, type_list,
+                init_params_path=resolved_path, random_seed=seed,
+                lens_image=self.lens_image,
+            )
+            copied = []
+            for site, value in candidate.items():
+                if site not in initial or not self._warm_start_site_matches_component(site, component):
+                    continue
+                restored = jnp.asarray(value)
+                reference = jnp.asarray(initial[site])
+                if restored.shape != reference.shape:
+                    if restored.size != reference.size:
+                        raise ValueError(
+                            f"Warm start for {component!r} from {resolved_path} has incompatible "
+                            f"shape at {site!r}: saved {tuple(restored.shape)}, current "
+                            f"{tuple(reference.shape)}.  The profile order and pixel grid must match."
+                        )
+                    restored = jnp.reshape(restored, reference.shape)
+                initial[site] = restored
+                copied.append(site)
+            if not copied:
+                raise ValueError(
+                    f"Warm start for {component!r} from {resolved_path} did not match any "
+                    "free sample sites in the current model."
+                )
+            print(
+                f"[warm-start] Restored {component} initial values from {resolved_path} "
+                f"({len(copied)} latent site{'s' if len(copied) != 1 else ''}); parameters remain free."
+            )
+        return initial
+
     def initialize(
         self,
         *,
@@ -702,6 +776,7 @@ class SingleBandModel:
                         if name in initial:
                             initial[name] = value
                 print("[pixelated-init: lens-light] Lens-light-matched initialization complete.")
+        initial = self._apply_declared_warm_starts(initial, seed=seed)
         self.definition.update_values(initial); self.initial_parameters = initial
         return initial
 
@@ -873,8 +948,9 @@ class SingleBandModel:
             output.mkdir(parents=True, exist_ok=True)
             resuming = self._validate_hmc_run_directory(output, sampler)
             if self.initialization_path is None and not resuming:
-                raise ValueError(
-                    "HMC requires model.initialize(init_params_path=...) before model.run()."
+                print(
+                    "[hmc:init] No compatible joint SVI guide was supplied; "
+                    "starting chains from the declared numerical warm start."
                 )
             args.save_path = str(output)
             samples, params, details = run_hmc(

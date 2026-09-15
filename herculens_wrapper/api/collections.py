@@ -98,6 +98,9 @@ class LensProfileCollection:
                         key: value for key, value in profile._initialization.items()
                         if key != "applied"
                     }
+                declaration = profile._warm_start or profiles._warm_start
+                if declaration is not None:
+                    entry["warm_start_from"] = deepcopy(declaration)
                 result[component].append(entry)
         return result
 
@@ -198,6 +201,50 @@ class LensProfileCollection:
                 changed = True
         return changed
 
+    def warm_start_declarations(self) -> dict[str, dict[str, str]]:
+        """Return validated non-fixed warm-start declarations by component.
+
+        A declaration belongs to a whole physical component because a saved
+        result stores each component as an ordered list.  A one-profile
+        component may conveniently declare it on the profile itself; mixed
+        collections should declare it on :class:`ProfileCollection`.
+        """
+        declarations: dict[str, dict[str, str]] = {}
+        for actual_component in self._components:
+            profiles = getattr(self, actual_component)
+            if profiles is None:
+                continue
+            group_declaration = profiles._warm_start
+            member_declarations = [profile._warm_start for profile in profiles if profile._warm_start is not None]
+            if group_declaration is not None and member_declarations:
+                raise ValueError(
+                    f"{actual_component} declares warm_start_from() both on its ProfileCollection "
+                    "and on an individual profile; declare it in one place only."
+                )
+            if group_declaration is not None:
+                declaration = group_declaration
+            elif not member_declarations:
+                continue
+            elif len(profiles) == 1:
+                declaration = member_declarations[0]
+            elif len(member_declarations) == len(profiles) and all(
+                item == member_declarations[0] for item in member_declarations[1:]
+            ):
+                declaration = member_declarations[0]
+            else:
+                raise ValueError(
+                    f"{actual_component} has multiple profile-level warm starts. "
+                    "Declare one warm_start_from() on its ProfileCollection instead."
+                )
+            declared_component = declaration["component"]
+            if declared_component != actual_component:
+                raise ValueError(
+                    f"{actual_component} declares warm_start_from(..., component={declared_component!r}); "
+                    f"use component={actual_component!r}."
+                )
+            declarations[actual_component] = deepcopy(declaration)
+        return declarations
+
     def freeze(self) -> "LensProfileCollection":
         return LensProfileCollection(**{
             component: ProfileCollection([profile.freeze() for profile in profiles])
@@ -287,6 +334,7 @@ class LensProfileCollection:
                 }
                 clone = profile_class(profile.profile_type, prior=prior, value=value)
                 clone._initialization = deepcopy(profile._initialization)
+                clone._warm_start = deepcopy(profile._warm_start)
                 clones[(component, index)] = clone
                 for name, parameter in profile._parameters.items():
                     parameter_map[id(parameter)] = clone.parameter(name)
@@ -308,13 +356,17 @@ class LensProfileCollection:
                         if link is not None:
                             clone.parameter(name).link_to(parameter_map[id(link)])
 
-        return LensProfileCollection(**{
-            component: ProfileCollection([
+        copied_components = {}
+        for component in self._components:
+            profiles = getattr(self, component)
+            if profiles is None:
+                continue
+            collection = ProfileCollection([
                 clones[(component, index)] for index in range(len(profiles))
             ])
-            for component in self._components
-            if (profiles := getattr(self, component)) is not None
-        })
+            collection._warm_start = deepcopy(profiles._warm_start)
+            copied_components[component] = collection
+        return LensProfileCollection(**copied_components)
 
     def __repr__(self) -> str:
         return f"LensProfileCollection(\n{pformat(self.configuration, sort_dicts=False)}\n)"

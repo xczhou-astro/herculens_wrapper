@@ -795,7 +795,7 @@ def _build_hmc_chain_init_params(
     num_chains,
     init_params_path,
 ):
-    """Initialize chains from valid draws within the SVI guide's 1-sigma region."""
+    """Initialize chains from a compatible SVI guide, or the supplied start."""
     init_params_unconst = {
         key: jnp.asarray(value, dtype=jnp.float64)
         for key, value in to_unconstrained(prob_model, init_params).items()
@@ -1502,12 +1502,6 @@ def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches
 
 
 def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
-    resume_checkpoint_path = os.path.join(getattr(args, 'save_path', '.'), 'hmc_checkpoint.pkl')
-    if init_params_path is None and not os.path.isfile(resume_checkpoint_path):
-        raise ValueError(
-            "HMC sampler requires a prior SVI run path (init_params_path) when starting a new chain."
-        )
-        
     def _concatenate_batches(all_samples, num_chains):
         samples = {}
         for k in all_samples[0].keys():

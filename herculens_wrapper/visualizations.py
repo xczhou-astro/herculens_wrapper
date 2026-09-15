@@ -2406,6 +2406,91 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
     return output
 
 
+def plot_multiband_mass_light_overlay(
+    band_results, save_path, *, output_filename='mass_light_overlay_multiband.png',
+):
+    """Plot one mass--light alignment row per band in a joint fit.
+
+    Each row uses that band's exact modelling grid for both the convergence
+    map and observed image.  This is essential when filters have different
+    crops or pixel scales; the shared mass parameters need not imply matching
+    array shapes.
+    """
+    if not band_results:
+        raise ValueError("band_results must contain at least one band.")
+    figure, axes = plt.subplots(
+        len(band_results), 2, figsize=(13, 6 * len(band_results)),
+        squeeze=False, constrained_layout=True,
+    )
+    for row, band in enumerate(band_results):
+        name = str(band.get('name', f'band {row}'))
+        lens_image = band['lens_image']
+        kwargs_result = band['kwargs_result']
+        image = np.asarray(band['image_data'], dtype=float)
+        if image.ndim != 2:
+            raise ValueError(f"{name}: image_data must be two-dimensional.")
+        kwargs_lens = kwargs_result.get('kwargs_lens', [])
+        if not kwargs_lens:
+            raise ValueError(f"{name}: kwargs_result must contain kwargs_lens.")
+        x_map, y_map, kappa, inverse_magnification = _mass_grid_maps(
+            lens_image, kwargs_lens, image.shape,
+        )
+        extent = _grid_extent(x_map, y_map)
+        finite_image = image[np.isfinite(image)]
+        if finite_image.size == 0:
+            raise ValueError(f"{name}: image_data contains no finite pixels.")
+        image_median = float(np.median(finite_image))
+        image_scale = max(
+            float(np.percentile(np.abs(finite_image - image_median), 68.0)),
+            np.finfo(float).eps,
+        )
+        displayed_image = np.arcsinh((image - image_median) / image_scale)
+        iso_levels = np.unique(np.percentile(finite_image, [70.0, 85.0, 94.0, 98.0]))
+        kappa_levels = [
+            value for value in (0.2, 0.5, 1.0, 2.0)
+            if np.nanmin(kappa) < value < np.nanmax(kappa)
+        ]
+        norm_kappa, _ = _convergence_map_norm(kappa)
+        cmap_kappa = 'magma' if np.nanmin(kappa) >= 0 else 'coolwarm'
+        image_axis, mass_axis = axes[row]
+        image_axis.imshow(displayed_image, origin='lower', extent=extent, cmap='gray')
+        image_axis.set_title(f'{name}: observed image with mass convergence contours')
+        if kappa_levels:
+            image_axis.contour(x_map, y_map, kappa, levels=kappa_levels,
+                               colors='cyan', linewidths=1.2)
+        mass_image = mass_axis.imshow(kappa, origin='lower', extent=extent,
+                                      cmap=cmap_kappa, norm=norm_kappa)
+        mass_axis.set_title(rf'{name}: total convergence $\kappa$ with image isophotes')
+        if iso_levels.size > 1:
+            mass_axis.contour(x_map, y_map, image, levels=iso_levels,
+                              colors='white', linewidths=1.0)
+        figure.colorbar(mass_image, ax=mass_axis, label=r'Convergence $\kappa$')
+        if np.nanmin(inverse_magnification) < 0 < np.nanmax(inverse_magnification):
+            for axis in (image_axis, mass_axis):
+                axis.contour(x_map, y_map, inverse_magnification, levels=[0.0],
+                             colors='orange', linewidths=1.25)
+        primary_mass = kwargs_lens[0]
+        center_x = float(primary_mass.get('center_x', 0.0))
+        center_y = float(primary_mass.get('center_y', 0.0))
+        for axis in (image_axis, mass_axis):
+            axis.plot(center_x, center_y, marker='+', color='lime', markersize=10,
+                      markeredgewidth=1.8)
+            axis.set(xlabel='arcsec', ylabel='arcsec', aspect='equal')
+        if row == 0:
+            image_axis.legend(handles=[
+                Line2D([], [], color='cyan', label=r'Mass $\kappa$ contours'),
+                Line2D([], [], color='white', label='Image isophotes'),
+                Line2D([], [], color='orange', label='Critical curve'),
+                Line2D([], [], color='lime', marker='+', linestyle='None',
+                       label='Primary mass centre'),
+            ], loc='upper right', fontsize=8, framealpha=0.8)
+    figure.suptitle('Multi-band mass--light alignment diagnostic', fontsize=14)
+    output = os.path.join(save_path, output_filename)
+    figure.savefig(output, dpi=300, bbox_inches='tight')
+    plt.close(figure)
+    return output
+
+
 def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path, lens_mass_summary=None):
     """Plot total mass plus an exact EPL-elliptical-multipole decomposition.
 
