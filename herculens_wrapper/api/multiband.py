@@ -1226,7 +1226,17 @@ class MultiBandModel:
             valid = np.isfinite(data) & np.isfinite(noise) & (noise > 0)
             if band["fit_mask_bool"] is not None:
                 valid &= np.asarray(band["fit_mask_bool"], dtype=bool)
-            band_likelihood[name] = (data, noise, valid)
+            # Keep every band-specific object together.  The posterior loop
+            # below runs after this construction loop, so referring to the
+            # outer ``band`` variable there would otherwise reuse the final
+            # band's image/noise model for every evaluator.
+            band_likelihood[name] = {
+                "data": data,
+                "valid": valid,
+                "observation": self.observations[name],
+                "lens_image": lens_image,
+                "site_prefix": band["site_prefix"],
+            }
 
         best_loglike, best_chi2, best_index = -np.inf, None, None
         for start in range(0, n_samples, batch_size):
@@ -1241,15 +1251,18 @@ class MultiBandModel:
                 values = evaluator(device_draws)
                 for label, image_stack in zip(outputs[name], values):
                     outputs[name][label].append(np.asarray(image_stack))
-                data, noise, valid = band_likelihood[name]
+                likelihood = band_likelihood[name]
+                data, valid = likelihood["data"], likelihood["valid"]
                 total = np.asarray(values[0])
-                data_spec = self.observations[name]
-                rms_site = f"{band['site_prefix']}/background_rms"
+                data_spec = likelihood["observation"]
+                rms_site = f"{likelihood['site_prefix']}/background_rms"
                 if data_spec.samples_background_rms:
                     rms = np.asarray(device_draws[rms_site]).reshape((-1, 1, 1))
                     noise_batch = np.sqrt(rms ** 2 + np.maximum(total, 0) / data_spec.exposure_time)
                 else:
-                    noise_batch = np.sqrt(np.asarray(band["lens_image"].Noise.C_D_model(jnp.asarray(total))))
+                    noise_batch = np.sqrt(
+                        np.asarray(likelihood["lens_image"].Noise.C_D_model(jnp.asarray(total)))
+                    )
                 residual = (total - data[None, ...]) / noise_batch
                 joint_chi2 += np.sum(np.square(residual[..., valid]), axis=1)
                 joint_normalization += np.sum(
