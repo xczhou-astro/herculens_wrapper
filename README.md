@@ -2,6 +2,23 @@
 
 本文只介绍公开 API 的方法和用法。所有公开对象均从 `herculens_wrapper.api` 导入。
 
+## 交互式点源 ray-tracing viewer
+
+仓库包含一个独立的本地界面，用于从已有质量模型检查点源及其扩展
+Gaussian 源的像。启动后选择观测图像和包含 `kwargs_result.json` 的拟合目录：
+
+```bash
+python point_source_gui/start_gui.py
+```
+
+页面会优先从结果目录附近的 `model_configuration.json` 或 `config.json`
+读取 `lens_mass_type_list`。如果该配置文件不在目录中，在 **Mass types**
+字段按拟合时相同的顺序填入类型，例如 `EPL, SHEAR`。设置拟合使用的
+pixel scale 后，点击左侧 image-plane 图中的点：页面会显示该点的
+source-plane 坐标和 caustic，并给出以该位置为中心、可调 `sigma` 的 Gaussian
+在 image plane 中形成的 1σ、2σ、3σ 等值线。图像必须与拟合时使用的
+中心、裁切和 pixel scale 相同。
+
 ## 1. 基本流程
 
 ```python
