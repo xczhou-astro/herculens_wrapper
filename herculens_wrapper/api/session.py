@@ -463,11 +463,24 @@ class SingleBandModel:
         """Create the backend model from the declared profiles and numerics."""
         create_lens_image, create_prob_model, _, validate_param_list = _model_backend()
         type_list, param_list = self.definition.as_dicts(); validate_param_list(type_list, param_list)
+        numerics = dict(self.numerics)
+        point_source_solver = numerics.pop("point_source_solver", None)
+        if "SOURCE_POSITION" in type_list.get("point_source_type_list", []):
+            # Herculens needs these values both to solve the lens equation and
+            # to remove duplicate image solutions.  Passing None lets its
+            # solver choose defaults initially, but later dereferences
+            # kwargs_solver['nsolutions']; provide a complete API default.
+            point_source_solver = {
+                "nsolutions": 5, "niter": 10,
+                "scale_factor": 2.0, "nsubdivisions": 3,
+                **dict(point_source_solver or {}),
+            }
         self.lens_image = create_lens_image(
             param_list, type_list, self.data.likelihood_image,
             self.data.likelihood_noise, self.data.psf, self.data.pixel_scale,
             psf_supersampling_factor=self.data.psf_supersampling_factor,
-            kwargs_numerics=self.numerics, source_arc_mask=self.data.source_arc_mask,
+            kwargs_numerics=numerics, kwargs_lens_equation_solver=point_source_solver,
+            source_arc_mask=self.data.source_arc_mask,
             source_grid_scale=self.source_grid_scale,
             exposure_time=self.data.exposure_time,
             background_rms=self.data.background_rms,

@@ -596,11 +596,20 @@ class MultiBandModel:
         for index, (name, data) in enumerate(self.observations.items()):
             types, params = definitions[name]; validate_param_list(types, params)
             if shared_types is None: shared_types, shared_params = types["lens_mass_type_list"], params["lens_mass_params_list"]
+            numerics = dict(self.numerics)
+            point_source_solver = numerics.pop("point_source_solver", None)
+            if "SOURCE_POSITION" in types.get("point_source_type_list", []):
+                point_source_solver = {
+                    "nsolutions": 5, "niter": 10,
+                    "scale_factor": 2.0, "nsubdivisions": 3,
+                    **dict(point_source_solver or {}),
+                }
             lens_image = create_lens_image(
                 params, types, data.likelihood_image, data.likelihood_noise,
                 data.psf, data.pixel_scale,
                 psf_supersampling_factor=data.psf_supersampling_factor,
-                kwargs_numerics=self.numerics, source_arc_mask=data.source_arc_mask,
+                kwargs_numerics=numerics, kwargs_lens_equation_solver=point_source_solver,
+                source_arc_mask=data.source_arc_mask,
                 source_grid_scale=self.source_grid_scale,
                 exposure_time=data.exposure_time, background_rms=data.background_rms,
             )
