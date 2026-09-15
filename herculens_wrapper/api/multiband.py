@@ -1003,6 +1003,7 @@ class MultiBandModel:
     def run(
         self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
         save_path: str | Path | None = None, residual_vis_max: float = 0.0,
+        init_params_path: str | Path | None = None,
         init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
@@ -1019,6 +1020,8 @@ class MultiBandModel:
                 raise ValueError("Multi-run SVI requires save_path for run_i outputs.")
             if init_params is not None:
                 raise ValueError("Do not pass init_params with n_runs > 1; each run receives its own seed.")
+            if init_params_path is not None and init_lens_mass_path is not None:
+                raise ValueError("Provide only one of init_params_path and init_lens_mass_path.")
             results = []
             root = Path(save_path).expanduser()
             for run_id in range(n_runs):
@@ -1026,6 +1029,7 @@ class MultiBandModel:
                 self.initial_parameters = None
                 initial = self.initialize(
                     seed=seed, run_id=run_id,
+                    init_params_path=init_params_path,
                     init_lens_mass_path=init_lens_mass_path,
                     pixelated_init_match=pixelated_init_match,
                     num_iterations_warmup=num_iterations_warmup,
@@ -1041,14 +1045,28 @@ class MultiBandModel:
         if residual_vis_max < 0:
             raise ValueError("residual_vis_max must be non-negative.")
         from ..samplers import run_hmc, run_svi
-        if init_params is not None and init_lens_mass_path is not None:
-            raise ValueError("Provide init_params or init_lens_mass_path, not both.")
-        initial = dict(init_params or self.initial_parameters or self.initialize(
-            seed=sampler.random_seed,
-            init_lens_mass_path=init_lens_mass_path,
-            pixelated_init_match=pixelated_init_match,
-            num_iterations_warmup=num_iterations_warmup,
-        ))
+        if init_params is not None and (init_params_path is not None or init_lens_mass_path is not None):
+            raise ValueError("Provide init_params or an initialization path, not both.")
+        if init_params_path is not None and init_lens_mass_path is not None:
+            raise ValueError("Provide only one of init_params_path and init_lens_mass_path.")
+        if init_params is not None:
+            initial = dict(init_params)
+        elif init_params_path is not None or init_lens_mass_path is not None:
+            initial = dict(self.initialize(
+                seed=sampler.random_seed,
+                init_params_path=init_params_path,
+                init_lens_mass_path=init_lens_mass_path,
+                pixelated_init_match=pixelated_init_match,
+                num_iterations_warmup=num_iterations_warmup,
+            ))
+        elif self.initial_parameters is not None:
+            initial = dict(self.initial_parameters)
+        else:
+            initial = dict(self.initialize(
+                seed=sampler.random_seed,
+                pixelated_init_match=pixelated_init_match,
+                num_iterations_warmup=num_iterations_warmup,
+            ))
         samples = None
         if sampler.name == "svi":
             parameters, details = run_svi(self.prob_model, None, sampler.to_namespace(), initial)
