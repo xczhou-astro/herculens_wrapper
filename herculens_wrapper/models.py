@@ -1850,6 +1850,7 @@ def get_init_params(
     sample_wavelets=False,
     regul_model=None,
     require_pixelated_svi=False,
+    restore_components=None,
 ):
     """
     Return constrained NumPyro site parameters (physical values).
@@ -1860,6 +1861,11 @@ def get_init_params(
     When ``require_pixelated_svi`` is true, initialization must come from a
     recorded SVI run with a pixelated source, and every active Matérn source
     latent must be restored with its exact expected shape.
+
+    ``restore_components`` optionally limits a warm start to selected physical
+    components.  For example ``('lens_mass',)`` imports only ``kwargs_lens``
+    from a different band while leaving light and source sites at their new
+    model's seeded initial values.
     """
     key_init = jax.random.PRNGKey(random_seed)
     init_params = prob_model.get_sample(key_init)
@@ -1911,6 +1917,28 @@ def get_init_params(
                 )
 
         init_info = load_kwargs_init_json(resolved_init_path)
+        if restore_components is not None:
+            component_keys = {
+                'lens_mass': 'kwargs_lens',
+                'lens_light': 'kwargs_lens_light',
+                'source_light': 'kwargs_source',
+                'point_source': 'kwargs_point_source',
+            }
+            requested = tuple(restore_components)
+            unknown = sorted(set(requested) - set(component_keys))
+            if unknown:
+                raise ValueError(
+                    f"Unknown restore_components entries {unknown}; choose from "
+                    f"{sorted(component_keys)}."
+                )
+            init_info = {
+                component_keys[name]: init_info[component_keys[name]]
+                for name in requested if component_keys[name] in init_info
+            }
+            if 'lens_mass' in requested and 'kwargs_lens' not in init_info:
+                raise ValueError(
+                    f"Mass-only warm start at {init_dir!r} has no kwargs_lens."
+                )
         print(f"[Init] Loading kwargs from prior run: {init_dir}")
         try:
             ks = init_info.get('kwargs_source', [])
@@ -2000,7 +2028,18 @@ def get_init_params(
                             f"the SVI run at {init_dir!r} has no saved pixelated "
                             "source image."
                         )
-                    print("[Init] Prior run was parametric. Source light parameters (pixels_wn, n, rho, sigma) will be randomly sampled from their prior distributions.")
+                    if restore_components is not None:
+                        print(
+                            "[Init] Source light was intentionally excluded from this "
+                            "component-limited warm start; pixelated source sites "
+                            "remain newly seeded."
+                        )
+                    else:
+                        print(
+                            "[Init] Prior run was parametric. Source light parameters "
+                            "(pixels_wn, n, rho, sigma) will be randomly sampled from "
+                            "their prior distributions."
+                        )
 
             if require_pixelated_svi:
                 candidate_matern_sites = (

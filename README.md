@@ -547,6 +547,24 @@ initial = model.initialize(
     pixelated_init_match="image",
     num_iterations_warmup=2000,
 )
+
+# 跨波段：仅以 F277W 的 mass 结果 warm-start F150W。
+# mass 仍是 F150W SVI 的自由参数；不会继承 F277W source/light。
+initial = model.initialize(
+    seed=42,
+    init_lens_mass_path="F277W/pixelated_svi/run_0",
+    pixelated_init_match="image",
+    num_iterations_warmup=2000,
+)
+
+# 同一件事也可直接交给 run（包括 n_runs>1 的独立 SVI restarts）。
+result = model.run(
+    SamplerConfig.svi(max_iterations=5000),
+    save_path="F150W/pixelated_svi",
+    init_lens_mass_path="F277W/pixelated_svi/run_0",
+    pixelated_init_match="image",
+    num_iterations_warmup=2000,
+)
 ```
 
 ### 初始模型图

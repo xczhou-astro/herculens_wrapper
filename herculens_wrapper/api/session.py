@@ -55,6 +55,7 @@ def _svi_many_worker_impl(spec, run_id, device):
     sampler = SamplerConfig("svi", random_seed=spec["seed"] + run_id, options=dict(spec["options"]))
     initial = model.initialize(
         seed=sampler.random_seed, run_id=run_id, init_params_path=spec["init_path"],
+        init_lens_mass_path=spec.get("init_lens_mass_path"),
         pixelated_init_match=spec["pixelated_init_match"], num_iterations_warmup=spec["warmup"],
     )
     model.plot_initial_model(
@@ -508,6 +509,7 @@ class SingleBandModel:
         seed: int = 42,
         run_id: int | str | None = None,
         init_params_path: str | Path | None = None,
+        init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
     ) -> Mapping[str, Any]:
@@ -517,10 +519,21 @@ class SingleBandModel:
         ``seed``.  Passing the returned parameters to :meth:`run` therefore
         makes the displayed initial model the actual SVI initialization.  An
         ``init_params_path`` remains a deliberate warm start from a prior run.
+        ``init_lens_mass_path`` is the cross-band alternative: it restores
+        only matching ``kwargs_lens`` values as initial values, while every
+        mass parameter remains free in the new fit.  It is particularly useful
+        for a pixelated F150W fit warm-started from F277W.
         For a pixelated source, ``pixelated_init_match='image'`` runs a short
         SVI warmup with inherited lens mass/light held fixed; ``'source'``
         fits Matérn hyperparameters to the inherited analytic source.
         """
+        if init_params_path is not None and init_lens_mass_path is not None:
+            raise ValueError(
+                "Provide only one of init_params_path (full warm start) and "
+                "init_lens_mass_path (mass-only warm start)."
+            )
+        mass_only_warm_start = init_lens_mass_path is not None
+        requested_init_path = init_lens_mass_path if mass_only_warm_start else init_params_path
         if run_id is not None:
             print("\n========================================")
             print(f"Starting Run {run_id} (seed={seed})")
@@ -532,15 +545,15 @@ class SingleBandModel:
             self.definition = self.profiles.as_definition()
             self._build()
         declared_lens_light_path = self._declared_pixelated_lens_light_path()
-        if init_params_path is None and declared_lens_light_path is not None:
-            init_params_path = declared_lens_light_path
+        if requested_init_path is None and declared_lens_light_path is not None:
+            requested_init_path = declared_lens_light_path
         _, _, get_init_params, _ = _model_backend()
-        if init_params_path is None:
+        if requested_init_path is None:
             self.initialization_path = None
         else:
             from ..utils import resolve_init_run_dir
-            self.initialization_path = Path(resolve_init_run_dir(init_params_path)).expanduser()
-        if init_params_path is None:
+            self.initialization_path = Path(resolve_init_run_dir(requested_init_path)).expanduser()
+        if requested_init_path is None:
             import jax
             from numpyro import infer
             from numpyro.infer.util import initialize_model
@@ -561,6 +574,7 @@ class SingleBandModel:
                 self.prob_model, param_list, type_list,
                 init_params_path=self.initialization_path, random_seed=seed,
                 lens_image=self.lens_image,
+                restore_components=("lens_mass",) if mass_only_warm_start else None,
             )
             type_list, param_list = self.definition.as_dicts()
             source_types = type_list.get("source_light_type_list", [])
@@ -571,6 +585,11 @@ class SingleBandModel:
             is_pixelated = pixelated_source_index is not None
             if pixelated_init_match not in {"image", "source"}:
                 raise ValueError("pixelated_init_match must be 'image' or 'source'.")
+            if mass_only_warm_start and is_pixelated and pixelated_init_match == "source":
+                raise ValueError(
+                    "init_lens_mass_path has no analytic source to match; use "
+                    "pixelated_init_match='image'."
+                )
             if is_pixelated and pixelated_init_match == "source":
                 from ..models import PowerSpectrum
 
@@ -587,7 +606,7 @@ class SingleBandModel:
                 )
                 inherited_kwargs = self.prob_model.params2kwargs(initial)
                 power_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_source(
-                    self.lens_image, str(init_params_path),
+                    self.lens_image, str(requested_init_path),
                     PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
                     seed=seed + 7919, max_iterations=iterations,
                     kwargs_lens=inherited_kwargs.get("kwargs_lens"),
@@ -612,7 +631,7 @@ class SingleBandModel:
                     exposure_time=self.data.exposure_time,
                     background_rms=self.data.background_rms,
                     background_rms_prior=self.data.background_rms_prior,
-                    init_params_path=str(init_params_path),
+                    init_params_path=None if mass_only_warm_start else str(requested_init_path),
                     likelihood_mask=self.data.likelihood_mask,
                     args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
                 )
@@ -783,12 +802,15 @@ class SingleBandModel:
         n_runs: int = 1,
         parallel: bool = False,
         gpus: str | Sequence[str] | None = None,
+        init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
         residual_vis_max: float = 3.0,
     ) -> FitResult | "SingleBandResultsCombination":
         """Run inference from supplied or automatically initialized parameters.
 
+        ``init_lens_mass_path`` imports only lens-mass values from a prior
+        result as a free-parameter warm start (for example F277W → F150W).
         ``n_runs > 1`` launches independent SVI restarts and returns a
         :class:`SingleBandResultsCombination`.  With ``parallel=True``, each
         selected entry in ``gpus`` is used by at most one spawned SVI process
@@ -805,16 +827,24 @@ class SingleBandModel:
                 parallel=parallel,
                 gpus=gpus,
                 init_params=init_params,
+                init_lens_mass_path=init_lens_mass_path,
                 pixelated_init_match=pixelated_init_match,
                 num_iterations_warmup=num_iterations_warmup,
                 residual_vis_max=residual_vis_max,
             )
+        if init_params is not None and init_lens_mass_path is not None:
+            raise ValueError("Provide init_params or init_lens_mass_path, not both.")
         if init_params is not None:
             initial = dict(init_params)
         elif self.initial_parameters is not None:
             initial = dict(self.initial_parameters)
         else:
-            initial = self.initialize(seed=sampler.random_seed)
+            initial = self.initialize(
+                seed=sampler.random_seed,
+                init_lens_mass_path=init_lens_mass_path,
+                pixelated_init_match=pixelated_init_match,
+                num_iterations_warmup=num_iterations_warmup,
+            )
         self.definition.update_values(initial)
         run_hmc, run_optax, run_svi = _sampler_backend(); args = sampler.to_namespace()
         # ``run_hmc`` creates intermediate batch diagnostics before a
@@ -870,6 +900,7 @@ class SingleBandModel:
         parallel: bool,
         gpus: str | Sequence[str] | None,
         init_params: Mapping[str, Any] | None,
+        init_lens_mass_path: str | Path | None,
         pixelated_init_match: str,
         num_iterations_warmup: int,
         residual_vis_max: float,
@@ -916,7 +947,13 @@ class SingleBandModel:
             "directory": str(directory),
             "seed": int(sampler.random_seed),
             "options": deepcopy(sampler.options),
-            "init_path": None if self.initialization_path is None else str(self.initialization_path),
+            "init_path": (
+                None if init_lens_mass_path is not None or self.initialization_path is None
+                else str(self.initialization_path)
+            ),
+            "init_lens_mass_path": (
+                None if init_lens_mass_path is None else str(Path(init_lens_mass_path).expanduser())
+            ),
             "pixelated_init_match": pixelated_init_match,
             "warmup": int(num_iterations_warmup),
             "residual_vis_max": float(residual_vis_max),
