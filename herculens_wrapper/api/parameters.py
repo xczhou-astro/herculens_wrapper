@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import json
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
@@ -537,6 +538,84 @@ class LightProfile(Profile):
         return ProfileCollection(profiles)
 
     mge = multi_gaussian_ellipse
+
+    @classmethod
+    def mge_from_result(
+        cls,
+        path: str | Path,
+        *,
+        n_gauss: int | None = None,
+    ) -> "ProfileCollection":
+        """Load a fitted Gaussian lens-light MGE as fixed profiles.
+
+        ``path`` must be the ``kwargs_result.json`` produced by a previous
+        lens-light fit.  The method reads its ``kwargs_lens_light`` entries
+        and returns an ordered :class:`ProfileCollection` of fixed
+        ``GAUSSIAN_ELLIPSE`` components.  The result is therefore suitable as
+        the geometry input to :class:`StellarMassMGE` without resampling the
+        fitted light parameters.
+
+        ``kwargs_result.json`` stores parameter values, not the original
+        profile-type declaration.  This helper consequently validates the
+        complete Gaussian parameter set (``amp``, ``sigma``, ``e1``, ``e2``,
+        ``center_x``, and ``center_y``) for every requested component.
+        """
+        file_path = Path(path).expanduser()
+        if file_path.name != "kwargs_result.json":
+            raise ValueError(
+                "mge_from_result() requires the explicit kwargs_result.json file, "
+                f"got {str(file_path)!r}."
+            )
+        if not file_path.is_file():
+            raise FileNotFoundError(f"MGE result file does not exist: {file_path}.")
+        if n_gauss is not None and (
+            not isinstance(n_gauss, int) or isinstance(n_gauss, bool) or n_gauss < 1
+        ):
+            raise ValueError("n_gauss must be a positive integer or None.")
+        try:
+            with file_path.open() as stream:
+                saved = json.load(stream)
+        except json.JSONDecodeError as error:
+            raise ValueError(f"Could not read JSON MGE result: {file_path}.") from error
+
+        entries = saved.get("kwargs_lens_light") if isinstance(saved, Mapping) else None
+        if not isinstance(entries, list):
+            raise ValueError(
+                f"{file_path} has no 'kwargs_lens_light' list; it is not a lens-light result."
+            )
+        if n_gauss is not None and len(entries) != n_gauss:
+            raise ValueError(
+                f"{file_path} contains {len(entries)} lens-light components, "
+                f"but n_gauss={n_gauss} was requested."
+            )
+
+        required = ("amp", "sigma", "e1", "e2", "center_x", "center_y")
+        profiles: list[LightProfile] = []
+        for index, entry in enumerate(entries):
+            if not isinstance(entry, Mapping):
+                raise ValueError(f"{file_path}: kwargs_lens_light[{index}] is not a dictionary.")
+            missing = [name for name in required if name not in entry]
+            if missing:
+                raise ValueError(
+                    f"{file_path}: kwargs_lens_light[{index}] is not a GAUSSIAN_ELLIPSE "
+                    f"component; missing {missing}."
+                )
+            try:
+                values = {name: float(entry[name]) for name in required}
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"{file_path}: kwargs_lens_light[{index}] has non-scalar Gaussian values."
+                ) from error
+            if not all(np.isfinite(value) for value in values.values()):
+                raise ValueError(f"{file_path}: kwargs_lens_light[{index}] has non-finite Gaussian values.")
+            if values["amp"] <= 0 or values["sigma"] <= 0:
+                raise ValueError(
+                    f"{file_path}: kwargs_lens_light[{index}] requires positive amp and sigma."
+                )
+            profiles.append(cls("GAUSSIAN_ELLIPSE", value=values))
+        if not profiles:
+            raise ValueError(f"{file_path}: kwargs_lens_light is empty.")
+        return ProfileCollection(profiles)
 
 
 class PixelatedSource(LightProfile):
