@@ -30,13 +30,30 @@ class _Tee:
 
     def write(self, text):
         for stream in self.streams:
-            stream.write(text)
-            stream.flush()
+            # Third-party libraries can configure a logging handler while a
+            # run-local Tee is active.  That handler may outlive the capture
+            # context and retain this Tee after its file stream has closed.
+            # Keep the still-open console mirror alive instead of turning an
+            # otherwise harmless warning into a logging traceback.
+            if getattr(stream, "closed", False):
+                continue
+            try:
+                stream.write(text)
+                stream.flush()
+            except ValueError:
+                # ``TextIOWrapper`` raises ValueError rather than exposing a
+                # reliable ``closed`` state in a few wrapped-stream cases.
+                continue
         return len(text)
 
     def flush(self):
         for stream in self.streams:
-            stream.flush()
+            if getattr(stream, "closed", False):
+                continue
+            try:
+                stream.flush()
+            except ValueError:
+                continue
 
     def isatty(self):
         return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
