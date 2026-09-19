@@ -36,10 +36,11 @@ class MPPL:
         these together, or supply ``e_x`` and ``e_y`` together, but never
         both parameterizations.
     e_x, e_y : float, optional
-        Paper-style multipole ellipticity coordinates.  When supplied, the
-        profile derives ``a_m = 2 e / (1 + e)`` and
+        Paper-style multipole ellipticity coordinates.  They are equivalent
+        to ``a_m = 2 e / (1 + e)`` and
         ``phi_m = atan2(e_y, e_x) / m``, where
-        ``e = sqrt(e_x**2 + e_y**2)``.
+        ``e = sqrt(e_x**2 + e_y**2)``.  Internally they are evaluated in
+        Cartesian form, so no phase needs to be formed at ``e = 0``.
     gamma : float
         EPL three-dimensional density slope. Normally link this to the EPL.
     center_x, center_y : float
@@ -123,22 +124,33 @@ class MPPL:
                 raise ValueError(
                     "MPPL accepts either ('a_m', 'phi_m') or ('e_x', 'e_y'), not both."
                 )
-            ellipticity = jnp.sqrt(e_x**2 + e_y**2)
-            a_m = 2.0 * ellipticity / (1.0 + ellipticity)
-            phi_m = jnp.arctan2(e_y, e_x) / m
         elif a_m is None or phi_m is None:
             raise ValueError("MPPL requires both 'a_m' and 'phi_m' when ellipticity coordinates are absent.")
 
         radius, angle = MPPL._polar_coordinates(x, y, center_x, center_y)
         three_minus_gamma = 3.0 - gamma
         amplitude = _normalization(three_minus_gamma, m, radius)
+        if using_ellipticity:
+            # Let e_x = e cos(alpha), e_y = e sin(alpha), where
+            # alpha = m phi_m.  Then
+            #
+            #   a_m cos[m(theta - phi_m)]
+            #       = 2 [e_x cos(m theta) + e_y sin(m theta)] / (1 + e).
+            #
+            # This is algebraically identical to the public e_x/e_y
+            # convention but avoids atan2(0, 0), whose phase is undefined.
+            ellipticity = jnp.hypot(e_x, e_y)
+            angular_amplitude = 2.0 * (
+                e_x * jnp.cos(m * angle) + e_y * jnp.sin(m * angle)
+            ) / (1.0 + ellipticity)
+        else:
+            angular_amplitude = a_m * jnp.cos(m * (angle - phi_m))
         return (
             radius**three_minus_gamma
             * amplitude
-            * jnp.cos(m * (angle - phi_m))
             / three_minus_gamma
             * b ** (gamma - 1.0)
-            * a_m
+            * angular_amplitude
         )
 
     @staticmethod
