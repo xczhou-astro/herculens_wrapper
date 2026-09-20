@@ -7,7 +7,15 @@ from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
-from .parameters import LightProfile, MassProfile, Parameter, PointSourceProfile, Profile, ProfileCollection
+from .parameters import (
+    LightProfile,
+    MassProfile,
+    Parameter,
+    PointSourceProfile,
+    Profile,
+    ProfileCollection,
+    StellarMassMGE,
+)
 
 # Shared API model vocabulary and its legacy-wrapper key mapping live beside
 # ModelDefinition, their only substantive consumer.
@@ -25,6 +33,10 @@ PARAM_KEYS = {
     "source_light": "source_light_params_list",
     "point_source": "point_source_params_list",
 }
+
+# Backend-only metadata.  It never reaches Herculens: the model builder uses
+# it to materialize STELLAR_MGE's Gaussian arrays from sampled lens light.
+_STELLAR_LENS_LIGHT_INDICES = "_stellar_lens_light_indices"
 
 
 def is_pixelated_latent_site(name: str) -> bool:
@@ -78,7 +90,9 @@ class ModelDefinition:
         self.parameters[PARAM_KEYS[component]].append(dict(parameters))
         return self
 
-    def _materialize_profile(self, profile: Profile) -> dict[str, Any]:
+    def _materialize_profile(
+        self, profile: Profile, *, allow_unbound_dynamic_stellar: bool = False,
+    ) -> dict[str, Any]:
         params = {}
         for name, value in profile.parameters.items():
             if isinstance(value, Parameter):
@@ -88,6 +102,24 @@ class ModelDefinition:
                     raise ValueError("A linked profile must be added before its dependent profile.") from error
                 value = ["correlated", source_component, source_index, value.name]
             params[name] = value
+        if isinstance(profile, StellarMassMGE) and profile.follows_lens_light:
+            locations = []
+            for lens_light_profile in profile.lens_light_profiles:
+                location = self._locations.get(id(lens_light_profile))
+                if location is None:
+                    if allow_unbound_dynamic_stellar:
+                        return params
+                    raise ValueError(
+                        "A dynamic StellarMassMGE must reference the same "
+                        "GAUSSIAN_ELLIPSE profiles supplied as lens_light."
+                    )
+                component, index = location
+                if component != "lens_light":
+                    raise ValueError(
+                        "A dynamic StellarMassMGE may reference only lens_light profiles."
+                    )
+                locations.append(index)
+            params[_STELLAR_LENS_LIGHT_INDICES] = locations
         return params
 
     def _refresh_object_profiles(self) -> None:
@@ -105,7 +137,9 @@ class ModelDefinition:
             self.add(component, profile.profile_type, {})
             index = len(self.parameters[PARAM_KEYS[component]]) - 1
             self._locations[id(profile)], self._profiles[(component, index)] = (component, index), profile
-            self.parameters[PARAM_KEYS[component]][index] = self._materialize_profile(profile)
+            self.parameters[PARAM_KEYS[component]][index] = self._materialize_profile(
+                profile, allow_unbound_dynamic_stellar=True,
+            )
         return self
 
     def as_dicts(self) -> tuple[dict[str, list[str]], dict[str, list[dict[str, Any]]]]:
@@ -120,7 +154,10 @@ class ModelDefinition:
         self._refresh_object_profiles()
         return any(
             isinstance(value, (list, tuple)) and not (len(value) == 4 and value[0] == "correlated")
-            for components in self.parameters.values() for profile in components for value in profile.values()
+            for components in self.parameters.values()
+            for profile in components
+            for name, value in profile.items()
+            if name != _STELLAR_LENS_LIGHT_INDICES
         )
 
     def update_values(self, flat_parameters: Mapping[str, Any]) -> None:

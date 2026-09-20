@@ -96,6 +96,32 @@ result.output()
 
 参数使用四元列表 `[mean, sigma, lower, upper]` 表示采样 prior；标量表示固定参数。
 
+### 联合采样 lens light 与 stellar mass MGE
+
+`StellarMassMGE` 默认读取固定的 lens-light MGE，适合将先前结果用于
+后续阶段。若希望在 parametric 或 pixelated SVI/HMC 中让 stellar mass 随
+同一组 sampled lens-light Gaussian 参数更新，使用 `follow_lens_light=True`：
+
+```python
+from herculens_wrapper.api import LightProfile, StellarMassMGE
+
+lens_light = LightProfile.mge(15, (0.001, 3.0))
+stellar = StellarMassMGE(
+    lens_light,
+    follow_lens_light=True,
+    prior={
+        "upsilon_kappa": [0.1, 0.05, 0.001, 1.0],
+        "ml_gradient": [0.0, 0.2, -1.0, 1.0],
+    },
+)
+profiles = LensProfileCollection(lens_mass=[stellar], lens_light=lens_light)
+```
+
+每次 likelihood evaluation 都会从当前 lens-light MGE 重建 stellar Gaussian
+amplitudes；`upsilon_kappa` 则设定全局 stellar-mass normalization。若在后续
+阶段希望固定 light 但保留这条 dependency，在写入或载入 lens-light 参数值后使用
+`profiles.with_fixed(lens_light=True)`。
+
 ### EPL-referenced multipole phase
 
 `MPPL_OFFSET` samples a relative multipole phase while keeping it close to an

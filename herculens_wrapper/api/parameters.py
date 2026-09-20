@@ -353,13 +353,16 @@ class MassProfile(Profile):
 
 
 class StellarMassMGE(MassProfile):
-    """A fixed lens-light Gaussian MGE scaled into stellar convergence.
+    """A lens-light Gaussian MGE scaled into stellar convergence.
 
-    The supplied lens-light profiles must be fixed ``GAUSSIAN_ELLIPSE``
-    components.  Their geometry and relative light amplitudes are retained as
-    fixed arrays; only ``upsilon_kappa`` and optionally ``ml_gradient`` are
-    sampled.  ``upsilon_kappa`` is a dimensionless lensing normalization, not
-    a physical mass-to-light ratio.
+    The default ``follow_lens_light=False`` preserves the original behaviour:
+    the supplied ``GAUSSIAN_ELLIPSE`` lens-light components are read as fixed
+    arrays when this object is constructed.  With ``follow_lens_light=True``,
+    the stellar MGE is instead rebuilt at every likelihood evaluation from the
+    corresponding sampled lens-light Gaussian parameters.  In both modes,
+    only ``upsilon_kappa`` and optionally ``ml_gradient`` are independent mass
+    parameters.  ``upsilon_kappa`` is a dimensionless lensing normalization,
+    not a physical mass-to-light ratio.
     """
 
     def __new__(cls, *args: Any, **kwargs: Any):
@@ -371,18 +374,33 @@ class StellarMassMGE(MassProfile):
         *,
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
+        follow_lens_light: bool = False,
     ) -> None:
         profiles = list(lens_light)
         if not profiles:
             raise ValueError("StellarMassMGE requires at least one lens-light Gaussian.")
         required = ("amp", "sigma", "e1", "e2", "center_x", "center_y")
-        components: dict[str, list[float]] = {name: [] for name in required}
         for index, profile in enumerate(profiles):
             if not isinstance(profile, LightProfile) or profile.profile_type != "GAUSSIAN_ELLIPSE":
                 raise TypeError(
-                    "StellarMassMGE requires fixed LightProfile('GAUSSIAN_ELLIPSE') components; "
+                    "StellarMassMGE requires LightProfile('GAUSSIAN_ELLIPSE') components; "
                     f"component {index} is {getattr(profile, 'profile_type', type(profile).__name__)!r}."
                 )
+        object.__setattr__(self, "_follow_lens_light", bool(follow_lens_light))
+        object.__setattr__(self, "_lens_light_profiles", tuple(profiles))
+
+        settings = dict(prior or {})
+        values = dict(value or {})
+        if "upsilon_kappa" not in settings and "upsilon_kappa" not in values:
+            raise ValueError("Specify prior or value for StellarMassMGE.upsilon_kappa.")
+        settings.setdefault("ml_gradient", 0.0)
+
+        if follow_lens_light:
+            super().__init__("STELLAR_MGE", prior=settings, value=values)
+            return
+
+        components: dict[str, list[float]] = {name: [] for name in required}
+        for index, profile in enumerate(profiles):
             fixed = profile._parameter_values(mode="fixed")
             missing = [name for name in required if name not in fixed]
             if missing:
@@ -394,11 +412,6 @@ class StellarMassMGE(MassProfile):
         if any(sigma <= 0 for sigma in components["sigma"]):
             raise ValueError("StellarMassMGE requires positive fixed lens-light Gaussian sigmas.")
 
-        settings = dict(prior or {})
-        values = dict(value or {})
-        if "upsilon_kappa" not in settings and "upsilon_kappa" not in values:
-            raise ValueError("Specify prior or value for StellarMassMGE.upsilon_kappa.")
-        settings.setdefault("ml_gradient", 0.0)
         settings.update({
             "light_amp": np.asarray(components["amp"], dtype=float),
             "light_sigma": np.asarray(components["sigma"], dtype=float),
@@ -409,7 +422,22 @@ class StellarMassMGE(MassProfile):
         })
         super().__init__("STELLAR_MGE", prior=settings, value=values)
 
+    @property
+    def follows_lens_light(self) -> bool:
+        """Whether light-MGE values are read afresh at each model evaluation."""
+        return self._follow_lens_light
+
+    @property
+    def lens_light_profiles(self) -> tuple["LightProfile", ...]:
+        """The Gaussian lens-light profiles providing the stellar geometry."""
+        return self._lens_light_profiles
+
     def freeze(self) -> "StellarMassMGE":
+        if self.follows_lens_light:
+            raise TypeError(
+                "A dynamic StellarMassMGE must be frozen through "
+                "LensProfileCollection.with_fixed(lens_light=True)."
+            )
         raise TypeError("StellarMassMGE is already based on fixed lens-light components.")
 
 

@@ -15,6 +15,7 @@ from .parameters import (
     PointSourceProfile,
     Profile,
     ProfileCollection,
+    StellarMassMGE,
 )
 from .models import ComponentName
 
@@ -80,6 +81,8 @@ class LensProfileCollection:
                         entry["linked_to"] = f"{link._profile.profile_type}.{link.name}"
                     parameters[name] = entry
                 entry = {"profile": profile.profile_type, "parameters": parameters}
+                if isinstance(profile, StellarMassMGE) and profile.follows_lens_light:
+                    entry["follow_lens_light"] = True
                 # Profile.__getattr__ deliberately creates parameters for the
                 # notebook-friendly ``profile.name`` syntax.  Never use
                 # hasattr() here: probing an ordinary SIE for ``pixel_grid``
@@ -315,7 +318,15 @@ class LensProfileCollection:
 
         clones: dict[tuple[str, int], Profile] = {}
         parameter_map: dict[int, Parameter] = {}
-        for component in self._components:
+        # Dynamic stellar mass refers to lens-light profile objects.  Clone
+        # those first so a subsequent ``with_fixed(lens_light=True)`` keeps
+        # the same dependency while replacing only the light values.
+        clone_order = ("lens_light", "lens_mass", "source_light", "point_source")
+        original_lens_light_indices = {
+            id(profile): index
+            for index, profile in enumerate(self.lens_light or [])
+        }
+        for component in clone_order:
             profiles = getattr(self, component)
             if profiles is None:
                 continue
@@ -332,7 +343,25 @@ class LensProfileCollection:
                     for name in profile._parameters
                     if profile._specification(name)["value"] is not None
                 }
-                clone = profile_class(profile.profile_type, prior=prior, value=value)
+                if isinstance(profile, StellarMassMGE) and profile.follows_lens_light:
+                    try:
+                        linked_light = ProfileCollection([
+                            clones[("lens_light", original_lens_light_indices[id(light_profile)])]
+                            for light_profile in profile.lens_light_profiles
+                        ])
+                    except KeyError as error:
+                        raise ValueError(
+                            "A dynamic StellarMassMGE must reference lens-light profiles "
+                            "that are present in this LensProfileCollection."
+                        ) from error
+                    clone = StellarMassMGE(
+                        linked_light,
+                        prior=prior,
+                        value=value,
+                        follow_lens_light=True,
+                    )
+                else:
+                    clone = profile_class(profile.profile_type, prior=prior, value=value)
                 clone._initialization = deepcopy(profile._initialization)
                 clone._warm_start = deepcopy(profile._warm_start)
                 clones[(component, index)] = clone

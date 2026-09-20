@@ -592,6 +592,46 @@ def _kwargs_list_to_jax(kw_list):
     return [{k: jnp.asarray(v) for k, v in comp.items()} for comp in kw_list]
 
 
+_STELLAR_LENS_LIGHT_INDICES = "_stellar_lens_light_indices"
+_STELLAR_LIGHT_FIELDS = (
+    "amp", "sigma", "e1", "e2", "center_x", "center_y",
+)
+
+
+def _materialize_dynamic_stellar_mge(mass_kwargs, mass_definition, kwargs_lens_light):
+    """Attach sampled lens-light Gaussian arrays to one dynamic STELLAR_MGE."""
+    indices = mass_definition.get(_STELLAR_LENS_LIGHT_INDICES)
+    if indices is None:
+        return mass_kwargs
+    if not isinstance(indices, (list, tuple)) or not indices:
+        raise ValueError(
+            "Dynamic STELLAR_MGE requires a non-empty list of lens-light component indices."
+        )
+    selected = []
+    for index in indices:
+        if not isinstance(index, (int, np.integer)) or not 0 <= int(index) < len(kwargs_lens_light):
+            raise IndexError(
+                "Dynamic STELLAR_MGE references an invalid lens-light component "
+                f"index {index!r}."
+            )
+        component = kwargs_lens_light[int(index)]
+        missing = [field for field in _STELLAR_LIGHT_FIELDS if field not in component]
+        if missing:
+            raise ValueError(
+                f"Dynamic STELLAR_MGE lens-light component {index} is missing {missing}."
+            )
+        selected.append(component)
+
+    result = dict(mass_kwargs)
+    for field in _STELLAR_LIGHT_FIELDS:
+        result[f"light_{field}"] = jnp.asarray([component[field] for component in selected])
+    return result
+
+
+def _is_dynamic_stellar_definition(mass_definition):
+    return _STELLAR_LENS_LIGHT_INDICES in mass_definition
+
+
 def _sample_param_from_prior(site_name, key, param):
     """
     Sample a parameter prior based on specification convention:
@@ -771,6 +811,8 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
     for index, model in enumerate(param_list.get('lens_mass_params_list', [])):
         kwargs_model = {}
         for k, v in model.items():
+            if k == _STELLAR_LENS_LIGHT_INDICES:
+                continue
             if isinstance(v, (list, tuple)):
                 kwargs_model[k] = v[0]
             else:
@@ -795,6 +837,12 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
             else:
                 kwargs_model[k] = v
         kwargs['kwargs_lens_light'].append(kwargs_model)
+
+    for index, model in enumerate(param_list.get('lens_mass_params_list', [])):
+        if _is_dynamic_stellar_definition(model):
+            kwargs['kwargs_lens'][index] = _materialize_dynamic_stellar_mge(
+                kwargs['kwargs_lens'][index], model, kwargs['kwargs_lens_light'],
+            )
         
     # 3. Source light
     kwargs['kwargs_source'] = []
@@ -1001,6 +1049,8 @@ def create_prob_model(
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                     model = {}
                     for key, param in lens_mass_model.items():
+                        if key == _STELLAR_LENS_LIGHT_INDICES:
+                            continue
                         has_override, override_value = _param_override(
                             overrides, 'lens_mass', i, key,
                         )
@@ -1060,6 +1110,16 @@ def create_prob_model(
                                 model[key] = param
 
                         prior_lens_light.append(model)
+
+            for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
+                if not _is_dynamic_stellar_definition(lens_mass_model):
+                    continue
+                prior_lens_mass[i] = _materialize_dynamic_stellar_mge(
+                    prior_lens_mass[i], lens_mass_model, prior_lens_light,
+                )
+                lens_link_bank[i] = _linkable_mass_parameters(
+                    type_list['lens_mass_type_list'][i], prior_lens_mass[i],
+                )
 
             prior_source_light = []
             if fix_source_light and kwargs_source_light_fixed is not None:
@@ -1363,6 +1423,8 @@ def create_prob_model(
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                     kw = {}
                     for key, param in lens_mass_model.items():
+                        if key == _STELLAR_LENS_LIGHT_INDICES:
+                            continue
                         link_spec = _normalize_link_spec(param)
                         if link_spec is not None:
                             kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs lens_mass[{i}].{key}")
@@ -1428,6 +1490,16 @@ def create_prob_model(
                             else:
                                 kw[key] = param
                         kwargs_lens_light.append(kw)
+
+            for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
+                if not _is_dynamic_stellar_definition(lens_mass_model):
+                    continue
+                kwargs_lens[i] = _materialize_dynamic_stellar_mge(
+                    kwargs_lens[i], lens_mass_model, kwargs_lens_light,
+                )
+                lens_link_bank[i] = _linkable_mass_parameters(
+                    type_list['lens_mass_type_list'][i], kwargs_lens[i],
+                )
 
             kwargs_source = []
             if fix_source_light and kwargs_source_light_fixed is not None:
@@ -1776,6 +1848,8 @@ def kwargs2params(
                     if name in lens_mass_model and name in saved_mass
                 }
             for key, param in lens_mass_model.items():
+                if key == _STELLAR_LENS_LIGHT_INDICES:
+                    continue
                 if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
                     if restored_q_phi is not None and key in {'q', 'phi'}:
                         params[f'lens_{key}_{i}'] = jnp.asarray(

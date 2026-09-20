@@ -455,7 +455,8 @@ class SingleBandModel:
             1
             for component in parameter_lists.values()
             for profile in component
-            for prior in profile.values()
+            for name, prior in profile.items()
+            if name != "_stellar_lens_light_indices"
             if isinstance(prior, (list, tuple))
             and not (len(prior) == 4 and prior[0] == "correlated")
         )
