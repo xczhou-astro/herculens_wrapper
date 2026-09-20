@@ -588,6 +588,18 @@ def _resolve_link(bank, spec, *, context=""):
     return arr[idx][key]
 
 
+def _has_link_to_component(definitions, component):
+    """Return whether any declared correlated parameter targets ``component``."""
+    for definition in definitions:
+        if not isinstance(definition, dict):
+            continue
+        for parameter in definition.values():
+            link_spec = _normalize_link_spec(parameter)
+            if link_spec is not None and link_spec[0] == component:
+                return True
+    return False
+
+
 def _kwargs_list_to_jax(kw_list):
     return [{k: jnp.asarray(v) for k, v in comp.items()} for comp in kw_list]
 
@@ -1044,6 +1056,66 @@ def create_prob_model(
                 )
             ]
             bank = {'lens': lens_link_bank}
+
+            prior_lens_light = []
+            if fix_lens_light and kwargs_lens_light_fixed is not None:
+                prior_lens_light = _kwargs_list_to_jax(kwargs_lens_light_fixed)
+
+            def build_lens_light():
+                """Build lens light before mass only when a mass link needs it."""
+                bank['lens_light'] = prior_lens_light
+                if 'lens_light_params_list' not in param_list:
+                    return
+                if fix_lens_light and kwargs_lens_light_fixed is not None:
+                    return
+                for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
+                    if type_list['lens_light_type_list'][i] == 'PIXELATED':
+                        pixelated_prior_lens_light = lens_light_model.get('pixelated_prior', {})
+                        ny, nx = lens_image.LensLightModel.pixel_grid.num_pixel_axes
+                        k_values = PowerSpectrum.K_grid((ny, nx)).k
+                        res = PowerSpectrum.matern_power_spectrum(
+                            'Lens-light grid', f'lens_light_grid_{i}', k_values,
+                            k_zero=pixelated_prior_lens_light.get('k_zero', None),
+                            n_value=pixelated_prior_lens_light.get('n_value'),
+                            n_low=safe_float(pixelated_prior_lens_light.get('n_value_low'), 0.0001),
+                            n_high=safe_float(pixelated_prior_lens_light.get('n_value_high'), 100.0),
+                            sigma_low=safe_float(pixelated_prior_lens_light.get('sigma_low'), 1e-5),
+                            sigma_high=safe_float(pixelated_prior_lens_light.get('sigma_high'), 10.0),
+                            rho_low=safe_float(pixelated_prior_lens_light.get('rho_low'), None),
+                            rho_high=safe_float(pixelated_prior_lens_light.get('rho_high'), None),
+                            positive=bool(pixelated_prior_lens_light.get('positive', True)),
+                        )
+                        prior_lens_light.append({'pixels': res['pixels']})
+                        continue
+
+                    light_model = {}
+                    for key, param in lens_light_model.items():
+                        has_override, override_value = _param_override(
+                            overrides, 'lens_light', i, key,
+                        )
+                        link_spec = _normalize_link_spec(param)
+                        if has_override:
+                            light_model[key] = override_value
+                        elif link_spec is not None:
+                            light_model[key] = _resolve_link(
+                                bank, link_spec, context=f"lens_light[{i}].{key}",
+                            )
+                        elif isinstance(param, (list, tuple)):
+                            light_model[key] = _sample_param_from_prior(
+                                f'lens_light_{key}_{i}', key, param,
+                            )
+                        else:
+                            light_model[key] = param
+                    prior_lens_light.append(light_model)
+
+            # Most models use the historical mass-before-light order.  Reverse
+            # just this dependency when, e.g., an NFW halo centre follows a
+            # sampled lens-light MGE centre.
+            mass_needs_lens_light = _has_link_to_component(
+                param_list.get('lens_mass_params_list', []), 'lens_light',
+            )
+            if mass_needs_lens_light:
+                build_lens_light()
             
             if not (fix_lens_mass and kwargs_lens_fixed is not None):
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
@@ -1068,48 +1140,8 @@ def create_prob_model(
                     lens_link_bank.append(_linkable_mass_parameters(profile_type, model))
                     prior_lens_mass.append(_materialize_mass_parameters(profile_type, model))
 
-            prior_lens_light = []
-            if fix_lens_light and kwargs_lens_light_fixed is not None:
-                prior_lens_light = _kwargs_list_to_jax(kwargs_lens_light_fixed)
-            
-            if 'lens_light_params_list' in param_list:
-                bank['lens_light'] = prior_lens_light
-                if not (fix_lens_light and kwargs_lens_light_fixed is not None):
-                    for i, lens_light_model in enumerate(param_list['lens_light_params_list']):
-                        if type_list['lens_light_type_list'][i] == 'PIXELATED':
-                            pixelated_prior_lens_light = lens_light_model.get('pixelated_prior', {})
-                            ny, nx = lens_image.LensLightModel.pixel_grid.num_pixel_axes
-                            k_values = PowerSpectrum.K_grid((ny, nx)).k
-                            res = PowerSpectrum.matern_power_spectrum(
-                                'Lens-light grid', f'lens_light_grid_{i}', k_values,
-                                k_zero=pixelated_prior_lens_light.get('k_zero', None),
-                                n_value=pixelated_prior_lens_light.get('n_value'),
-                                n_low=safe_float(pixelated_prior_lens_light.get('n_value_low'), 0.0001),
-                                n_high=safe_float(pixelated_prior_lens_light.get('n_value_high'), 100.0),
-                                sigma_low=safe_float(pixelated_prior_lens_light.get('sigma_low'), 1e-5),
-                                sigma_high=safe_float(pixelated_prior_lens_light.get('sigma_high'), 10.0),
-                                rho_low=safe_float(pixelated_prior_lens_light.get('rho_low'), None),
-                                rho_high=safe_float(pixelated_prior_lens_light.get('rho_high'), None),
-                                positive=bool(pixelated_prior_lens_light.get('positive', True)),
-                            )
-                            prior_lens_light.append({'pixels': res['pixels']})
-                            continue
-                        model = {}
-                        for key, param in lens_light_model.items():
-                            has_override, override_value = _param_override(
-                                overrides, 'lens_light', i, key,
-                            )
-                            link_spec = _normalize_link_spec(param)
-                            if has_override:
-                                model[key] = override_value
-                            elif link_spec is not None:
-                                model[key] = _resolve_link(bank, link_spec, context=f"lens_light[{i}].{key}")
-                            elif isinstance(param, (list, tuple)):
-                                model[key] = _sample_param_from_prior(f'lens_light_{key}_{i}', key, param)
-                            else:
-                                model[key] = param
-
-                        prior_lens_light.append(model)
+            if not mass_needs_lens_light:
+                build_lens_light()
 
             for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                 if not _is_dynamic_stellar_definition(lens_mass_model):
@@ -1418,8 +1450,16 @@ def create_prob_model(
                 )
             ]
             bank = {'lens': lens_link_bank}
-            
-            if kwargs_lens_override is None and not (fix_lens_mass and kwargs_lens_fixed is not None):
+
+            mass_needs_lens_light = _has_link_to_component(
+                param_list.get('lens_mass_params_list', []), 'lens_light',
+            )
+
+            def build_lens_mass():
+                if kwargs_lens_override is not None or (
+                    fix_lens_mass and kwargs_lens_fixed is not None
+                ):
+                    return
                 for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                     kw = {}
                     for key, param in lens_mass_model.items():
@@ -1427,7 +1467,10 @@ def create_prob_model(
                             continue
                         link_spec = _normalize_link_spec(param)
                         if link_spec is not None:
-                            kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs lens_mass[{i}].{key}")
+                            kw[key] = _resolve_link(
+                                bank, link_spec,
+                                context=f"params2kwargs lens_mass[{i}].{key}",
+                            )
                         elif isinstance(param, (list, tuple)):
                             kw[key] = params[f'lens_{key}_{i}']
                         else:
@@ -1435,6 +1478,9 @@ def create_prob_model(
                     profile_type = type_list['lens_mass_type_list'][i]
                     lens_link_bank.append(_linkable_mass_parameters(profile_type, kw))
                     kwargs_lens.append(_materialize_mass_parameters(profile_type, kw))
+
+            if not mass_needs_lens_light:
+                build_lens_mass()
 
             kwargs_lens_light = []
             if fix_lens_light and kwargs_lens_light_fixed is not None:
@@ -1490,6 +1536,9 @@ def create_prob_model(
                             else:
                                 kw[key] = param
                         kwargs_lens_light.append(kw)
+
+            if mass_needs_lens_light:
+                build_lens_mass()
 
             for i, lens_mass_model in enumerate(param_list['lens_mass_params_list']):
                 if not _is_dynamic_stellar_definition(lens_mass_model):
