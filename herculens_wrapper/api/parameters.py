@@ -464,6 +464,34 @@ class GNFWHaloMGE(MassProfile):
             settings["n_outer"] = 3.0
         super().__init__("GNFW_MGE", prior=settings, value=values)
 
+
+class NFWEllipseHalo(MassProfile):
+    """Standard elliptical NFW halo using JAX-Lensing-Profiles' 3-D MGE.
+
+    Parameters
+    ----------
+    kappa_s
+        Dimensionless NFW convergence normalization.
+    R_s
+        Angular NFW scale radius, in the lens-plane coordinate unit.
+    e1, e2
+        Projected ellipticity components.  Do not fix both to zero: use the
+        analytic ``MassProfile('NFW')`` for the exactly spherical case.
+    center_x, center_y
+        Halo centre in lens-plane coordinates.
+    """
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__("NFW_ELLIPSE_KAPPA", prior=prior, value=value)
+
 class LightProfile(Profile):
     """Light profile, or a component-agnostic multi-profile collection."""
 

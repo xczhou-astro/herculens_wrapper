@@ -1,7 +1,7 @@
 """Register wrapper-local profile names with the installed Herculens package."""
 
 from .multipole import ELLMPPLOffset, EPLM1M3M4, EPLM3M4, MPPL, MPPLOffset
-from .composite import GNFWMGE, InclinedExponentialDiskMGE, StellarMGE
+from .composite import GNFWMGE, InclinedExponentialDiskMGE, NFWEllipseKappa, StellarMGE
 
 
 def register_mass_profiles():
@@ -34,6 +34,7 @@ def register_mass_profiles():
     for name, profile in {
         "STELLAR_MGE": StellarMGE,
         "GNFW_MGE": GNFWMGE,
+        "NFW_ELLIPSE_KAPPA": NFWEllipseKappa,
         "INCLINED_EXPONENTIAL_DISK": InclinedExponentialDiskMGE,
     }.items():
         existing = profile_mapping.STRING_MAPPING.get(name)

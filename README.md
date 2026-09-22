@@ -122,6 +122,31 @@ amplitudes；`upsilon_kappa` 则设定全局 stellar-mass normalization。若在
 阶段希望固定 light 但保留这条 dependency，在写入或载入 lens-light 参数值后使用
 `profiles.with_fixed(lens_light=True)`。
 
+### 标准椭圆 NFW halo
+
+`NFWEllipseHalo` 对应 `NFW_ELLIPSE_KAPPA`。其 3-D density 是标准 NFW
+`rho ∝ 1 / (x * (1 + x)**2)`；椭圆化的 projected convergence 由
+JAX-Lensing-Profiles 的 3-D MGE 计算。`R_s`（注意大写）是角尺度半径，
+而 `kappa_s` 是无量纲 normalization：
+
+```python
+from herculens_wrapper.api import NFWEllipseHalo
+
+halo = NFWEllipseHalo(prior={
+    "kappa_s": [0.03, 0.02, 1e-4, 0.5],
+    "R_s": [3.0, 2.0, 0.3, 30.0],
+    "e1": [0.06, 0.06, -0.3, 0.3],
+    "e2": [0.02, 0.06, -0.3, 0.3],
+    "center_x": [0.0, 0.03, -0.1, 0.1],
+    "center_y": [0.0, 0.03, -0.1, 0.1],
+})
+```
+
+这里不要把 `e1=e2=0` 固定：MGE 椭圆 Gaussian backend 在严格圆极限没有
+数值 branch。若 halo 必须严格球对称，改用解析的 `MassProfile("NFW")`。
+`GNFWHaloMGE` 是另一个、具有不同 outer-transition 定义的 profile，不能通过
+固定其参数来替代这个标准 NFW。
+
 ### EPL-referenced multipole phase
 
 `MPPL_OFFSET` samples a relative multipole phase while keeping it close to an

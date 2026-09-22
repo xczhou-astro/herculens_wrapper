@@ -1124,7 +1124,7 @@ class SingleBandModel:
     def mass_component_convergence(
         self, parameters: Mapping[str, Any] | None = None,
     ) -> dict[str, np.ndarray]:
-        """Return total, stellar, and gNFW convergence maps when present.
+        """Return total, stellar, and halo convergence maps when present.
 
         The maps are evaluated directly from the same compiled mass profiles
         used during inference, so their sum is exactly the relevant part of
@@ -1141,7 +1141,11 @@ class SingleBandModel:
         types, _ = self.definition.as_dicts()
         result: dict[str, np.ndarray] = {}
         component_types = types["lens_mass_type_list"]
-        labels = {"STELLAR_MGE": "stellar", "GNFW_MGE": "dark_matter"}
+        labels = {
+            "STELLAR_MGE": "stellar",
+            "GNFW_MGE": "dark_matter",
+            "NFW_ELLIPSE_KAPPA": "dark_matter",
+        }
         for index, profile_type in enumerate(component_types):
             label = labels.get(profile_type)
             if label is None:

@@ -26,6 +26,19 @@ def _mge_backend():
     return CuspyHaloEllipseKappa, MultiGaussianEllipseKappa
 
 
+def _nfw_ellipse_backend():
+    """Load the standard NFW MGE implementation only when it is requested."""
+    try:
+        from jax_lensing_profiles.MassModel.Profiles.NFW_ellipse_kappa import (
+            NFWEllipseKappa as _NFWEllipseKappa,
+        )
+    except ImportError as error:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "NFW_ELLIPSE_KAPPA requires the 'jax-lensing-profiles' package."
+        ) from error
+    return _NFWEllipseKappa
+
+
 class StellarMGE:
     """Light-tracing stellar convergence with global scale and M/L gradient.
 
@@ -118,6 +131,47 @@ class GNFWMGE:
         return self._mge.hessian(
             x, y, kappa_s=kappa_s, R_s=r_s, gamma=gamma_inner,
             n=n_outer, e1=e1, e2=e2, center_x=center_x, center_y=center_y,
+        )
+
+
+class NFWEllipseKappa:
+    """Standard elliptical NFW convergence, evaluated with a 3-D MGE.
+
+    This is the usual NFW density law,
+    ``rho(r) = rho_s / ((r / R_s) * (1 + r / R_s)**2)``, rather than the
+    wrapper's more general ``GNFW_MGE`` transition law.  ``R_s`` is the
+    angular scale radius and ``kappa_s`` is dimensionless.  The apparent
+    ellipticity is supplied as Herculens/JAX-Lensing-Profiles ``e1, e2``.
+
+    The MGE implementation has no exact circular branch, so callers that
+    require a strictly spherical halo should use the analytic ``NFW``
+    profile instead of setting both ellipticity components to fixed zero.
+    """
+
+    param_names = ["kappa_s", "R_s", "e1", "e2", "center_x", "center_y"]
+    lower_limit_default = {name: -1e6 for name in param_names}
+    upper_limit_default = {name: 1e6 for name in param_names}
+    fixed_default = {name: False for name in param_names}
+
+    def __init__(self) -> None:
+        self._nfw = _nfw_ellipse_backend()()
+
+    def function(self, x, y, kappa_s, R_s, e1, e2, center_x=0.0, center_y=0.0):
+        return self._nfw.function(
+            x, y, kappa_s=kappa_s, R_s=R_s, e1=e1, e2=e2,
+            center_x=center_x, center_y=center_y,
+        )
+
+    def derivatives(self, x, y, kappa_s, R_s, e1, e2, center_x=0.0, center_y=0.0):
+        return self._nfw.derivatives(
+            x, y, kappa_s=kappa_s, R_s=R_s, e1=e1, e2=e2,
+            center_x=center_x, center_y=center_y,
+        )
+
+    def hessian(self, x, y, kappa_s, R_s, e1, e2, center_x=0.0, center_y=0.0):
+        return self._nfw.hessian(
+            x, y, kappa_s=kappa_s, R_s=R_s, e1=e1, e2=e2,
+            center_x=center_x, center_y=center_y,
         )
 
 

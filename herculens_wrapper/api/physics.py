@@ -94,7 +94,7 @@ def enclosed_lensing_mass(
 
     This is a finite 2-D lensing mass, not an extrapolated halo mass.  The
     returned component decomposition is meaningful for explicit mass profiles
-    such as ``STELLAR_MGE`` and ``GNFW_MGE``.
+    such as ``STELLAR_MGE``, ``GNFW_MGE``, and ``NFW_ELLIPSE_KAPPA``.
     """
     import astropy.units as u
 
@@ -123,7 +123,11 @@ def enclosed_lensing_mass(
         model.lens_image.MassModel, kwargs_lens, mass_types, radius_arcsec=float(radius_arcsec),
         center_x=center_x, center_y=center_y, grid_size=grid_size,
     )
-    labels = {"STELLAR_MGE": "stellar", "GNFW_MGE": "dark_matter"}
+    labels = {
+        "STELLAR_MGE": "stellar",
+        "GNFW_MGE": "dark_matter",
+        "NFW_ELLIPSE_KAPPA": "dark_matter",
+    }
     components: dict[str, dict[str, float | str]] = {}
     for index, profile_type in enumerate(mass_types):
         area = _integrated_kappa_area(

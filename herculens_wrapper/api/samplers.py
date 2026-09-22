@@ -1409,7 +1409,10 @@ class FitResult:
         maps = self.mass_component_convergence()
         required = {"stellar", "dark_matter"}
         if not required.issubset(maps):
-            raise RuntimeError("plot_mass_decomposition() requires StellarMassMGE and GNFWHaloMGE.")
+            raise RuntimeError(
+                "plot_mass_decomposition() requires StellarMassMGE and either "
+                "GNFWHaloMGE or NFWEllipseHalo."
+            )
         model = self._require_model()
         output = self._output_file(save_path or Path(tempfile.mkdtemp()), "mass_decomposition.png")
         extent = _extent(model.data.image.shape, model.data.pixel_scale)
