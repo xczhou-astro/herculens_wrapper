@@ -2170,6 +2170,24 @@ def get_init_params(
                 fix_lens_mass=fix_lens_mass, fix_source_light=fix_source_light,
                 sample_wavelets=sample_wavelets, starlet_method=None
             )
+            # A saved model without point sources has no image-position sites
+            # to restore.  Start any newly introduced IMAGE_POSITIONS sources
+            # exactly at their supplied coordinates, while keeping their
+            # positional priors (and thus subsequent SVI/HMC freedom) intact.
+            saved_point_sources = init_info.get('kwargs_point_source') or []
+            point_source_types = type_list.get('point_source_type_list', [])
+            for i, point_source_model in enumerate(param_list.get('point_source_params_list', [])):
+                if i >= len(point_source_types) or point_source_types[i] != 'IMAGE_POSITIONS':
+                    continue
+                saved_point_source = (
+                    saved_point_sources[i]
+                    if i < len(saved_point_sources) and isinstance(saved_point_sources[i], dict)
+                    else {}
+                )
+                for axis in ('ra', 'dec'):
+                    site = f'ps_{axis}_{i}'
+                    if site in init_params and site not in loaded_params and axis not in saved_point_source:
+                        loaded_params[site] = jnp.asarray(point_source_model[axis])
             src_types = type_list.get('source_light_type_list', [])
             pixelated_source_index = _single_pixelated_index(src_types, 'source-light')
             if pixelated_source_index is not None and not fix_source_light:

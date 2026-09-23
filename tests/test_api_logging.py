@@ -165,6 +165,48 @@ def test_init_restores_saved_likelihood_background_rms(tmp_path):
     assert float(initial["background_rms"]) == pytest.approx(2.5)
 
 
+def test_new_point_source_starts_at_supplied_image_positions(tmp_path):
+    """Adding points to a no-point-source run uses the declared image centers."""
+    import json
+    import jax.numpy as jnp
+    from herculens_wrapper.models import get_init_params
+
+    class _ProbabilityModel:
+        def get_sample(self, _key):
+            return {
+                "ps_ra_0": jnp.full(4, 0.5),
+                "ps_dec_0": jnp.full(4, -0.5),
+                "ps_amp_0": jnp.full(4, 1.0),
+            }
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [], "kwargs_source": [],
+    }))
+    initial = get_init_params(
+        _ProbabilityModel(),
+        {
+            "lens_mass_params_list": [],
+            "source_light_params_list": [],
+            "point_source_params_list": [{
+                "ra": [-0.3, -0.1, 0.1, 0.3],
+                "dec": [0.2, 0.4, -0.4, -0.2],
+                "n_images": 4,
+                "sigma_image": 0.03,
+                "amp": [0.2, 2.0],
+            }],
+        },
+        {
+            "lens_mass_type_list": [],
+            "source_light_type_list": [],
+            "point_source_type_list": ["IMAGE_POSITIONS"],
+        },
+        init_params_path=tmp_path,
+    )
+    np.testing.assert_array_equal(initial["ps_ra_0"], [-0.3, -0.1, 0.1, 0.3])
+    np.testing.assert_array_equal(initial["ps_dec_0"], [0.2, 0.4, -0.4, -0.2])
+    np.testing.assert_array_equal(initial["ps_amp_0"], [1.0] * 4)
+
+
 def _worker_log(directory, run_id):
     context = RunContext(Path(directory) / f"run_{run_id}", console=False, run_id=run_id)
     with context.capture(f"worker {run_id}"):
