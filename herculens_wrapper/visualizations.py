@@ -645,7 +645,7 @@ def plot_source_plane(
     point_positions = _point_source_positions(lens_image, kwargs_result)
 
     caustics = []
-    if plot_caustics and not is_rtu:
+    if plot_caustics:
         try:
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
@@ -654,7 +654,7 @@ def plot_source_plane(
         except Exception as e:
             print(f'[plot_source_plane] Could not compute caustics: {e}')
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5), sharex=True, sharey=True)
 
     scale_suffix = (
         " (RTU physical grid)" if is_rtu
@@ -670,21 +670,33 @@ def plot_source_plane(
     else:
         im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title(f'Extended Source{scale_suffix}')
-    _mark_point_sources(axes[0], point_positions, 'source')
     source_flux_label = 'Pixel flux'
     if cbar_label == 'log':
         source_flux_label += ' (log scale)'
     plt.colorbar(im0, ax=axes[0], label=source_flux_label)
 
-    if is_rtu:
-        im1 = axes[1].pcolormesh(xx, yy, source_for_plot, shading='flat', cmap='twilight', norm=norm)
-    else:
-        im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
+    # IMAGE_POSITIONS amplitudes are image-plane fluxes, not a source-plane
+    # surface-brightness raster.  Show the inferred positions without assigning
+    # those independent image amplitudes to arbitrary source pixels.
+    axes[1].set_facecolor('#f5f5f5')
     _mark_point_sources(axes[1], point_positions, 'source', legend=True)
+    if not point_positions['source']:
+        axes[1].text(0.5, 0.5, 'No point sources', ha='center', va='center',
+                     transform=axes[1].transAxes, color='gray')
+    axes[1].set_title('Point Sources (positions only)')
+
+    if is_rtu:
+        im1 = axes[2].pcolormesh(xx, yy, source_for_plot, shading='flat', cmap='twilight', norm=norm)
+    else:
+        im1 = axes[2].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
+    _mark_point_sources(axes[2], point_positions, 'source', legend=True)
+    for ax in axes:
+        ax.set_aspect('equal', adjustable='box')
     for caust_x, caust_y in caustics:
-        axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
-    axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
-    plt.colorbar(im1, ax=axes[1], label=source_flux_label)
+        for ax in axes:
+            ax.plot(caust_x, caust_y, color='lime', lw=1.0)
+    axes[2].set_title(f'Source Plane Reconstruction{scale_suffix}')
+    plt.colorbar(im1, ax=axes[2], label=source_flux_label)
 
     if mapped_ring_contours and inside_mask is not None:
         for ax in axes:
@@ -745,6 +757,7 @@ def plot_composite_2x3_panel(
     model_composite_override=None,
     source_plane_override=None,
     source_arc_mask=None,
+    model_no_lens_light_override=None,
 ):
     ny, nx = image_data.shape
     extent_img = _image_extent(ny, nx, pixel_scale)
@@ -772,11 +785,17 @@ def plot_composite_2x3_panel(
     else:
         model_lens_light = np.zeros((ny, nx))
 
-    if model_extended_override is not None:
-        model_extended = model_extended_override
+    if model_no_lens_light_override is not None:
+        model_lensed_source = np.asarray(model_no_lens_light_override)
+    elif model_extended_override is not None:
+        model_lensed_source = np.asarray(model_extended_override)
+        if kwargs_result.get('kwargs_point_source'):
+            model_lensed_source = model_lensed_source + np.asarray(lens_image.model(
+                **clean_kwargs, source_add=False, lens_light_add=False, point_source_add=True,
+            ))
     else:
-        model_extended = lens_image.model(
-            **clean_kwargs, source_add=True, lens_light_add=False, point_source_add=False,
+        model_lensed_source = lens_image.model(
+            **clean_kwargs, source_add=True, lens_light_add=False, point_source_add=True,
         )
 
     if model_composite_override is not None:
@@ -912,7 +931,7 @@ def plot_composite_2x3_panel(
     norm_data, _ = _norm_from_plot_scale('log', image_data)
     norm_model, _ = _norm_from_plot_scale('log', model_composite)
     norm_sub, _ = _norm_from_plot_scale('linear', subtracted)
-    norm_src_lensed, _ = _norm_from_plot_scale('linear', model_extended)
+    norm_src_lensed, _ = _norm_from_plot_scale('linear', model_lensed_source)
     norm_src_plane, _ = _norm_from_plot_scale('linear', source_for_plot)
 
     # Panel (0, 0): Data (Log scale, no colorbar)
@@ -948,12 +967,14 @@ def plot_composite_2x3_panel(
         axes[1, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[1, 0].set_title('Data - Lens Light')
 
-    # Panel (1, 1): Lensed Source (Linear scale, no colorbar)
-    axes[1, 1].imshow(model_extended, origin='lower', extent=extent_img, cmap='twilight', norm=norm_src_lensed)
+    # Panel (1, 1): lensed extended source plus point-source image flux.
+    axes[1, 1].imshow(model_lensed_source, origin='lower', extent=extent_img, cmap='twilight', norm=norm_src_lensed)
     _mark_point_sources(axes[1, 1], point_positions, 'image')
     if mask is not None:
         axes[1, 1].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
-    axes[1, 1].set_title('Lensed Source')
+    axes[1, 1].set_title(
+        'Lensed Source + Point Sources' if kwargs_result.get('kwargs_point_source') else 'Lensed Source'
+    )
 
     # Panel (1, 2): Source (Source Plane, Linear scale, no colorbar)
     if is_rtu and is_pixelated:
@@ -2892,6 +2913,7 @@ def generate_run_plots(
         model_extended_override=comp_src,
         model_lens_light_override=comp_lens_light,
         model_composite_override=comp_total,
+        model_no_lens_light_override=comp_no_lens,
     ))
 
     if sampler == 'hmc' and mcmc_samples is not None and prob_model is not None:

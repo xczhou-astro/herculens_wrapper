@@ -5,6 +5,7 @@ import sys
 
 import pytest
 import numpy as np
+from types import SimpleNamespace
 
 from herculens_wrapper.api import (
     LensProfileCollection,
@@ -506,3 +507,103 @@ def test_image_match_warmup_keeps_mass_light_and_copies_point_source(monkeypatch
     assert float(result["sigma_source_grid"][0]) == 10.0
     np.testing.assert_array_equal(result["ps_ra_0"], np.full(4, 0.02))
     np.testing.assert_array_equal(result["ps_amp_0"], np.full(4, 6.0))
+
+
+def _mock_plot_lens_image():
+    grid_x, grid_y = np.meshgrid(np.linspace(-0.3, 0.3, 3), np.linspace(-0.3, 0.3, 3))
+    pixel_grid = SimpleNamespace(
+        extent=(-0.45, 0.45, -0.45, 0.45),
+        pixel_coordinates=(grid_x, grid_y),
+    )
+
+    class LensImage:
+        SourceModel = SimpleNamespace(pixel_grid=pixel_grid)
+        source_arc_mask = None
+
+        def model(self, **kwargs):
+            source = 2.0 if kwargs.get("source_add", True) else 0.0
+            lens = 3.0 if kwargs.get("lens_light_add", True) else 0.0
+            point = 5.0 if kwargs.get("point_source_add", True) else 0.0
+            return np.full((3, 3), source + lens + point)
+
+    return LensImage()
+
+
+def _mock_plot_geometry(monkeypatch, plots):
+    positions = {
+        "image": [(np.array([0.1]), np.array([0.2]))],
+        "source": [(np.array([0.02]), np.array([0.03]))],
+    }
+    monkeypatch.setattr(plots, "_point_source_positions", lambda *_: positions)
+    monkeypatch.setattr(
+        plots.model_util,
+        "critical_lines_caustics",
+        lambda *_args, **_kwargs: ([], [(np.array([-0.2, 0.2]), np.array([0.0, 0.1]))]),
+    )
+
+
+@pytest.mark.parametrize("plot_scale", ["linear", "log"])
+def test_source_plane_shows_three_components_and_caustics(monkeypatch, tmp_path, plot_scale):
+    from herculens_wrapper import visualizations as plots
+
+    _mock_plot_geometry(monkeypatch, plots)
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda *_args, **_kwargs: None)
+    kwargs = {
+        "kwargs_lens": [],
+        "kwargs_source": [{"pixels": np.ones((3, 3))}],
+        "kwargs_point_source": [{"amp": [1.0]}],
+    }
+    try:
+        plots.plot_source_plane(
+            _mock_plot_lens_image(), kwargs, str(tmp_path),
+            plot_scale=plot_scale, output_filename=f"source_{plot_scale}.png",
+        )
+        figure = plots.plt.gcf()
+        extended, points, reconstruction = figure.axes[:3]
+        assert len(extended.images) == 1
+        assert len(points.images) == 0
+        assert len(reconstruction.images) == 1
+        assert len(extended.collections) == 0
+        assert len(points.collections) == 1
+        assert len(reconstruction.collections) == 1
+        assert all(any(line.get_color() == "lime" for line in axis.lines)
+                   for axis in (extended, points, reconstruction))
+        assert "positions only" in points.get_title()
+        assert (tmp_path / f"source_{plot_scale}.png").is_file()
+    finally:
+        original_close(plots.plt.gcf())
+
+
+@pytest.mark.parametrize("use_override", [False, True])
+def test_composite_lensed_source_includes_point_flux(monkeypatch, tmp_path, use_override):
+    from herculens_wrapper import visualizations as plots
+
+    _mock_plot_geometry(monkeypatch, plots)
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda *_args, **_kwargs: None)
+    kwargs = {
+        "kwargs_lens": [],
+        "kwargs_source": [{"pixels": np.ones((3, 3))}],
+        "kwargs_point_source": [{"amp": [1.0]}],
+    }
+    overrides = (
+        {"model_extended_override": np.full((3, 3), 2.0),
+         "model_no_lens_light_override": np.full((3, 3), 11.0)}
+        if use_override else {}
+    )
+    try:
+        plots.plot_composite_2x3_panel(
+            _mock_plot_lens_image(), kwargs, 0.1,
+            np.full((3, 3), 10.0), np.ones((3, 3)), str(tmp_path),
+            output_filename="composite.png", **overrides,
+        )
+        figure = plots.plt.gcf()
+        lensed_source = next(axis for axis in figure.axes if axis.get_title() == "Lensed Source + Point Sources")
+        np.testing.assert_allclose(
+            lensed_source.images[0].get_array(),
+            11.0 if use_override else 7.0,
+        )
+        assert (tmp_path / "composite.png").is_file()
+    finally:
+        original_close(plots.plt.gcf())

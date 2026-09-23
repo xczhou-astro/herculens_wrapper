@@ -2061,6 +2061,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                         model_extended_override=temp_comp_medians['source'],
                         model_lens_light_override=temp_comp_medians['lens_light'],
                         model_composite_override=temp_comp_medians['total'],
+                        model_no_lens_light_override=temp_comp_medians['no_lens_light'],
                         source_plane_override=temp_comp_medians.get('source_plane'),
                     )
                     print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
