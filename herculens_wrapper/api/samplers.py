@@ -1235,7 +1235,15 @@ class FitResult:
             coordinate_center=(0.0, 0.0),
             crop_center=truth_center,
             save_path=save_path,
+            point_source_positions=self._point_source_positions(),
         )
+
+    def _point_source_positions(self) -> dict[str, Any]:
+        """Positions for source-plane diagnostics of this fitted model."""
+        from ..visualizations import _point_source_positions
+
+        model = self._require_model()
+        return _point_source_positions(model.lens_image, self._kwargs_result())
 
     def _legacy_plot_result(self, callback, save_path: str | Path | None, default_name: str, **kwargs: Any) -> Path:
         directory, filename, output = self._plot_destination(save_path, default_name)

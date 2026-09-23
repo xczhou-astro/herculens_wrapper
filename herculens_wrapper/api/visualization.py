@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal, Mapping, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm, SymLogNorm
@@ -14,6 +14,29 @@ if TYPE_CHECKING:
 
 
 PlotScale = Literal["linear", "log"]
+
+
+def _mark_input_point_sources(
+    axis, point_source_positions: Sequence[Mapping[str, Any]] | None, *, legend: bool,
+) -> None:
+    """Mark catalogue image positions; each mapping contains ra/dec arrays."""
+    if not point_source_positions:
+        return
+    colors = plt.get_cmap("tab10")
+    for index, positions in enumerate(point_source_positions):
+        ra = np.asarray(positions["ra"], dtype=float).ravel()
+        dec = np.asarray(positions["dec"], dtype=float).ravel()
+        if ra.size != dec.size:
+            raise ValueError(f"point_source_positions[{index}] has unequal ra/dec lengths.")
+        valid = np.isfinite(ra) & np.isfinite(dec)
+        if np.any(valid):
+            axis.scatter(
+                ra[valid], dec[valid], s=48, marker="o", facecolors="none",
+                edgecolors=colors(index % 10), linewidths=1.6, zorder=20,
+                label=f"PS {index + 1}" if legend else None,
+            )
+    if legend and axis.get_legend_handles_labels()[0]:
+        axis.legend(loc="best", fontsize=8)
 
 
 def _in_jupyter_notebook() -> bool:
@@ -65,6 +88,7 @@ def plot_single_band_data(
     scale: PlotScale = "linear",
     residual_vis_max: float = 0.0,
     save_path: str | Path | None = None,
+    point_source_positions: Sequence[Mapping[str, Any]] | None = None,
 ):
     """Plot image, noise, signal-to-noise, and PSF, returning ``(figure, axes)``.
 
@@ -109,6 +133,11 @@ def plot_single_band_data(
                 axis.contour(data.source_arc_mask, levels=[0.5], colors="lime", linewidths=1.0, extent=extent)
             if data.contaminate_mask is not None:
                 axis.contour(data.contaminate_mask, levels=[0.5], colors="orange", linewidths=1.2, linestyles="--", extent=extent)
+            _mark_input_point_sources(
+                axis, point_source_positions, legend=title == "Image data",
+            )
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
         axis.set(title=title, xlabel="arcsec", ylabel="arcsec")
         if scale == "log" and title not in ("Signal-to-noise",):
             colorbar_label += " (log scale)"
@@ -131,6 +160,7 @@ def plot_multiband_data(
     scale: PlotScale = "linear",
     residual_vis_max: float = 0.0,
     save_path: str | Path | None = None,
+    point_source_positions: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ):
     """Plot one ``data / noise / SNR / PSF`` row for every observation band."""
     if scale not in ("linear", "log"):
@@ -178,6 +208,13 @@ def plot_multiband_data(
                     axis.contour(data.source_arc_mask, levels=[0.5], colors="lime", linewidths=1.0, extent=extent)
                 if data.contaminate_mask is not None:
                     axis.contour(data.contaminate_mask, levels=[0.5], colors="orange", linewidths=1.2, linestyles="--", extent=extent)
+                _mark_input_point_sources(
+                    axis,
+                    None if point_source_positions is None else point_source_positions.get(band_name),
+                    legend=column == 0,
+                )
+                axis.set_xlim(extent[0], extent[1])
+                axis.set_ylim(extent[2], extent[3])
             axis.set_xlabel("arcsec")
             axis.set_ylabel(f"{band_name}\narcsec" if column == 0 else "arcsec")
             if row == 0:

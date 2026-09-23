@@ -1162,6 +1162,7 @@ class SingleBandModel:
         on a symmetric linear scale so its amplitude stays interpretable.
         """
         import matplotlib.pyplot as plt
+        from ..visualizations import _mark_point_sources, _point_source_positions
         if scale not in ("linear", "log"):
             raise ValueError("scale must be either 'linear' or 'log'.")
         if residual_vis_max < 0:
@@ -1171,6 +1172,9 @@ class SingleBandModel:
                 raise RuntimeError("Supply parameters or call run() first.")
             parameters = self.result.parameters
         model = self.model_image(parameters)
+        point_positions = _point_source_positions(
+            self.lens_image, self.prob_model.params2kwargs(parameters),
+        )
         residual = (model - self.data.likelihood_image) / self.noise_from_model(model, parameters)
         valid = np.isfinite(residual)
         if self.data.likelihood_mask is not None:
@@ -1191,6 +1195,9 @@ class SingleBandModel:
                     axis.contour(self.data.source_arc_mask, levels=[0.5], colors="lime", linewidths=1.0, extent=extent)
                 if self.data.contaminate_mask is not None:
                     axis.contour(self.data.contaminate_mask, levels=[0.5], colors="orange", linewidths=1.2, linestyles="--", extent=extent)
+            _mark_point_sources(axis, point_positions, "image", legend=title == "Data")
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
             label = "Standardized residual" if title == "Normalized residual" else "Pixel flux"
             if scale == "log" and title != "Normalized residual": label += " (log scale)"
             plot_title = f"{title} ($\\chi^2$ = {chi2:.2f})" if title == "Normalized residual" else title

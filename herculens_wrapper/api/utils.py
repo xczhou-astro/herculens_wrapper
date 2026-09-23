@@ -282,6 +282,7 @@ def plot_pixelated_source_reconstruction(
     coordinate_center: tuple[float, float] | None = None,
     crop_center: tuple[float, float] | None = None,
     save_path: str | Path | None = None,
+    point_source_positions: Mapping[str, Any] | None = None,
 ) -> Path:
     """Plot the pixelated source, truth, and optional analytic construction.
 
@@ -322,6 +323,17 @@ def plot_pixelated_source_reconstruction(
                 marker="x", markersize=9, markeredgewidth=2.0, color="lime",
                 zorder=5,
             )
+        if point_source_positions is not None:
+            from ..visualizations import _mark_point_sources
+            translated = {
+                "source": [
+                    (np.asarray(x) - coordinate_center[0], np.asarray(y) - coordinate_center[1])
+                    for x, y in point_source_positions.get("source", [])
+                ],
+            }
+            _mark_point_sources(axis, translated, "source", legend=True)
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
 
     fitted_pixels = None
     if fitted_parameters is not None:

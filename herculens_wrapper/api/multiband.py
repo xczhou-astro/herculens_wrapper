@@ -7,7 +7,7 @@ import json
 import pickle
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -108,12 +108,13 @@ class MultiBandData:
         scale: str = "linear",
         residual_vis_max: float = 0.0,
         save_path: str | Path | None = None,
+        point_source_positions: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
     ):
         """Show all bands in a ``N_band × 4`` data diagnostic figure."""
         from .visualization import plot_multiband_data
         return plot_multiband_data(
             self._bands, scale=scale, residual_vis_max=residual_vis_max,
-            save_path=save_path,
+            save_path=save_path, point_source_positions=point_source_positions,
         )
 
 

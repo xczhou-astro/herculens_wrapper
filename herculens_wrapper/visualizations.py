@@ -52,6 +52,61 @@ def _point_source_colors(n):
     return [cmap(i % 10) for i in range(n)]
 
 
+def _point_source_positions(lens_image, kwargs_result):
+    """Return image- and source-plane positions grouped by point source."""
+    positions = {'image': [], 'source': []}
+    kwargs_ps = kwargs_result.get('kwargs_point_source')
+    point_model = getattr(lens_image, 'PointSourceModel', None)
+    if not kwargs_ps or point_model is None:
+        return positions
+    kwargs_lens = kwargs_result.get('kwargs_lens')
+    try:
+        x_values, y_values, _ = point_model.get_multiple_images(
+            kwargs_ps, kwargs_lens=kwargs_lens,
+            kwargs_solver=lens_image.kwargs_lens_equation_solver,
+            with_amplitude=True,
+        )
+        positions['image'] = [
+            (np.atleast_1d(np.asarray(x)), np.atleast_1d(np.asarray(y)))
+            for x, y in zip(x_values, y_values)
+        ]
+    except Exception as error:
+        print(f'[plots] Could not locate point-source images: {error}')
+    try:
+        x_values, y_values = point_model.get_source_plane_points(
+            kwargs_ps, kwargs_lens=kwargs_lens, with_amplitude=False,
+        )
+        positions['source'] = [
+            (np.atleast_1d(np.asarray(x)), np.atleast_1d(np.asarray(y)))
+            for x, y in zip(x_values, y_values)
+        ]
+    except Exception as error:
+        print(f'[plots] Could not locate source-plane point sources: {error}')
+    return positions
+
+
+def _mark_point_sources(axis, positions, plane, *, legend=False):
+    """Overlay fitted point sources in physical arcsec coordinates."""
+    groups = positions[plane]
+    if not groups:
+        return
+    colors = _point_source_colors(len(groups))
+    for index, (x_values, y_values) in enumerate(groups):
+        x_values, y_values = np.asarray(x_values).ravel(), np.asarray(y_values).ravel()
+        valid = np.isfinite(x_values) & np.isfinite(y_values)
+        if not np.any(valid):
+            continue
+        axis.scatter(
+            x_values[valid], y_values[valid],
+            s=55 if plane == 'image' else 80,
+            marker='x' if plane == 'image' else '*',
+            linewidths=1.7, color=colors[index], zorder=20,
+            label=f'PS {index + 1}' if legend else None,
+        )
+    if legend:
+        axis.legend(loc='best', fontsize=8)
+
+
 def _norm_from_plot_scale(plot_scale, arr):
     ps = (plot_scale or 'linear').strip().lower()
     if ps in ('linear', 'lin'):
@@ -150,7 +205,8 @@ def _parametric_source_plane_grid(lens_image, kwargs_lens, ny, nx, pixel_scale):
         return xx_src, yy_src, extent
 
 
-def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None, residual_vis_max=0.0):
+def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linear', contour_mask=None, residual_vis_max=0.0,
+            point_source_positions=None):
     num = len(plot_data)
     fig, axes = plt.subplots(1, num, figsize=(4 * num + 2 * num, 5))
     if num == 1:
@@ -175,6 +231,10 @@ def display(plot_data, titles, pixel_scale, savefilename=None, plot_scale='linea
         im = axes[i].imshow(plot_data[i], origin='lower', cmap=c_map, extent=extent, norm=norm, vmin=vmin, vmax=vmax)
         if contour_mask is not None:
             axes[i].contour(np.asarray(contour_mask), levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
+        if point_source_positions is not None:
+            _mark_point_sources(axes[i], point_source_positions, 'image', legend=i == 0)
+            axes[i].set_xlim(extent[0], extent[1])
+            axes[i].set_ylim(extent[2], extent[3])
         axes[i].set_xlabel('arcsec')
         axes[i].set_ylabel('arcsec')
         axes[i].set_title(titles[i])
@@ -361,27 +421,13 @@ def plot_image_plane(
         model_lens_light = np.zeros((ny, nx))
 
     model_point_sources = np.zeros((ny, nx))
-    ra_image_list = []
-    dec_image_list = []
+    point_positions = _point_source_positions(lens_image, kwargs_result)
     if model_point_sources_override is not None:
         model_point_sources = model_point_sources_override
     elif 'kwargs_point_source' in kwargs_result:
         model_point_sources = lens_image.model(
             **kwargs_result, source_add=False, lens_light_add=False, point_source_add=True,
         )
-    if 'kwargs_point_source' in kwargs_result:
-        theta_x, theta_y, amps = lens_image.PointSourceModel.get_multiple_images(
-            kwargs_result['kwargs_point_source'],
-            kwargs_lens=kwargs_result['kwargs_lens'],
-            kwargs_solver=lens_image.kwargs_lens_equation_solver,
-            with_amplitude=True,
-        )
-        for i in range(len(theta_x)):
-            ra_image_list.append(np.asarray(theta_x[i]))
-            dec_image_list.append(np.asarray(theta_y[i]))
-            print(f'RA for lensed point source {i}: {ra_image_list[-1]}')
-            print(f'Dec for lensed point source {i}: {dec_image_list[-1]}')
-            print(f'Amplitudes for lensed point source {i}: {amps[i]}')
 
     if model_composite_override is not None:
         model_composite = model_composite_override
@@ -391,36 +437,34 @@ def plot_image_plane(
     chi2 = float(np.nansum(residuals ** 2))
 
 
-    n_ps = len(ra_image_list)
-    ps_colors = _point_source_colors(n_ps) if n_ps else []
-
     fig, ax = plt.subplots(2, 3, figsize=(18, 10))
 
     im0 = ax[0, 0].imshow(model_extended, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[0, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
-        ax[0, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
+    _mark_point_sources(ax[0, 0], point_positions, 'image')
     ax[0, 0].set_title('Extended Source (Lensed)')
     plt.colorbar(im0, ax=ax[0, 0], label='Pixel flux')
 
     im1 = ax[0, 1].imshow(model_lens_light, origin='lower', cmap='twilight', extent=extent)
+    _mark_point_sources(ax[0, 1], point_positions, 'image')
     ax[0, 1].set_title('Lens Light')
     plt.colorbar(im1, ax=ax[0, 1], label='Pixel flux')
 
     im2 = ax[0, 2].imshow(model_point_sources, origin='lower', cmap='twilight', extent=extent)
+    _mark_point_sources(ax[0, 2], point_positions, 'image')
     ax[0, 2].set_title('Point Sources')
     plt.colorbar(im2, ax=ax[0, 2], label='Pixel flux')
 
     im3 = ax[1, 0].imshow(model_composite, origin='lower', cmap='twilight', extent=extent)
     if mask is not None:
         ax[1, 0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    for i, (ras, decs) in enumerate(zip(ra_image_list, dec_image_list)):
-        ax[1, 0].scatter(ras, decs, s=20, marker='x', color=ps_colors[i])
+    _mark_point_sources(ax[1, 0], point_positions, 'image', legend=True)
     ax[1, 0].set_title('Composite')
     plt.colorbar(im3, ax=ax[1, 0], label='Pixel flux')
 
     im4 = ax[1, 1].imshow(image_data, origin='lower', cmap='twilight', extent=extent)
+    _mark_point_sources(ax[1, 1], point_positions, 'image')
     if mask is not None:
         ax[1, 1].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 1].set_title('Image Data')
@@ -431,6 +475,7 @@ def plot_image_plane(
     else:
         vmax_res = float(np.max(np.abs(residuals)))
     im5 = ax[1, 2].imshow(residuals, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
+    _mark_point_sources(ax[1, 2], point_positions, 'image')
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[1, 2].set_title(f'Residuals (model - data) / noise ($\\chi^2$ = {chi2:.2f})')
@@ -439,6 +484,8 @@ def plot_image_plane(
     for a in ax.ravel():
         a.set_xlabel('arcsec')
         a.set_ylabel('arcsec')
+        a.set_xlim(extent[0], extent[1])
+        a.set_ylim(extent[2], extent[3])
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
@@ -595,16 +642,7 @@ def plot_source_plane(
 
     norm, cbar_label = _norm_from_plot_scale(plot_scale, source_for_plot)
 
-    ra_source_list = []
-    dec_source_list = []
-    if 'kwargs_point_source' in kwargs_result and not is_rtu:
-        beta_x, beta_y = lens_image.PointSourceModel.get_source_plane_points(
-            kwargs_result['kwargs_point_source'],
-            kwargs_lens=kwargs_result['kwargs_lens'],
-            with_amplitude=False,
-        )
-        ra_source_list = [np.atleast_1d(np.asarray(b)) for b in beta_x]
-        dec_source_list = [np.atleast_1d(np.asarray(d)) for d in beta_y]
+    point_positions = _point_source_positions(lens_image, kwargs_result)
 
     caustics = []
     if plot_caustics and not is_rtu:
@@ -616,7 +654,6 @@ def plot_source_plane(
         except Exception as e:
             print(f'[plot_source_plane] Could not compute caustics: {e}')
 
-    colors = _point_source_colors(len(ra_source_list)) if ra_source_list else []
     fig, axes = plt.subplots(1, 2, figsize=(12, 5))
 
     scale_suffix = (
@@ -633,6 +670,7 @@ def plot_source_plane(
     else:
         im0 = axes[0].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
     axes[0].set_title(f'Extended Source{scale_suffix}')
+    _mark_point_sources(axes[0], point_positions, 'source')
     source_flux_label = 'Pixel flux'
     if cbar_label == 'log':
         source_flux_label += ' (log scale)'
@@ -642,8 +680,7 @@ def plot_source_plane(
         im1 = axes[1].pcolormesh(xx, yy, source_for_plot, shading='flat', cmap='twilight', norm=norm)
     else:
         im1 = axes[1].imshow(source_for_plot, origin='lower', extent=extent, cmap='twilight', norm=norm)
-    for i, (ras, decs) in enumerate(zip(ra_source_list, dec_source_list)):
-        axes[1].scatter(ras, decs, s=30, marker='*', color=colors[i], label=f'PS {i + 1}')
+    _mark_point_sources(axes[1], point_positions, 'source', legend=True)
     for caust_x, caust_y in caustics:
         axes[1].plot(caust_x, caust_y, color='lime', lw=1.0)
     axes[1].set_title(f'Source Plane Reconstruction{scale_suffix}')
@@ -711,6 +748,7 @@ def plot_composite_2x3_panel(
 ):
     ny, nx = image_data.shape
     extent_img = _image_extent(ny, nx, pixel_scale)
+    point_positions = _point_source_positions(lens_image, kwargs_result)
 
     mask = source_arc_mask
     if mask is None:
@@ -753,13 +791,19 @@ def plot_composite_2x3_panel(
     # 2. Evaluate source plane reconstruction
     _, pixelated_source = _pixelated_source_entry(kwargs_result)
     is_pixelated = pixelated_source is not None
+    is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
+    rtu_x = rtu_y = None
 
     if is_pixelated:
         source_for_plot = np.asarray(
             pixelated_source['pixels'] if source_plane_override is None
             else source_plane_override
         )
-        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+        if is_rtu:
+            rtu_x, rtu_y = lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens'))
+            rtu_x, rtu_y = np.asarray(rtu_x), np.asarray(rtu_y)
+            extent_src = [float(rtu_x.min()), float(rtu_x.max()), float(rtu_y.min()), float(rtu_y.max())]
+        elif getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             kwargs_lens = kwargs_result.get('kwargs_lens', None)
             npix_src = source_for_plot.shape[0]
             _, _, extent_src = lens_image.get_source_coordinates(
@@ -795,7 +839,7 @@ def plot_composite_2x3_panel(
 
     # Ray-trace outer ring boundary to source plane
     mapped_ring_contours = []
-    if mask is not None:
+    if mask is not None and not is_rtu:
         try:
             mask_arr = np.asarray(mask).astype(bool)
             if np.any(mask_arr) and not np.all(mask_arr):
@@ -873,12 +917,14 @@ def plot_composite_2x3_panel(
 
     # Panel (0, 0): Data (Log scale, no colorbar)
     axes[0, 0].imshow(image_data, origin='lower', extent=extent_img, cmap='twilight', norm=norm_data)
+    _mark_point_sources(axes[0, 0], point_positions, 'image', legend=True)
     if mask is not None:
         axes[0, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[0, 0].set_title('Data')
 
     # Panel (0, 1): Model (Log scale, no colorbar)
     axes[0, 1].imshow(model_composite, origin='lower', extent=extent_img, cmap='twilight', norm=norm_model)
+    _mark_point_sources(axes[0, 1], point_positions, 'image')
     if mask is not None:
         axes[0, 1].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[0, 1].set_title('Model')
@@ -889,6 +935,7 @@ def plot_composite_2x3_panel(
     else:
         vmax_res = float(np.max(np.abs(residuals)))
     im2 = axes[0, 2].imshow(residuals, origin='lower', extent=extent_img, cmap='bwr', vmin=-vmax_res, vmax=vmax_res)
+    _mark_point_sources(axes[0, 2], point_positions, 'image')
     if mask is not None:
         axes[0, 2].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[0, 2].set_title(f'Residual (chi^2 = {chi2:.2f})')
@@ -896,18 +943,24 @@ def plot_composite_2x3_panel(
 
     # Panel (1, 0): Data - Lens Light (Linear scale, no colorbar)
     axes[1, 0].imshow(subtracted, origin='lower', extent=extent_img, cmap='twilight', norm=norm_sub)
+    _mark_point_sources(axes[1, 0], point_positions, 'image')
     if mask is not None:
         axes[1, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[1, 0].set_title('Data - Lens Light')
 
     # Panel (1, 1): Lensed Source (Linear scale, no colorbar)
     axes[1, 1].imshow(model_extended, origin='lower', extent=extent_img, cmap='twilight', norm=norm_src_lensed)
+    _mark_point_sources(axes[1, 1], point_positions, 'image')
     if mask is not None:
         axes[1, 1].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
     axes[1, 1].set_title('Lensed Source')
 
     # Panel (1, 2): Source (Source Plane, Linear scale, no colorbar)
-    axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
+    if is_rtu and is_pixelated:
+        axes[1, 2].pcolormesh(rtu_x, rtu_y, source_for_plot, shading='flat', cmap='twilight', norm=norm_src_plane)
+    else:
+        axes[1, 2].imshow(source_for_plot, origin='lower', extent=extent_src, cmap='twilight', norm=norm_src_plane)
+    _mark_point_sources(axes[1, 2], point_positions, 'source', legend=True)
     axes[1, 2].axhline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     axes[1, 2].axvline(0, color='gray', lw=0.8, ls=':', alpha=0.6)
     
@@ -934,6 +987,9 @@ def plot_composite_2x3_panel(
     for a in axes.ravel():
         a.set_xlabel('arcsec')
         a.set_ylabel('arcsec')
+    for a in axes.ravel()[:5]:
+        a.set_xlim(extent_img[0], extent_img[1])
+        a.set_ylim(extent_img[2], extent_img[3])
 
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
@@ -962,6 +1018,7 @@ def plot_multiband_composite(
     for row, band in enumerate(band_results):
         lens_image = band['lens_image']
         kwargs_result = band['kwargs_result']
+        point_positions = _point_source_positions(lens_image, kwargs_result)
         image_data = np.asarray(band['image_data'])
         noise_map = np.asarray(band['noise_map'])
         pixel_scale = float(band['pixel_scale'])
@@ -999,7 +1056,14 @@ def plot_multiband_composite(
 
         _, pixelated_source = _pixelated_source_entry(kwargs_result)
         source_pixels = None if pixelated_source is None else pixelated_source.get('pixels')
-        if source_pixels is not None and getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+        is_rtu = source_pixels is not None and bool(getattr(lens_image, '_rtu_grid_source', False))
+        rtu_x = rtu_y = None
+        if is_rtu:
+            source_pixels = np.asarray(source_pixels)
+            rtu_x, rtu_y = lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens'))
+            rtu_x, rtu_y = np.asarray(rtu_x), np.asarray(rtu_y)
+            extent_src = [float(rtu_x.min()), float(rtu_x.max()), float(rtu_y.min()), float(rtu_y.max())]
+        elif source_pixels is not None and getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             source_pixels = np.asarray(source_pixels)
             _, _, extent_src = lens_image.get_source_coordinates(
                 kwargs_result.get('kwargs_lens'), npix_src=source_pixels.shape[0],
@@ -1026,7 +1090,7 @@ def plot_multiband_composite(
         # The source-arc mask defines the source-plane display support.  Use
         # only its largest image-plane contour, i.e. the outer boundary.
         mapped_ring_contours = []
-        if image_mask is not None:
+        if image_mask is not None and not is_rtu:
             try:
                 mask_arr = np.asarray(image_mask).astype(bool)
                 if np.any(mask_arr) and not np.all(mask_arr):
@@ -1101,9 +1165,16 @@ def plot_multiband_composite(
                 image = axis.imshow(values, origin='lower', extent=extent_img, cmap='twilight')
             if image_mask is not None:
                 axis.contour(image_mask, levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
+            _mark_point_sources(axis, point_positions, 'image', legend=column == 0)
+            axis.set_xlim(extent_img[0], extent_img[1])
+            axis.set_ylim(extent_img[2], extent_img[3])
 
         source_axis = axes[row, 5]
-        source_axis.imshow(source_pixels, origin='lower', extent=extent_src, cmap='twilight')
+        if is_rtu:
+            source_axis.pcolormesh(rtu_x, rtu_y, source_pixels, shading='flat', cmap='twilight')
+        else:
+            source_axis.imshow(source_pixels, origin='lower', extent=extent_src, cmap='twilight')
+        _mark_point_sources(source_axis, point_positions, 'source', legend=True)
         if inside_mask is not None:
             try:
                 source_axis.contourf(
@@ -1124,6 +1195,8 @@ def plot_multiband_composite(
             pass
         for beta_x, beta_y in mapped_ring_contours:
             source_axis.plot(beta_x, beta_y, color='orange', lw=1.5, ls='--', alpha=0.95)
+        source_axis.set_xlim(extent_src[0], extent_src[1])
+        source_axis.set_ylim(extent_src[2], extent_src[3])
         support_bounds = getattr(lens_image, 'source_support_bounds', None)
         if support_bounds is not None:
             xmin, xmax, ymin, ymax = [float(value) for value in support_bounds]
@@ -1264,9 +1337,16 @@ def plot_multiband_source_reconstructions(band_results, save_path, output_filena
     for row, band in enumerate(pixelated_bands):
         lens_image = band['lens_image']
         kwargs_result = band['kwargs_result']
+        point_positions = _point_source_positions(lens_image, kwargs_result)
         _, pixelated_source = _pixelated_source_entry(kwargs_result)
         source_pixels = np.asarray(pixelated_source['pixels'])
-        if getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
+        is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
+        rtu_x = rtu_y = None
+        if is_rtu:
+            rtu_x, rtu_y = lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens'))
+            rtu_x, rtu_y = np.asarray(rtu_x), np.asarray(rtu_y)
+            extent = [float(rtu_x.min()), float(rtu_x.max()), float(rtu_y.min()), float(rtu_y.max())]
+        elif getattr(lens_image, '_src_adaptive_grid', False) and hasattr(lens_image, 'get_source_coordinates'):
             _, _, extent = lens_image.get_source_coordinates(
                 kwargs_result.get('kwargs_lens'), npix_src=source_pixels.shape[0],
                 source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
@@ -1276,7 +1356,11 @@ def plot_multiband_source_reconstructions(band_results, save_path, output_filena
             extent = list(lens_image.SourceModel.pixel_grid.extent)
 
         axis = axes[row, 0]
-        image = axis.imshow(source_pixels, origin='lower', extent=extent, cmap='twilight')
+        image = (
+            axis.pcolormesh(rtu_x, rtu_y, source_pixels, shading='flat', cmap='twilight')
+            if is_rtu else axis.imshow(source_pixels, origin='lower', extent=extent, cmap='twilight')
+        )
+        _mark_point_sources(axis, point_positions, 'source', legend=True)
         try:
             _, caustics = model_util.critical_lines_caustics(
                 lens_image, kwargs_result['kwargs_lens'], supersampling=5,
@@ -1286,6 +1370,8 @@ def plot_multiband_source_reconstructions(band_results, save_path, output_filena
                 axis.plot(caustic_x, caustic_y, color='lime', lw=1.0)
         except Exception:
             pass
+        axis.set_xlim(extent[0], extent[1])
+        axis.set_ylim(extent[2], extent[3])
         axis.set_title(f"{band['name']} Initial Source Reconstruction")
         axis.set_xlabel('arcsec')
         axis.set_ylabel('arcsec')
@@ -1305,6 +1391,7 @@ def plot_lens_light_subtracted_image(
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
+    point_positions = _point_source_positions(lens_image, kwargs_result)
 
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
@@ -1326,6 +1413,7 @@ def plot_lens_light_subtracted_image(
 
     norm_0, label_0 = _norm_from_plot_scale(plot_scale, image_data)
     im0 = ax[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_0)
+    _mark_point_sources(ax[0], point_positions, 'image', legend=True)
     if mask is not None:
         ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
     ax[0].set_title('Image data')
@@ -1334,6 +1422,7 @@ def plot_lens_light_subtracted_image(
 
     norm_1, label_1 = _norm_from_plot_scale(plot_scale, model_lens_light)
     im1 = ax[1].imshow(model_lens_light, origin='lower', cmap='twilight', extent=extent, norm=norm_1)
+    _mark_point_sources(ax[1], point_positions, 'image')
     
     # Overlay 1-sigma contours for Gaussian/MGE components (if present)
     if 'kwargs_lens_light' in kwargs_result:
@@ -1399,6 +1488,9 @@ def plot_lens_light_subtracted_image(
     for a in ax:
         a.set_xlabel('arcsec')
         a.set_ylabel('arcsec')
+        a.set_xlim(extent[0], extent[1])
+        a.set_ylim(extent[2], extent[3])
+    _mark_point_sources(ax[2], point_positions, 'image')
 
     plt.tight_layout()
     suffix = '_log' if plot_scale == 'log' else ''
@@ -1422,6 +1514,7 @@ def plot_ring_model_comparison(
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
+    point_positions = _point_source_positions(lens_image, kwargs_result)
 
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
@@ -1483,11 +1576,14 @@ def plot_ring_model_comparison(
             vmin=vmin,
             vmax=vmax,
         )
+        _mark_point_sources(axes[idx], point_positions, 'image', legend=idx == 0)
         if mask is not None:
             axes[idx].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
         axes[idx].set_xlabel('arcsec')
         axes[idx].set_ylabel('arcsec')
         axes[idx].set_title(title)
+        axes[idx].set_xlim(extent[0], extent[1])
+        axes[idx].set_ylim(extent[2], extent[3])
         plt.colorbar(im, ax=axes[idx], label=cbar_label)
 
     plt.tight_layout()
@@ -1743,6 +1839,7 @@ def display_init(
         savefilename=os.path.join(save_path, 'initial_guess_model.png'),
         contour_mask=mask,
         residual_vis_max=residual_vis_max,
+        point_source_positions=_point_source_positions(lens_image, kwargs_init),
     )
 
     _, pixelated_source = _pixelated_source_entry(kwargs_init)
@@ -2346,6 +2443,7 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
     if image.ndim != 2:
         raise ValueError('image_data must be a two-dimensional image.')
     kwargs_lens = kwargs_result.get('kwargs_lens', [])
+    point_positions = _point_source_positions(lens_image, kwargs_result)
     if not kwargs_lens:
         raise ValueError('kwargs_result must contain a non-empty kwargs_lens list.')
     x_map, y_map, kappa, inverse_magnification = _mass_grid_maps(
@@ -2371,6 +2469,7 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
 
     figure, axes = plt.subplots(1, 2, figsize=(13, 6), constrained_layout=True)
     axes[0].imshow(displayed_image, origin='lower', extent=extent, cmap='gray')
+    _mark_point_sources(axes[0], point_positions, 'image')
     axes[0].set_title('Observed image with mass convergence contours')
     if kappa_levels:
         axes[0].contour(x_map, y_map, kappa, levels=kappa_levels,
@@ -2378,6 +2477,7 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
 
     mass_image = axes[1].imshow(kappa, origin='lower', extent=extent, cmap=cmap_kappa,
                                 norm=norm_kappa)
+    _mark_point_sources(axes[1], point_positions, 'image', legend=True)
     axes[1].set_title(r'Total convergence $\kappa$ with image isophotes')
     if iso_levels.size > 1:
         axes[1].contour(x_map, y_map, image, levels=iso_levels,
@@ -2395,6 +2495,8 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
         axis.plot(center_x, center_y, marker='+', color='lime', markersize=10,
                   markeredgewidth=1.8)
         axis.set(xlabel='arcsec', ylabel='arcsec', aspect='equal')
+        axis.set_xlim(extent[0], extent[1])
+        axis.set_ylim(extent[2], extent[3])
     axes[0].legend(handles=[
         Line2D([], [], color='cyan', label=r'Mass $\kappa$ contours'),
         Line2D([], [], color='white', label='Image isophotes'),
@@ -2429,6 +2531,7 @@ def plot_multiband_mass_light_overlay(
         name = str(band.get('name', f'band {row}'))
         lens_image = band['lens_image']
         kwargs_result = band['kwargs_result']
+        point_positions = _point_source_positions(lens_image, kwargs_result)
         image = np.asarray(band['image_data'], dtype=float)
         if image.ndim != 2:
             raise ValueError(f"{name}: image_data must be two-dimensional.")
@@ -2457,12 +2560,14 @@ def plot_multiband_mass_light_overlay(
         cmap_kappa = 'magma' if np.nanmin(kappa) >= 0 else 'coolwarm'
         image_axis, mass_axis = axes[row]
         image_axis.imshow(displayed_image, origin='lower', extent=extent, cmap='gray')
+        _mark_point_sources(image_axis, point_positions, 'image')
         image_axis.set_title(f'{name}: observed image with mass convergence contours')
         if kappa_levels:
             image_axis.contour(x_map, y_map, kappa, levels=kappa_levels,
                                colors='cyan', linewidths=1.2)
         mass_image = mass_axis.imshow(kappa, origin='lower', extent=extent,
                                       cmap=cmap_kappa, norm=norm_kappa)
+        _mark_point_sources(mass_axis, point_positions, 'image', legend=True)
         mass_axis.set_title(rf'{name}: total convergence $\kappa$ with image isophotes')
         if iso_levels.size > 1:
             mass_axis.contour(x_map, y_map, image, levels=iso_levels,
@@ -2479,6 +2584,8 @@ def plot_multiband_mass_light_overlay(
             axis.plot(center_x, center_y, marker='+', color='lime', markersize=10,
                       markeredgewidth=1.8)
             axis.set(xlabel='arcsec', ylabel='arcsec', aspect='equal')
+            axis.set_xlim(extent[0], extent[1])
+            axis.set_ylim(extent[2], extent[3])
         if row == 0:
             image_axis.legend(handles=[
                 Line2D([], [], color='cyan', label=r'Mass $\kappa$ contours'),
@@ -2506,6 +2613,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
     """
     if lens_mass_summary is None:
         lens_mass_summary = lens_mass_ellipticity_summary(lens_image, kwargs_result)
+    point_positions = _point_source_positions(lens_image, kwargs_result)
     nx, ny = lens_image.Grid.num_pixel_axes
     x_grid_img, y_grid_img = lens_image.Grid.pixel_coordinates
     kwargs_lens = kwargs_result.get('kwargs_lens', [])
@@ -2579,6 +2687,7 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
                     cline_x, cline_y, color='cyan', lw=1.5,
                     label='Critical lines' if line_index == 0 else None,
                 )
+            _mark_point_sources(ax_kappa, point_positions, 'image')
             if crit_lines:
                 ax_kappa.legend(loc='upper right', fontsize=8)
         plt.colorbar(im_kappa, ax=ax_kappa, label=cbar_label_kappa)
@@ -2598,6 +2707,10 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
         if is_total:
             for cline_x, cline_y in crit_lines:
                 ax_mag.plot(cline_x, cline_y, color='red', lw=1.5)
+            _mark_point_sources(ax_mag, point_positions, 'image', legend=True)
+            for axis in (ax_kappa, ax_mag):
+                axis.set_xlim(extent[0], extent[1])
+                axis.set_ylim(extent[2], extent[3])
         plt.colorbar(im_mag, ax=ax_mag, label=r'$|\mu|$ (log scale)')
 
         radii, radial_mean, radial_p16, radial_p84 = _radial_kappa_statistics(kappa_map, radius_map)
@@ -2754,6 +2867,7 @@ def generate_run_plots(
         plot_scale='linear',
         contour_mask=mask,
         residual_vis_max=residual_vis_max,
+        point_source_positions=_point_source_positions(lens_image, kwargs_best),
     ))
 
     _try('best_fit_model_log.png', lambda: display(
@@ -2768,6 +2882,7 @@ def generate_run_plots(
         plot_scale='log',
         contour_mask=mask,
         residual_vis_max=residual_vis_max,
+        point_source_positions=_point_source_positions(lens_image, kwargs_best),
     ))
 
     _try('composite.png', lambda: plot_composite_2x3_panel(

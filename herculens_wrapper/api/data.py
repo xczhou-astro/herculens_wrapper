@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping, Sequence
 import numpy as np
 
 
@@ -488,7 +488,8 @@ class SingleBandData:
         return np.where(mask, rms, 1e10) if mask is not None else rms
 
     def show(self, *, scale: str = "linear", residual_vis_max: float = 0.0,
-             save_path: str | Path | None = None):
+             save_path: str | Path | None = None,
+             point_source_positions: Sequence[Mapping[str, Any]] | None = None):
         """Display image, noise, signal-to-noise, and PSF; optionally save.
 
         Parameters
@@ -498,6 +499,12 @@ class SingleBandData:
             symmetric-log scaling so background-subtracted data remain visible.
         save_path
             Destination image path.  ``None`` (the default) does not save.
+        point_source_positions
+            Optional ``[{"ra": [...], "dec": [...]}, ...]`` image positions
+            in arcsec, grouped by point source.
         """
         from .visualization import plot_single_band_data
-        return plot_single_band_data(self, scale=scale, residual_vis_max=residual_vis_max, save_path=save_path)
+        return plot_single_band_data(
+            self, scale=scale, residual_vis_max=residual_vis_max,
+            save_path=save_path, point_source_positions=point_source_positions,
+        )
