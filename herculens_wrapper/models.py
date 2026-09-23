@@ -549,6 +549,8 @@ def _normalize_link_spec(param):
     """
     Convert a correlation spec into canonical (component, index, key).
     Component names are normalized to lenstronomy constraint groups.
+    ``lens_light`` index ``flux_centroid`` selects the total Gaussian-light
+    centroid instead of one lens-light component.
     Returns None if param is not a correlation spec.
     """
     if _is_correlated_param(param):
@@ -565,16 +567,35 @@ def _normalize_link_spec(param):
         }
         if comp not in comp_map:
             raise ValueError(f"Unknown correlated component '{comp}'. Expected one of {sorted(comp_map.keys())}.")
+        if idx == 'flux_centroid':
+            if comp_map[comp] != 'lens_light' or key not in ('center_x', 'center_y'):
+                raise ValueError(
+                    "A flux_centroid link requires lens_light and center_x or center_y."
+                )
+            return ('lens_light', 'flux_centroid', str(key))
         return (comp_map[comp], int(idx), str(key))
 
     return None
 
 def _resolve_link(bank, spec, *, context=""):
-    """Resolve (component, index, key) against already-built component dicts."""
+    """Resolve a linked value, including a flux-weighted MGE light centroid."""
     comp, idx, key = spec
     if comp not in bank:
         raise ValueError(f"Cannot resolve linked param {spec} ({context}): component '{comp}' not available yet.")
     arr = bank[comp]
+    if comp == 'lens_light' and idx == 'flux_centroid':
+        if not arr:
+            raise ValueError(f"Cannot resolve linked param {spec} ({context}): lens_light is empty.")
+        for light_index, light in enumerate(arr):
+            missing = {'amp', key}.difference(light)
+            if missing:
+                raise ValueError(
+                    f"Cannot resolve linked param {spec} ({context}): "
+                    f"lens_light[{light_index}] is missing {sorted(missing)}."
+                )
+        amps = jnp.stack([jnp.asarray(light['amp']) for light in arr])
+        centers = jnp.stack([jnp.asarray(light[key]) for light in arr])
+        return jnp.sum(amps * centers) / jnp.sum(amps)
     if idx < 0 or idx >= len(arr):
         raise IndexError(
             f"Cannot resolve linked param {spec} ({context}): index {idx} out of range for component '{comp}' "
@@ -816,6 +837,7 @@ def _mass_phi_m_rad_to_deg(phi_m, m, *, phi_specification=None):
 
 def param_list_to_init_kwargs(param_list, type_list, lens_image):
     kwargs = {}
+    pending_lens_light_links = []
     
     # 1. Lens mass
     kwargs['kwargs_lens'] = []
@@ -824,6 +846,10 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
         kwargs_model = {}
         for k, v in model.items():
             if k == _STELLAR_LENS_LIGHT_INDICES:
+                continue
+            link_spec = _normalize_link_spec(v)
+            if link_spec is not None and link_spec[0] == 'lens_light' and link_spec[1] == 'flux_centroid':
+                pending_lens_light_links.append((index, k, link_spec))
                 continue
             if isinstance(v, (list, tuple)):
                 kwargs_model[k] = v[0]
@@ -849,6 +875,12 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
             else:
                 kwargs_model[k] = v
         kwargs['kwargs_lens_light'].append(kwargs_model)
+
+    for index, key, link_spec in pending_lens_light_links:
+        kwargs['kwargs_lens'][index][key] = _resolve_link(
+            {'lens_light': kwargs['kwargs_lens_light']}, link_spec,
+            context=f"initial lens_mass[{index}].{key}",
+        )
 
     for index, model in enumerate(param_list.get('lens_mass_params_list', [])):
         if _is_dynamic_stellar_definition(model):
@@ -2925,6 +2957,27 @@ def validate_param_list(type_list, param_list):
 
     _single_pixelated_index(type_list.get('lens_light_type_list', []), 'lens-light')
     _single_pixelated_index(type_list.get('source_light_type_list', []), 'source-light')
+
+    centroid_links = [
+        (index, key)
+        for index, profile in enumerate(param_list.get('lens_mass_params_list', []))
+        for key, value in profile.items()
+        if (link_spec := _normalize_link_spec(value)) is not None
+        and link_spec[:2] == ('lens_light', 'flux_centroid')
+    ]
+    if centroid_links:
+        light_types = type_list.get('lens_light_type_list', [])
+        if not light_types or any(str(name).upper() != 'GAUSSIAN_ELLIPSE' for name in light_types):
+            raise ValueError(
+                "A lens_light flux_centroid link requires exclusively "
+                "GAUSSIAN_ELLIPSE lens-light components."
+            )
+        for index, profile in enumerate(param_list['lens_light_params_list']):
+            missing = {'amp', 'center_x', 'center_y'}.difference(profile)
+            if missing:
+                raise ValueError(
+                    f"lens_light[{index}] is missing {sorted(missing)} for a flux_centroid link."
+                )
 
     for index, (profile_type, params) in enumerate(zip(
         type_list.get("lens_mass_type_list", []),

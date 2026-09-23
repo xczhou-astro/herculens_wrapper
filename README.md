@@ -147,6 +147,19 @@ halo = NFWEllipseHalo(prior={
 `GNFWHaloMGE` 是另一个、具有不同 outer-transition 定义的 profile，不能通过
 固定其参数来替代这个标准 NFW。
 
+若 lens light 是一组 `GAUSSIAN_ELLIPSE`，可以让 halo 中心等于整组 MGE 的
+光通量加权中心（`amp` 是各 Gaussian 的积分通量）：
+
+```python
+halo.center_x.prior = ["correlated", "lens_light", "flux_centroid", "center_x"]
+halo.center_y.prior = ["correlated", "lens_light", "flux_centroid", "center_y"]
+```
+
+计算使用当前采样值：`center_x = sum(amp_i * center_x_i) / sum(amp_i)`，
+`center_y` 同理。这个链接不额外采样 halo 中心；如果 lens light 在后续阶段
+固定，halo 中心也会随之固定。此链接要求 `lens_light` 全部由
+`GAUSSIAN_ELLIPSE` 组成。
+
 ### EPL-referenced multipole phase
 
 `MPPL_OFFSET` samples a relative multipole phase while keeping it close to an
