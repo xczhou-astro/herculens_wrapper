@@ -1061,7 +1061,7 @@ def plot_multiband_composite(
         model_lensed_source = band.get('model_lensed_source')
         if model_lensed_source is None:
             model_lensed_source = lens_image.model(
-                **kwargs_result, lens_light_add=False, source_add=True, point_source_add=False,
+                **kwargs_result, lens_light_add=False, source_add=True, point_source_add=True,
             )
         model_lensed_source = np.asarray(model_lensed_source)
 
@@ -1230,7 +1230,11 @@ def plot_multiband_composite(
             if column == 2:
                 axis.set_title(f'Residual (chi^2 = {chi2:.2f})')
             elif row == 0:
-                axis.set_title(panel_titles[column])
+                axis.set_title(
+                    'Lensed Source + Point Sources'
+                    if column == 4 and kwargs_result.get('kwargs_point_source')
+                    else panel_titles[column]
+                )
             axis.set_xlabel('arcsec')
             axis.set_ylabel('arcsec')
         axes[row, 0].set_ylabel(f"{band['name']}\narcsec")
@@ -1332,7 +1336,7 @@ def plot_hmc_chain_comparison(
             'noise_map': noise_map,
             'pixel_scale': pixel_scale,
             'model_lens_light': component_medians['lens_light'],
-            'model_lensed_source': component_medians['source'],
+            'model_lensed_source': component_medians['no_lens_light'],
             'model_total': component_medians['total'],
         })
 

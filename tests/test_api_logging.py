@@ -607,3 +607,39 @@ def test_composite_lensed_source_includes_point_flux(monkeypatch, tmp_path, use_
         assert (tmp_path / "composite.png").is_file()
     finally:
         original_close(plots.plt.gcf())
+
+
+@pytest.mark.parametrize("use_override", [False, True])
+def test_svi_run_comparison_lensed_source_includes_point_flux(monkeypatch, tmp_path, use_override):
+    from herculens_wrapper import visualizations as plots
+
+    _mock_plot_geometry(monkeypatch, plots)
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda *_args, **_kwargs: None)
+    band = {
+        "name": "Run 0",
+        "lens_image": _mock_plot_lens_image(),
+        "kwargs_result": {
+            "kwargs_lens": [],
+            "kwargs_source": [{"pixels": np.ones((3, 3))}],
+            "kwargs_point_source": [{"amp": [1.0]}],
+        },
+        "image_data": np.full((3, 3), 10.0),
+        "noise_map": np.ones((3, 3)),
+        "pixel_scale": 0.1,
+    }
+    if use_override:
+        band["model_lensed_source"] = np.full((3, 3), 11.0)
+    try:
+        plots.plot_multiband_composite(
+            [band], str(tmp_path), output_filename="svi_run_comparison.png",
+        )
+        figure = plots.plt.gcf()
+        lensed_source = next(axis for axis in figure.axes if axis.get_title() == "Lensed Source + Point Sources")
+        np.testing.assert_allclose(
+            lensed_source.images[0].get_array(),
+            11.0 if use_override else 7.0,
+        )
+        assert (tmp_path / "svi_run_comparison.png").is_file()
+    finally:
+        original_close(plots.plt.gcf())

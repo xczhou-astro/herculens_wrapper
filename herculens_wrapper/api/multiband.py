@@ -389,7 +389,7 @@ class MultiBandFitResult:
                                  "image_data": band["image_data"], "noise_map": output_noise,
                                  "pixel_scale": self._model.observations[name].pixel_scale,
                                  "model_total": components["total"] if components is not None else None,
-                                 "model_lensed_source": components["source"] if components is not None else None,
+                                 "model_lensed_source": components["no_lens_light"] if components is not None else None,
                                  "model_lens_light": components["lens_light"] if components is not None else None})
             arrays.update({f"{name}_best_fit_model": best, f"{name}_image_data": band["image_data"],
                            f"{name}_noise_map": output_noise, f"{name}_fit_mask_bool": valid})
@@ -1219,7 +1219,7 @@ class MultiBandModel:
                 "image_data": band["image_data"], "noise_map": band["noise_map"],
                 "pixel_scale": self.observations[name].pixel_scale,
                 "model_total": components_by_band[name]["total"],
-                "model_lensed_source": components_by_band[name]["source"],
+                "model_lensed_source": components_by_band[name]["no_lens_light"],
                 "model_lens_light": components_by_band[name]["lens_light"],
             })
             self._plot_hmc_chain_comparison(
@@ -1395,7 +1395,7 @@ class MultiBandModel:
                 "noise_map": band["noise_map"],
                 "pixel_scale": self.observations[band["name"]].pixel_scale,
                 "model_total": components["total"],
-                "model_lensed_source": components["source"],
+                "model_lensed_source": components["no_lens_light"],
                 "model_lens_light": components["lens_light"],
             })
         plot_multiband_composite(

@@ -776,7 +776,7 @@ def _save_multiband_hmc_batch_diagnostics(
             'noise_map': band['noise_map'],
             'pixel_scale': band['pixel_scale'],
             'model_lens_light': component_medians['lens_light'],
-            'model_lensed_source': component_medians['source'],
+            'model_lensed_source': component_medians['no_lens_light'],
             'model_total': component_medians['total'],
         })
         try:
@@ -1533,7 +1533,7 @@ def build_and_run_multiband(config_path=None):
                     component_medians.get('lens_light') if component_medians else None
                 ),
                 'model_lensed_source': (
-                    component_medians.get('source') if component_medians else None
+                    component_medians.get('no_lens_light') if component_medians else None
                 ),
                 'model_total': component_medians.get('total') if component_medians else None,
             })
