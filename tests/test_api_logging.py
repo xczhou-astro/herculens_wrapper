@@ -349,3 +349,160 @@ def test_mge_collection_can_be_combined_with_pixelated_lens_light():
     assert [profile.profile_type for profile in profiles.lens_light] == [
         "GAUSSIAN_ELLIPSE", "GAUSSIAN_ELLIPSE", "GAUSSIAN_ELLIPSE", "PIXELATED",
     ]
+
+
+def test_mass_light_warm_start_leaves_source_and_point_source_new(tmp_path):
+    """A no-point-source HMC must not supply the new source pixels."""
+    import json
+    import jax.numpy as jnp
+    from herculens_wrapper.models import get_init_params
+
+    class ProbabilityModel:
+        def get_sample(self, _key):
+            return {
+                "lens_theta_E_0": jnp.asarray(0.2),
+                "lens_light_amp_0": jnp.asarray(1.0),
+                "pixels_wn_source_grid": jnp.ones((2, 2)),
+                "n_source_grid": jnp.asarray([2.0]),
+                "rho_source_grid": jnp.asarray([3.0]),
+                "sigma_source_grid": jnp.asarray([4.0]),
+                "ps_ra_0": jnp.ones(4),
+                "ps_dec_0": jnp.ones(4),
+                "ps_amp_0": jnp.full(4, 5.0),
+            }
+
+    # A partial restore must not try to read these deliberately absent FITS.
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [{"theta_E": 0.4}],
+        "kwargs_lens_light": [{"amp": 10.0}],
+        "kwargs_source": [{
+            "pixels": {"_format": "pixelated_pixels_fits", "file": "missing.fits"},
+            "pixels_wn": {"_format": "pixelated_pixels_fits", "file": "missing_wn.fits"},
+            "n_source_grid": 50.0,
+            "rho_source_grid": 60.0,
+            "sigma_source_grid": 70.0,
+        }],
+    }))
+    params = {
+        "lens_mass_params_list": [{"theta_E": [0.05, 0.6]}],
+        "lens_light_params_list": [{"amp": [2.0, 0.1]}],
+        "source_light_params_list": [{"pixels": None}],
+        "point_source_params_list": [{
+            "ra": [-0.3, -0.1, 0.1, 0.3],
+            "dec": [0.2, 0.4, -0.4, -0.2],
+            "n_images": 4,
+            "sigma_image": 0.003,
+            "amp": [0.2, 2.0],
+        }],
+    }
+    types = {
+        "lens_mass_type_list": ["SIE"],
+        "lens_light_type_list": ["GAUSSIAN"],
+        "source_light_type_list": ["PIXELATED"],
+        "point_source_type_list": ["IMAGE_POSITIONS"],
+    }
+
+    initial = get_init_params(
+        ProbabilityModel(), params, types, init_params_path=tmp_path,
+        restore_components=("lens_mass", "lens_light"),
+    )
+
+    assert float(initial["lens_theta_E_0"]) == 0.4
+    assert float(initial["lens_light_amp_0"]) == 10.0
+    np.testing.assert_array_equal(initial["pixels_wn_source_grid"], np.ones((2, 2)))
+    assert float(initial["n_source_grid"][0]) == 2.0
+    assert float(initial["rho_source_grid"][0]) == 3.0
+    assert float(initial["sigma_source_grid"][0]) == 4.0
+    np.testing.assert_allclose(initial["ps_ra_0"], params["point_source_params_list"][0]["ra"])
+    np.testing.assert_allclose(initial["ps_dec_0"], params["point_source_params_list"][0]["dec"])
+    np.testing.assert_array_equal(initial["ps_amp_0"], np.full(4, 5.0))
+
+
+def test_image_match_warmup_keeps_mass_light_and_copies_point_source(monkeypatch, tmp_path):
+    """Warmup updates Matérn and point-source sites before the full SVI."""
+    import json
+    import jax.numpy as jnp
+    from types import SimpleNamespace
+    import herculens_wrapper.api.session as session
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({}))
+    types = {
+        "source_light_type_list": ["PIXELATED"],
+        "lens_light_type_list": ["GAUSSIAN"],
+    }
+    params = {"source_light_params_list": [{"pixelated_prior": {}}]}
+    recorded = {}
+    initial = {
+        "lens_theta_E_0": jnp.asarray(0.4),
+        "lens_light_amp_0": jnp.asarray(10.0),
+        "pixels_wn_source_grid": jnp.ones((2, 2)),
+        "n_source_grid": jnp.asarray([2.0]),
+        "rho_source_grid": jnp.asarray([3.0]),
+        "sigma_source_grid": jnp.asarray([4.0]),
+        "ps_ra_0": jnp.zeros(4),
+        "ps_amp_0": jnp.ones(4),
+    }
+
+    def get_init_params(_prob_model, _params, _types, **kwargs):
+        recorded["restore_components"] = kwargs["restore_components"]
+        return dict(initial)
+
+    def create_prob_model(*_args, **kwargs):
+        recorded["warmup_kwargs"] = kwargs
+        return object()
+
+    def run_svi(_prob_model, _image, _sampler, _initial, **_kwargs):
+        return {
+            "lens_theta_E_0": jnp.asarray(0.9),
+            "lens_light_amp_0": jnp.asarray(20.0),
+            "pixels_wn_source_grid": jnp.full((2, 2), 7.0),
+            "n_source_grid": jnp.asarray([8.0]),
+            "rho_source_grid": jnp.asarray([9.0]),
+            "sigma_source_grid": jnp.asarray([10.0]),
+            "ps_ra_0": jnp.full(4, 0.02),
+            "ps_amp_0": jnp.full(4, 6.0),
+        }, {}
+
+    monkeypatch.setattr(
+        session, "_model_backend",
+        lambda: (None, create_prob_model, get_init_params, None),
+    )
+    monkeypatch.setattr(session, "_sampler_backend", lambda: (None, None, run_svi))
+    model = SingleBandModel.__new__(SingleBandModel)
+    model.profiles = SimpleNamespace(
+        apply_initializations=lambda: False, lens_light=None,
+        warm_start_declarations=lambda: {},
+    )
+    model.definition = SimpleNamespace(
+        as_dicts=lambda: (types, params), update_values=lambda _values: None,
+    )
+    model.prob_model = SimpleNamespace(params2kwargs=lambda _values: {
+        "kwargs_lens": [{"theta_E": 0.4}],
+        "kwargs_lens_light": [{"amp": 10.0}],
+    })
+    model.lens_image = object()
+    model.data = SimpleNamespace(
+        likelihood_image=np.zeros((2, 2)),
+        likelihood_noise=np.ones((2, 2)), likelihood_mask=None,
+        exposure_time=None, background_rms=None, background_rms_prior=None,
+    )
+    model.likelihood_scale = 1.0
+
+    result = model.initialize(
+        init_lens_mass_light_path=tmp_path,
+        pixelated_init_match="image",
+        num_iterations_warmup=2,
+    )
+
+    assert recorded["restore_components"] == ("lens_mass", "lens_light")
+    assert recorded["warmup_kwargs"]["fix_lens_mass"]
+    assert recorded["warmup_kwargs"]["fix_lens_light"]
+    assert recorded["warmup_kwargs"]["init_params_path"] is None
+    assert float(result["lens_theta_E_0"]) == 0.4
+    assert float(result["lens_light_amp_0"]) == 10.0
+    np.testing.assert_array_equal(result["pixels_wn_source_grid"], np.full((2, 2), 7.0))
+    assert float(result["n_source_grid"][0]) == 8.0
+    assert float(result["rho_source_grid"][0]) == 9.0
+    assert float(result["sigma_source_grid"][0]) == 10.0
+    np.testing.assert_array_equal(result["ps_ra_0"], np.full(4, 0.02))
+    np.testing.assert_array_equal(result["ps_amp_0"], np.full(4, 6.0))
