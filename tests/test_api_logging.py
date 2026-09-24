@@ -643,3 +643,52 @@ def test_svi_run_comparison_lensed_source_includes_point_flux(monkeypatch, tmp_p
         assert (tmp_path / "svi_run_comparison.png").is_file()
     finally:
         original_close(plots.plt.gcf())
+
+
+def test_stellar_nfw_einstein_radius_written_to_mass_json(monkeypatch, tmp_path):
+    import json
+    from herculens_wrapper import visualizations as plots
+
+    class Grid:
+        num_pixel_axes = (101, 101)
+
+        def map_coord2pix(self, x, y):
+            return 50 + np.asarray(x) * 40, 50 + np.asarray(y) * 40
+
+    class MassModel:
+        profile_type_list = ['STELLAR_MGE', 'NFW_ELLIPSE_KAPPA', 'SHEAR']
+
+        def kappa(self, x, y, kwargs_lens):
+            return np.where(np.hypot(x, y) < 0.25, 1.2, 0.5)
+
+        def gamma(self, x, y, kwargs_lens):
+            radius = np.hypot(x, y)
+            return np.where(radius < 0.25, 0.2, 0.5), np.zeros_like(radius)
+
+    def circle(radius):
+        phi = np.linspace(0, 2 * np.pi, 200)
+        return radius * np.cos(phi), radius * np.sin(phi)
+
+    lens = SimpleNamespace(
+        Grid=SimpleNamespace(create_model_grid=lambda **_: Grid()),
+        MassModel=MassModel(),
+    )
+    kwargs = {'kwargs_lens': [{}, {'center_x': 0.0, 'center_y': 0.0}, {}]}
+    monkeypatch.setattr(
+        plots.model_util, 'critical_lines_caustics',
+        lambda *args, **kw: ([circle(0.15), circle(0.4)], []),
+    )
+    summary = plots.save_lens_mass_ellipticity_summary(lens, kwargs, tmp_path)
+    assert summary['einstein_radius']['status'] == 'ok'
+    assert summary['einstein_radius']['theta_E_eff_arcsec'] == pytest.approx(0.4, rel=2e-4)
+    saved = json.loads((tmp_path / 'lens_mass_parameters.json').read_text())
+    assert saved['einstein_radius'] == summary['einstein_radius']
+
+    x, y = circle(0.4)
+    monkeypatch.setattr(
+        plots.model_util, 'critical_lines_caustics',
+        lambda *args, **kw: ([(x[:100], y[:100])], []),
+    )
+    unavailable = plots.lens_mass_ellipticity_summary(lens, kwargs)['einstein_radius']
+    assert unavailable['status'] == 'not_found'
+    assert unavailable['theta_E_eff_arcsec'] is None

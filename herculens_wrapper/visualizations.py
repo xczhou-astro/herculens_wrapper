@@ -1979,6 +1979,88 @@ def _normalized_multipole_phase(phi_m, m):
     return float((phi_m + 0.5 * period) % period - 0.5 * period)
 
 
+def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supersampling=5):
+    """Circularized radius of the total tangential critical curve, in arcsec.
+
+    Both the stellar and NFW components (and any external shear) contribute to
+    the critical curve.  An open, edge-truncated, or radial curve must not be
+    mistaken for a measured Einstein radius.
+    """
+    halo_index = next(
+        (index for index, kind in enumerate(profile_types)
+         if str(kind).upper() in {'NFW', 'NFW_ELLIPSE_KAPPA'}), None,
+    )
+    result = {
+        'theta_E_eff_arcsec': None,
+        'area_arcsec2': None,
+        'definition': 'sqrt(area of the total tangential critical curve / pi)',
+        'status': 'not_found',
+        'supersampling': supersampling,
+    }
+    if halo_index is None or halo_index >= len(kwargs_lens):
+        result['status'] = 'missing_nfw_halo'
+        return result
+    halo = kwargs_lens[halo_index]
+    center = (float(np.asarray(halo.get('center_x', 0.0))),
+              float(np.asarray(halo.get('center_y', 0.0))))
+    result['reference_center_arcsec'] = list(center)
+
+    try:
+        grid = lens_image.Grid.create_model_grid(pixel_scale_factor=1.0 / supersampling)
+        nx, ny = grid.num_pixel_axes
+        lines, _ = model_util.critical_lines_caustics(
+            lens_image, kwargs_lens, supersampling=supersampling,
+        )
+    except Exception as error:
+        result['status'] = 'calculation_failed'
+        result['reason'] = str(error)
+        return result
+
+    from matplotlib.path import Path
+
+    candidates = []
+    for x_values, y_values in lines:
+        x, y = np.asarray(x_values, dtype=float), np.asarray(y_values, dtype=float)
+        if len(x) < 4 or len(x) != len(y) or not np.all(np.isfinite(x)) or not np.all(np.isfinite(y)):
+            continue
+        pixel_x, pixel_y = grid.map_coord2pix(x, y)
+        pixel_x, pixel_y = np.asarray(pixel_x), np.asarray(pixel_y)
+        if np.hypot(pixel_x[0] - pixel_x[-1], pixel_y[0] - pixel_y[-1]) > 1.5:
+            continue
+        if (np.min(pixel_x) < 1 or np.max(pixel_x) > nx - 2
+                or np.min(pixel_y) < 1 or np.max(pixel_y) > ny - 2):
+            continue
+        if not Path(np.column_stack((x, y)), closed=True).contains_point(center):
+            continue
+
+        sample = np.linspace(0, len(x) - 1, min(16, len(x)), endpoint=False, dtype=int)
+        try:
+            kappa = np.asarray(lens_image.MassModel.kappa(x[sample], y[sample], kwargs_lens))
+            gamma1, gamma2 = lens_image.MassModel.gamma(x[sample], y[sample], kwargs_lens)
+        except Exception as error:
+            result['status'] = 'calculation_failed'
+            result['reason'] = str(error)
+            return result
+        shear = np.hypot(np.asarray(gamma1), np.asarray(gamma2))
+        if not np.all(np.isfinite(kappa)) or not np.all(np.isfinite(shear)):
+            continue
+        if np.median(np.abs(1 - kappa - shear)) > np.median(np.abs(1 - kappa + shear)):
+            continue  # Radial rather than tangential critical curve.
+
+        area = 0.5 * abs(np.dot(x, np.roll(y, -1)) - np.dot(y, np.roll(x, -1)))
+        if np.isfinite(area) and area > 0:
+            candidates.append(float(area))
+
+    if candidates:
+        area = max(candidates)
+        result['area_arcsec2'] = area
+        result['theta_E_eff_arcsec'] = float(np.sqrt(area / np.pi))
+        result['status'] = 'ok'
+    else:
+        result['reason'] = 'No closed tangential critical curve enclosing the halo centre lies fully inside the image grid.'
+    return result
+
+
 def lens_mass_ellipticity_summary(lens_image, kwargs_result):
     """Return API-facing, unit-explicit values for every lens-mass profile.
 
@@ -2166,7 +2248,13 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                     })
         profiles.append(profile)
 
-    return {'profiles': profiles}
+    summary = {'profiles': profiles}
+    normalized_types = {str(kind).upper() for kind in profile_types}
+    if 'STELLAR_MGE' in normalized_types and normalized_types.intersection({'NFW', 'NFW_ELLIPSE_KAPPA'}):
+        summary['einstein_radius'] = _stellar_nfw_einstein_radius(
+            lens_image, kwargs_result.get('kwargs_lens', []), profile_types,
+        )
+    return summary
 
 
 def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
@@ -2175,6 +2263,15 @@ def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
     output_path = os.path.join(save_path, 'lens_mass_parameters.json')
     with open(output_path, 'w') as f:
         json.dump(summary, f, indent=4)
+
+    einstein_radius = summary.get('einstein_radius')
+    if einstein_radius is not None:
+        if einstein_radius['status'] == 'ok':
+            print(f"[lens_mass_parameters] Total theta_E,eff="
+                  f"{einstein_radius['theta_E_eff_arcsec']:.6g} arcsec")
+        else:
+            print(f"[lens_mass_parameters] Total theta_E,eff unavailable: "
+                  f"{einstein_radius.get('reason', einstein_radius['status'])}")
 
     profiles = summary['profiles']
     if not profiles:

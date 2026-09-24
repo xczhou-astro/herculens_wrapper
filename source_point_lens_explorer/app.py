@@ -13,6 +13,7 @@ import argparse
 import json
 import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +29,7 @@ DEFAULT_RESULT_DIR = Path(
     "modelling/cowls_data/modelling_F150W_SIE/pixelated_hmc"
 )
 APP_ROOT = Path(__file__).resolve().parent
+SAVED_SOURCES_FILENAME = "point_source_lens_explorer_results.json"
 app = Flask(__name__, template_folder=str(APP_ROOT / "templates"))
 
 
@@ -250,6 +252,72 @@ def _all_images(model: ViewerData, beta_x: float, beta_y: float) -> list[dict[st
     return images
 
 
+def _saved_sources_path(result_dir: Path) -> Path:
+    return result_dir / SAVED_SOURCES_FILENAME
+
+
+def _read_saved_sources(result_dir: Path) -> tuple[dict | None, str | None]:
+    """Read saved explorer points without making a stale/corrupt file fatal."""
+    path = _saved_sources_path(result_dir)
+    if not path.is_file():
+        return None, None
+    try:
+        saved = json.loads(path.read_text())
+        if not isinstance(saved.get("point_sources"), list):
+            raise ValueError("missing point_sources list")
+        return saved, None
+    except Exception as error:
+        return None, f"Could not read {path.name}: {error}"
+
+
+def _validated_sources(model: ViewerData, sources: object) -> list[dict[str, float | str]]:
+    if not isinstance(sources, list) or not sources:
+        raise ValueError("At least one point source is required.")
+    x0, x1, y0, y1 = model.source_extent
+    output = []
+    for index, source in enumerate(sources, start=1):
+        if not isinstance(source, dict):
+            raise ValueError(f"Source {index} is not an object.")
+        x, y = float(source["x"]), float(source["y"])
+        amplitude = max(0.0, float(source.get("amplitude", 1.0)))
+        if not np.isfinite([x, y, amplitude]).all():
+            raise ValueError(f"Source {index} contains a non-finite value.")
+        if not (x0 <= x <= x1 and y0 <= y <= y1):
+            raise ValueError(f"Source {index} is outside the saved source-plane extent.")
+        output.append({"id": str(source.get("id") or f"ps-{index}"), "x": x, "y": y, "amplitude": amplitude})
+    return output
+
+
+def _saved_source_payload(model: ViewerData, sources: list[dict[str, float | str]]) -> dict:
+    x0, x1, y0, y1 = model.source_extent
+    point_sources = []
+    for index, source in enumerate(sources, start=1):
+        x, y, amplitude = float(source["x"]), float(source["y"]), float(source["amplitude"])
+        images = _all_images(model, x, y)
+        point_sources.append({
+            "id": source["id"],
+            "label": f"Point source {index}",
+            "source_plane_position_arcsec": {"beta_x": x, "beta_y": y},
+            "intrinsic_flux": amplitude,
+            "image_plane_images": [
+                {"theta_x": image["x"], "theta_y": image["y"], "magnification": image["mu"],
+                 "parity": "negative" if image["mu"] < 0 else "positive",
+                 "lensed_relative_flux": abs(image["mu"]) * amplitude}
+                for image in images
+            ],
+        })
+    return {
+        "schema_version": 1,
+        "model_result_dir": str(model.result_dir),
+        "saved_at": datetime.now(timezone.utc).isoformat(),
+        "source_plane": {
+            "extent_arcsec": [x0, x1, y0, y1],
+            "pixel_scale_arcsec": {"x": (x1 - x0) / model.source.shape[1], "y": (y1 - y0) / model.source.shape[0]},
+        },
+        "point_sources": point_sources,
+    }
+
+
 @app.get("/")
 def index():
     return render_template("index.html", default_result_dir=str(DEFAULT_RESULT_DIR))
@@ -261,7 +329,8 @@ def api_load():
     try:
         payload = request.get_json(silent=True) or {}
         ACTIVE = load_result(Path(payload.get("result_dir") or DEFAULT_RESULT_DIR))
-        return jsonify({
+        saved_sources, saved_sources_error = _read_saved_sources(ACTIVE.result_dir)
+        response = {
             "result_dir": str(ACTIVE.result_dir),
             "image": {"width": int(ACTIVE.image.shape[1]), "height": int(ACTIVE.image.shape[0]),
                       "pixels": _display(np.flipud(ACTIVE.image), logarithmic=False), "extent": ACTIVE.image_extent,
@@ -275,7 +344,12 @@ def api_load():
                     "pixels": ACTIVE.psf.ravel().tolist()},
             "pixel_scale": ACTIVE.pixel_scale,
             "lens": {"theta_E": ACTIVE.lens.sie["theta_E"], "q": ACTIVE.lens.q},
-        })
+            "saved_sources": saved_sources,
+            "saved_sources_file": SAVED_SOURCES_FILENAME if saved_sources else None,
+        }
+        if saved_sources_error:
+            response["saved_sources_error"] = saved_sources_error
+        return jsonify(response)
     except Exception as error:
         return jsonify({"message": str(error)}), 400
 
@@ -295,6 +369,26 @@ def api_trace():
                 "id": str(source["id"]), "images": _all_images(ACTIVE, x, y), "amplitude": amplitude,
             })
         return jsonify({"traces": response})
+    except Exception as error:
+        return jsonify({"message": str(error)}), 400
+
+
+@app.post("/api/save-sources")
+def api_save_sources():
+    if ACTIVE is None:
+        return jsonify({"message": "Please load a model first."}), 400
+    try:
+        payload = request.get_json(force=True)
+        requested_dir = Path(payload.get("result_dir") or ACTIVE.result_dir).resolve()
+        if requested_dir != ACTIVE.result_dir.resolve():
+            raise ValueError("Save location must be the currently loaded model-result directory.")
+        sources = _validated_sources(ACTIVE, payload.get("sources"))
+        saved = _saved_source_payload(ACTIVE, sources)
+        target = _saved_sources_path(ACTIVE.result_dir)
+        temporary = target.with_suffix(target.suffix + ".tmp")
+        temporary.write_text(json.dumps(saved, indent=2) + "\n")
+        temporary.replace(target)
+        return jsonify({"saved_file": str(target), "source_count": len(sources)})
     except Exception as error:
         return jsonify({"message": str(error)}), 400
 
