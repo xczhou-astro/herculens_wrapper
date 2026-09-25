@@ -18,6 +18,7 @@ from pathlib import Path
 
 import numpy as np
 from astropy.io import fits
+from contourpy import contour_generator
 from flask import Flask, jsonify, render_template, request
 from matplotlib import colormaps
 from scipy.ndimage import binary_erosion
@@ -99,6 +100,16 @@ class SIELens:
         ])
         return float(np.linalg.det(jacobian))
 
+    def inverse_magnification_grid(self, x: np.ndarray, y: np.ndarray, step: float = 1e-5) -> np.ndarray:
+        """Vectorized determinant of d(beta)/d(theta) for critical-curve finding."""
+        bx_p, by_p = self.ray_shoot(x + step, y)
+        bx_m, by_m = self.ray_shoot(x - step, y)
+        cx_p, cy_p = self.ray_shoot(x, y + step)
+        cx_m, cy_m = self.ray_shoot(x, y - step)
+        d_bx_dx, d_by_dx = (bx_p - bx_m) / (2 * step), (by_p - by_m) / (2 * step)
+        d_bx_dy, d_by_dy = (cx_p - cx_m) / (2 * step), (cy_p - cy_m) / (2 * step)
+        return d_bx_dx * d_by_dy - d_bx_dy * d_by_dx
+
 
 @dataclass
 class ViewerData:
@@ -111,6 +122,7 @@ class ViewerData:
     pixel_scale: float
     image_extent: list[float]
     source_extent: list[float]
+    caustics: list[list[list[float]]]
 
 
 ACTIVE: ViewerData | None = None
@@ -141,6 +153,24 @@ def _saved_source_pixel_scale(result_dir: Path) -> float | None:
         return None
     matches = re.findall(r"Source pixel scale:\s*([0-9.eE+-]+)\s*arcsec/pixel", log_path.read_text())
     return float(matches[-1]) if matches else None
+
+
+def _caustic_segments(lens: SIELens, image_extent: list[float]) -> list[list[list[float]]]:
+    """Ray-shoot the zero-determinant critical curve onto the source plane."""
+    x0, x1, y0, y1 = image_extent
+    x_axis, y_axis = np.linspace(x0, x1, 401), np.linspace(y0, y1, 401)
+    theta_x, theta_y = np.meshgrid(x_axis, y_axis)
+    determinant = lens.inverse_magnification_grid(theta_x, theta_y)
+    contours = contour_generator(x=x_axis, y=y_axis, z=determinant, name="serial").lines(0.0)
+    caustics = []
+    for critical_curve in contours:
+        if len(critical_curve) < 4:
+            continue
+        beta_x, beta_y = lens.ray_shoot(critical_curve[:, 0], critical_curve[:, 1])
+        finite = np.isfinite(beta_x) & np.isfinite(beta_y)
+        if np.count_nonzero(finite) >= 4:
+            caustics.append(np.column_stack([beta_x[finite], beta_y[finite]]).tolist())
+    return caustics
 
 
 def _lens_light_image(kwargs_lens_light: list[dict], shape: tuple[int, int], pixel_scale: float) -> np.ndarray:
@@ -192,6 +222,7 @@ def load_result(result_dir: Path) -> ViewerData:
     lens_light = _lens_light_image(result.get("kwargs_lens_light", []), image.shape, pixel_scale)
     height, width = image.shape
     half_x, half_y = width * pixel_scale / 2, height * pixel_scale / 2
+    image_extent = [-half_x, half_x, -half_y, half_y]
     source_extent = _source_extent(lens, mask, pixel_scale, float(config.get("source_grid_scale", 1.0)))
     saved_scale = _saved_source_pixel_scale(result_dir)
     if saved_scale is not None:
@@ -212,8 +243,9 @@ def load_result(result_dir: Path) -> ViewerData:
         ring=image - lens_light,
         psf=psf,
         pixel_scale=pixel_scale,
-        image_extent=[-half_x, half_x, -half_y, half_y],
+        image_extent=image_extent,
         source_extent=source_extent,
+        caustics=_caustic_segments(lens, image_extent),
     )
 
 
@@ -344,6 +376,7 @@ def api_load():
                     "pixels": ACTIVE.psf.ravel().tolist()},
             "pixel_scale": ACTIVE.pixel_scale,
             "lens": {"theta_E": ACTIVE.lens.sie["theta_E"], "q": ACTIVE.lens.q},
+            "caustics": ACTIVE.caustics,
             "saved_sources": saved_sources,
             "saved_sources_file": SAVED_SOURCES_FILENAME if saved_sources else None,
         }

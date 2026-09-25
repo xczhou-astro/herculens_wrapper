@@ -25,6 +25,7 @@ class SingleBandData:
     contaminate_mask_path: str | None = None
     background_offset: float = field(init=False, default=0.0)
     _input_paths: dict[str, Path] = field(init=False, repr=False, default_factory=dict)
+    _valid_data_mask: np.ndarray = field(init=False, repr=False)
 
     def __setattr__(self, name, value) -> None:
         """Keep cached masks consistent when notebook users edit data settings."""
@@ -95,6 +96,15 @@ class SingleBandData:
         if self.psf.ndim != 2: raise ValueError("psf must be a 2-D array.")
         self._apply_crop()
         self._apply_background_subtraction()
+        self._valid_data_mask = np.isfinite(self.image) & np.isfinite(self.noise) & (self.noise > 0)
+        if not np.any(self._valid_data_mask):
+            raise ValueError("image and noise contain no pixels with finite image values and positive finite noise.")
+        if not np.all(self._valid_data_mask):
+            # Herculens checks every noise pixel before applying the likelihood
+            # mask, so give excluded pixels finite placeholders in both arrays.
+            reference_noise = float(np.median(self.noise[self._valid_data_mask]))
+            self.image = np.where(self._valid_data_mask, self.image, 0.0)
+            self.noise = np.where(self._valid_data_mask, self.noise, reference_noise)
         self._source_arc_mask: np.ndarray | None = None
         self._contaminate_mask: np.ndarray | None = None
 
@@ -298,7 +308,13 @@ class SingleBandData:
             key: self._input_paths.get(key, Path(f"{key}.fits")).name
             for key in ("image", "noise", "psf")
         }
-        arrays = {"image": self.image, "noise": self.noise, "psf": self.psf}
+        # Preserve invalid pixels in exported FITS files so loading a saved
+        # observation reconstructs the same likelihood mask.
+        arrays = {
+            "image": np.where(self._valid_data_mask, self.image, np.nan),
+            "noise": np.where(self._valid_data_mask, self.noise, np.nan),
+            "psf": self.psf,
+        }
         output = {key: directory / name for key, name in names.items()}
         for key, filename in output.items():
             header = None
@@ -433,7 +449,9 @@ class SingleBandData:
     @property
     def likelihood_mask(self) -> np.ndarray | None:
         contaminate = self.contaminate_mask
-        return None if contaminate is None else ~contaminate
+        if contaminate is None and np.all(self._valid_data_mask):
+            return None
+        return self._valid_data_mask if contaminate is None else self._valid_data_mask & ~contaminate
 
     @property
     def likelihood_image(self) -> np.ndarray:

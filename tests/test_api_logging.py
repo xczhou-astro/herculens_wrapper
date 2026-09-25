@@ -81,6 +81,45 @@ def test_noise_map_and_poisson_noise_are_mutually_exclusive():
         )
 
 
+def test_nonfinite_pixels_are_excluded_before_building_the_noise_model(tmp_path):
+    from astropy.io import fits
+
+    image = np.ones((3, 3))
+    noise = np.full((3, 3), 0.2)
+    image[0, 1] = np.nan
+    noise[1, 1] = np.nan
+    noise[2, 1] = 0.0
+    data = SingleBandData(image=image, noise=noise, psf=np.eye(3), pixel_scale=0.1)
+
+    expected_mask = np.ones((3, 3), dtype=bool)
+    expected_mask[0, 1] = expected_mask[1, 1] = expected_mask[2, 1] = False
+    assert np.array_equal(data.likelihood_mask, expected_mask)
+    assert np.all(np.isfinite(data.likelihood_image))
+    assert np.all(data.likelihood_noise > 0)
+    assert np.all(data.likelihood_image[~expected_mask] == 0)
+    assert np.all(data.likelihood_noise[~expected_mask] == 1e10)
+    saved = data.save(tmp_path)
+    restored = SingleBandData.from_fits(
+        saved["image"], saved["noise"], saved["psf"], pixel_scale=0.1,
+    )
+    assert np.array_equal(restored.likelihood_mask, expected_mask)
+    contaminant = np.zeros((3, 3), dtype=np.uint8)
+    contaminant[0, 0] = 1
+    mask_path = tmp_path / "contaminant.fits"
+    fits.writeto(mask_path, contaminant)
+    data.contaminate_mask_path = str(mask_path)
+    expected_mask[0, 0] = False
+    assert np.array_equal(data.likelihood_mask, expected_mask)
+
+
+def test_no_usable_pixels_fail_with_clear_error():
+    with pytest.raises(ValueError, match="no pixels"):
+        SingleBandData(
+            image=np.full((3, 3), np.nan), noise=np.ones((3, 3)),
+            psf=np.eye(3), pixel_scale=0.1,
+        )
+
+
 def test_sampled_background_rms_is_a_single_likelihood_latent():
     import jax
     from numpyro import handlers
