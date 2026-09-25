@@ -2116,6 +2116,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                         model_composite_override=temp_comp_medians['total'],
                         model_no_lens_light_override=temp_comp_medians['no_lens_light'],
                         source_plane_override=temp_comp_medians.get('source_plane'),
+                        fit_mask_bool=getattr(prob_model, 'likelihood_mask', None),
                     )
                     print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
                 save_hmc_diagnostics(

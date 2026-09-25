@@ -1368,6 +1368,7 @@ class FitResult:
                 model.data.likelihood_image, model.data.likelihood_noise, str(directory),
                 residual_vis_max=residual_vis_max, output_filename=filename,
                 source_arc_mask=model.data.source_arc_mask,
+                fit_mask_bool=model.data.likelihood_mask,
             ), save_path, "composite.png",
         )
 
@@ -1395,6 +1396,7 @@ class FitResult:
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
                 model.data.likelihood_image, model.data.likelihood_noise, str(directory),
                 plot_scale=scale, residual_vis_max=residual_vis_max, output_filename=filename,
+                fit_mask_bool=model.data.likelihood_mask,
             ), save_path, "ring_model_comparison.png",
         )
 
@@ -1411,6 +1413,7 @@ class FitResult:
             model.lens_image, self._kwargs_result(), model.data.pixel_scale,
             model.data.likelihood_image, model.data.likelihood_noise, str(directory),
             plot_scale=scale, residual_vis_max=residual_vis_max,
+            fit_mask_bool=model.data.likelihood_mask,
         )
         generated = directory / f"lens_light_subtracted_image{suffix}.png"
         if generated != output:
@@ -1732,6 +1735,7 @@ class FitResult:
                 init_params=initial, param_list=parameter_lists,
                 residual_vis_max=residual_vis_max,
                 mcmc_component_medians=components,
+                fit_mask_bool=model.data.likelihood_mask,
                 num_chains_hmc=(
                     int(self.details.get("num_chains_hmc_numpyro", 1))
                     if self.samples is not None else None

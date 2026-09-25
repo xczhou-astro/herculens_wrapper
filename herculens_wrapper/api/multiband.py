@@ -382,6 +382,7 @@ class MultiBandFitResult:
                     param_list=band["param_list"], residual_vis_max=residual_vis_max,
                     mcmc_samples=self.samples,
                     mcmc_component_medians=components,
+                    fit_mask_bool=valid,
                     num_chains_hmc=int(self.details.get("num_chains_hmc_numpyro", 1)),
                 )
             except Exception as error: skipped[f"{name}_plots"] = str(error)

@@ -126,6 +126,17 @@ def _norm_from_plot_scale(plot_scale, arr):
     return None, 'linear'
 
 
+def _hide_excluded_pixels(values, fit_mask_bool):
+    """Hide likelihood-excluded pixels in diagnostics without changing model arrays."""
+    values = np.asarray(values)
+    if fit_mask_bool is None:
+        return values
+    valid = np.asarray(fit_mask_bool, dtype=bool)
+    if valid.shape != values.shape:
+        raise ValueError("fit_mask_bool must match the plotted image shape.")
+    return np.where(valid, values, np.nan)
+
+
 def _filter_caustics(caustics):
     if caustics is None or len(caustics) <= 1:
         return caustics
@@ -758,6 +769,7 @@ def plot_composite_2x3_panel(
     source_plane_override=None,
     source_arc_mask=None,
     model_no_lens_light_override=None,
+    fit_mask_bool=None,
 ):
     ny, nx = image_data.shape
     extent_img = _image_extent(ny, nx, pixel_scale)
@@ -803,9 +815,10 @@ def plot_composite_2x3_panel(
     else:
         model_composite = lens_image.model(**clean_kwargs, source_add=True, point_source_add=True, lens_light_add=True)
 
-    residuals = (model_composite - image_data) / noise_map
-    chi2 = float(np.sum(residuals ** 2))
-    subtracted = image_data - model_lens_light
+    residuals = _hide_excluded_pixels((model_composite - image_data) / noise_map, fit_mask_bool)
+    chi2 = float(np.nansum(residuals ** 2))
+    subtracted = _hide_excluded_pixels(image_data - model_lens_light, fit_mask_bool)
+    displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
 
     # 2. Evaluate source plane reconstruction
     _, pixelated_source = _pixelated_source_entry(kwargs_result)
@@ -928,14 +941,14 @@ def plot_composite_2x3_panel(
     # Render 2x3 panel plot with mixed scales: Data & Model in log scale; rest in linear scale. Colorbar ONLY on Residual.
     fig, axes = plt.subplots(2, 3, figsize=(18, 10))
 
-    norm_data, _ = _norm_from_plot_scale('log', image_data)
+    norm_data, _ = _norm_from_plot_scale('log', displayed_data)
     norm_model, _ = _norm_from_plot_scale('log', model_composite)
     norm_sub, _ = _norm_from_plot_scale('linear', subtracted)
     norm_src_lensed, _ = _norm_from_plot_scale('linear', model_lensed_source)
     norm_src_plane, _ = _norm_from_plot_scale('linear', source_for_plot)
 
     # Panel (0, 0): Data (Log scale, no colorbar)
-    axes[0, 0].imshow(image_data, origin='lower', extent=extent_img, cmap='twilight', norm=norm_data)
+    axes[0, 0].imshow(displayed_data, origin='lower', extent=extent_img, cmap='twilight', norm=norm_data)
     _mark_point_sources(axes[0, 0], point_positions, 'image', legend=True)
     if mask is not None:
         axes[0, 0].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
@@ -952,7 +965,7 @@ def plot_composite_2x3_panel(
     if residual_vis_max > 0.0:
         vmax_res = float(residual_vis_max)
     else:
-        vmax_res = float(np.max(np.abs(residuals)))
+        vmax_res = float(np.nanmax(np.abs(residuals)))
     im2 = axes[0, 2].imshow(residuals, origin='lower', extent=extent_img, cmap='bwr', vmin=-vmax_res, vmax=vmax_res)
     _mark_point_sources(axes[0, 2], point_positions, 'image')
     if mask is not None:
@@ -1413,6 +1426,7 @@ def plot_lens_light_subtracted_image(
     lens_image, kwargs_result, pixel_scale, image_data, noise_map=None, save_path=None,
     plot_scale='linear', residual_vis_max=0.0,
     model_lens_light_override=None,
+    fit_mask_bool=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -1431,13 +1445,14 @@ def plot_lens_light_subtracted_image(
     else:
         model_lens_light = np.zeros((ny, nx))
 
-    subtracted = image_data - model_lens_light
+    subtracted = _hide_excluded_pixels(image_data - model_lens_light, fit_mask_bool)
+    displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
     chi2_subtracted = float(np.nansum((subtracted / noise_map) ** 2)) if noise_map is not None else None
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
 
-    norm_0, label_0 = _norm_from_plot_scale(plot_scale, image_data)
-    im0 = ax[0].imshow(image_data, origin='lower', cmap='twilight', extent=extent, norm=norm_0)
+    norm_0, label_0 = _norm_from_plot_scale(plot_scale, displayed_data)
+    im0 = ax[0].imshow(displayed_data, origin='lower', cmap='twilight', extent=extent, norm=norm_0)
     _mark_point_sources(ax[0], point_positions, 'image', legend=True)
     if mask is not None:
         ax[0].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
@@ -1492,7 +1507,7 @@ def plot_lens_light_subtracted_image(
         res_data = subtracted / noise_map
         vmax_res = (
             float(residual_vis_max)
-            if residual_vis_max > 0.0 else float(np.max(np.abs(res_data)))
+            if residual_vis_max > 0.0 else float(np.nanmax(np.abs(res_data)))
         )
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
@@ -1502,7 +1517,7 @@ def plot_lens_light_subtracted_image(
     else:
         vmax_res = (
             float(residual_vis_max)
-            if residual_vis_max > 0.0 else float(np.max(np.abs(subtracted)))
+            if residual_vis_max > 0.0 else float(np.nanmax(np.abs(subtracted)))
         )
         im2 = ax[2].imshow(subtracted, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
@@ -1536,6 +1551,7 @@ def plot_ring_model_comparison(
     output_filename=None,
     model_no_lens_light_override=None,
     model_lens_light_override=None,
+    fit_mask_bool=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -1568,7 +1584,10 @@ def plot_ring_model_comparison(
         )
 
     image_minus_lens = np.asarray(image_data) - model_lens_light
-    residual = (model_no_lens_light - image_minus_lens) / noise_map
+    residual = _hide_excluded_pixels(
+        (model_no_lens_light - image_minus_lens) / noise_map, fit_mask_bool,
+    )
+    image_minus_lens = _hide_excluded_pixels(image_minus_lens, fit_mask_bool)
     chi2 = float(np.nansum(residual ** 2))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -2896,6 +2915,7 @@ def generate_run_plots(
     num_chains_hmc=None,
     chain_kwargs_lens_from_params=None,
     chain_lens_image_override=None,
+    fit_mask_bool=None,
 ):
     lens_mass_summary = save_lens_mass_ellipticity_summary(
         lens_image, kwargs_best, save_path,
@@ -3015,6 +3035,7 @@ def generate_run_plots(
         model_lens_light_override=comp_lens_light,
         model_composite_override=comp_total,
         model_no_lens_light_override=comp_no_lens,
+        fit_mask_bool=fit_mask_bool,
     ))
 
     if sampler == 'hmc' and mcmc_samples is not None and prob_model is not None:
@@ -3055,12 +3076,14 @@ def generate_run_plots(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
         plot_scale='linear', residual_vis_max=residual_vis_max,
         model_lens_light_override=comp_lens_light,
+        fit_mask_bool=fit_mask_bool,
     ))
     
     _try('lens_light_subtracted_image_log.png', lambda: plot_lens_light_subtracted_image(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map=noise_map, save_path=save_path,
         plot_scale='log', residual_vis_max=residual_vis_max,
         model_lens_light_override=comp_lens_light,
+        fit_mask_bool=fit_mask_bool,
     ))
 
     _try('ring_model_comparison_linear.png', lambda: plot_ring_model_comparison(
@@ -3070,6 +3093,7 @@ def generate_run_plots(
         output_filename='ring_model_comparison_linear.png',
         model_no_lens_light_override=comp_no_lens,
         model_lens_light_override=comp_lens_light,
+        fit_mask_bool=fit_mask_bool,
     ))
     _try('ring_model_comparison_log.png', lambda: plot_ring_model_comparison(
         lens_image, kwargs_best, pixel_scale, image_data, noise_map, save_path,
@@ -3078,6 +3102,7 @@ def generate_run_plots(
         output_filename='ring_model_comparison_log.png',
         model_no_lens_light_override=comp_no_lens,
         model_lens_light_override=comp_lens_light,
+        fit_mask_bool=fit_mask_bool,
     ))
 
 

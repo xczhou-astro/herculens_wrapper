@@ -258,6 +258,41 @@ def test_recreate_model_plots_accepts_current_and_legacy_fits_names(
     assert np.array_equal(plotted[0][0], np.full((3, 3), 2.0))
 
 
+def test_ring_comparison_hides_bad_pixel_after_lens_light_subtraction(monkeypatch, tmp_path):
+    from herculens_wrapper import visualizations as plots
+
+    image = np.ones((3, 3))
+    image[1, 1] = 0.0  # likelihood_image replacement for a NaN input pixel
+    lens_light = np.full((3, 3), 0.2)
+    lens_light[1, 1] = 0.8
+    fit_mask = np.ones((3, 3), dtype=bool)
+    fit_mask[1, 1] = False
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda *_args, **_kwargs: None)
+    try:
+        plots.plot_ring_model_comparison(
+            SimpleNamespace(source_arc_mask=None), {}, 0.1,
+            image, np.ones((3, 3)), str(tmp_path),
+            output_filename="ring.png",
+            model_no_lens_light_override=np.full((3, 3), 0.8),
+            model_lens_light_override=lens_light,
+            fit_mask_bool=fit_mask,
+        )
+        figure = plots.plt.gcf()
+        subtracted = next(
+            axis for axis in figure.axes if axis.get_title() == "Image - lens light"
+        ).images[0].get_array()
+        assert np.ma.getmaskarray(subtracted)[1, 1]
+        assert np.ma.min(subtracted) == pytest.approx(0.8)
+        residual_axis = next(
+            axis for axis in figure.axes if axis.get_title().startswith("Residuals")
+        )
+        assert np.ma.getmaskarray(residual_axis.images[0].get_array())[1, 1]
+        assert "0.00" in residual_axis.get_title()
+    finally:
+        original_close(plots.plt.gcf())
+
+
 def test_sampled_background_rms_is_a_single_likelihood_latent():
     import jax
     from numpyro import handlers
