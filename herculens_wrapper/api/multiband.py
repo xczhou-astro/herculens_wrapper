@@ -391,7 +391,7 @@ class MultiBandFitResult:
                                  "model_total": components["total"] if components is not None else None,
                                  "model_lensed_source": components["no_lens_light"] if components is not None else None,
                                  "model_lens_light": components["lens_light"] if components is not None else None})
-            arrays.update({f"{name}_best_fit_model": best, f"{name}_image_data": band["image_data"],
+            arrays.update({f"{name}_median_model": best, f"{name}_image_data": band["image_data"],
                            f"{name}_noise_map": output_noise, f"{name}_fit_mask_bool": valid})
             files[f"{name}_kwargs"] = directory / "kwargs_result.json"
         with (root / "kwargs_result.json").open("w") as stream:

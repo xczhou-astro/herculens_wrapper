@@ -3151,11 +3151,12 @@ def recreate_best_fit_plots_for_run(run_dir):
         print(f"Error loading {fits_path}: {e}")
         return False
         
-    if 'best_fit_model' not in data or 'image_data' not in data or 'noise_map' not in data:
+    model_key = 'median_model' if 'median_model' in data else 'best_fit_model'
+    if model_key not in data or 'image_data' not in data or 'noise_map' not in data:
         print(f"Error: {fits_path} does not contain required arrays.")
         return False
         
-    best_fit_model = data['best_fit_model']
+    best_fit_model = data[model_key]
     image_data = data['image_data']
     noise_map = data['noise_map']
 

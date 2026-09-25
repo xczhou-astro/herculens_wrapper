@@ -839,7 +839,7 @@ products = result.output()
 products = result.output("other_output")
 ```
 
-`result.output()` 写出的 `modeling_result.fits` 包含 `BEST_FIT_MODEL`、
+`result.output()` 写出的 `modeling_result.fits` 包含 `MEDIAN_MODEL`、
 `IMAGE_DATA`、`NOISE_MAP`、`PSF`、`LENS_LIGHT` 和 `SOURCE_PLANE` 扩展，
 以及已有的掩膜。`PSF` 保留输入核，`PSFSSAMP` 记录其相对图像像素的超采样倍数。
 `SOURCE_PLANE` 的物理坐标保存在 `SOURCE_X`/`SOURCE_Y`；RTU 网格则使用
@@ -847,8 +847,9 @@ products = result.output("other_output")
 
 `SUMMARY` 头关键字注明图像汇总方式：SVI 的 `GUIDEMED` 表示在 guide 的
 中值参数处计算图像；HMC 的 `PIXMED` 表示对每次后验抽样生成的图像逐像素取
-中值。HMC 的 `BEST_FIT_MODEL`、`LENS_LIGHT` 和 `SOURCE_PLANE` 都采用后者，
-它们不是最大 log likelihood 样本的图像。
+中值。HMC 的 `MEDIAN_MODEL`、`LENS_LIGHT` 和 `SOURCE_PLANE` 都采用后者，
+它们不是最大 log likelihood 样本的图像。没有后验中值的单点优化结果仍使用
+`BEST_FIT_MODEL`（`SUMMARY=PARAMSET`）。
 
 ### 数值结果
 

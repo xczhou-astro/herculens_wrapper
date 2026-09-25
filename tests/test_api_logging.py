@@ -168,7 +168,14 @@ def test_hmc_parametric_source_plane_is_median_of_rendered_draws(monkeypatch):
     assert np.array_equal(median, np.full((2, 3), 10.0))
 
 
-def test_modeling_result_fits_writes_source_lens_light_and_psf(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode, model_name, summary, source_value", [
+    ("hmc", "MEDIAN_MODEL", "PIXMED", 3.0),
+    ("svi", "MEDIAN_MODEL", "GUIDEMED", 99.0),
+    ("optax", "BEST_FIT_MODEL", "PARAMSET", 99.0),
+])
+def test_modeling_result_fits_writes_source_lens_light_and_psf(
+    tmp_path, monkeypatch, mode, model_name, summary, source_value,
+):
     from astropy.io import fits
     from herculens_wrapper.api.samplers import FitResult
     from herculens_wrapper import samplers as sampler_backend
@@ -204,11 +211,15 @@ def test_modeling_result_fits_writes_source_lens_light_and_psf(tmp_path, monkeyp
     monkeypatch.setattr(sampler_backend, "save_metrics", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(visualizations, "generate_run_plots", lambda **_kwargs: None)
     result = FitResult(
-        parameters={}, details={}, samples={"amp": np.array([1.0, 3.0])},
+        parameters={}, details={"guide": object()} if mode == "svi" else {},
+        samples={"amp": np.array([1.0, 3.0])} if mode == "hmc" else None,
         derived={
             "kwargs": {"kwargs_source": [{"pixels": np.full((4, 4), 99.0)}], "kwargs_lens": []},
             "source_plane": np.full((4, 4), 3.0),
             "component_medians": {
+                "total": np.ones((3, 3)), "lens_light": np.full((3, 3), 2.0),
+            },
+            "components": {
                 "total": np.ones((3, 3)), "lens_light": np.full((3, 3), 2.0),
             },
         }, _model=model,
@@ -216,13 +227,35 @@ def test_modeling_result_fits_writes_source_lens_light_and_psf(tmp_path, monkeyp
 
     result.output(tmp_path, include_corner=False)
     with fits.open(tmp_path / "modeling_result.fits") as hdus:
-        assert np.array_equal(hdus["BEST_FIT_MODEL"].data, np.ones((3, 3)))
+        assert np.array_equal(hdus[model_name].data, np.ones((3, 3)))
         assert np.array_equal(hdus["LENS_LIGHT"].data, np.full((3, 3), 2.0))
-        assert np.array_equal(hdus["SOURCE_PLANE"].data, np.full((4, 4), 3.0))
+        assert np.array_equal(hdus["SOURCE_PLANE"].data, np.full((4, 4), source_value))
         assert np.array_equal(hdus["PSF"].data, np.eye(3))
-        assert hdus["BEST_FIT_MODEL"].header["SUMMARY"] == "PIXMED"
-        assert hdus["SOURCE_PLANE"].header["SUMMARY"] == "PIXMED"
+        assert hdus[model_name].header["SUMMARY"] == summary
+        assert hdus["SOURCE_PLANE"].header["SUMMARY"] == summary
         assert hdus["PSF"].header["PSFSSAMP"] == 4
+
+
+@pytest.mark.parametrize("model_key", ["median_model", "best_fit_model"])
+def test_recreate_model_plots_accepts_current_and_legacy_fits_names(
+    tmp_path, monkeypatch, model_key,
+):
+    from herculens_wrapper import visualizations
+    from herculens_wrapper.utils import save_named_arrays_fits
+
+    save_named_arrays_fits(tmp_path / "modeling_result.fits", {
+        model_key: np.full((3, 3), 2.0),
+        "image_data": np.ones((3, 3)),
+        "noise_map": np.ones((3, 3)),
+    })
+    plotted = []
+    monkeypatch.setattr(
+        visualizations, "display",
+        lambda images, **_kwargs: plotted.append(images),
+    )
+    assert visualizations.recreate_best_fit_plots_for_run(tmp_path)
+    assert len(plotted) == 2
+    assert np.array_equal(plotted[0][0], np.full((3, 3), 2.0))
 
 
 def test_sampled_background_rms_is_a_single_likelihood_latent():

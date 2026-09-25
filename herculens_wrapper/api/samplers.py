@@ -1757,9 +1757,10 @@ class FitResult:
             else "GUIDEMED" if self.details.get("guide") is not None
             else "PARAMSET"
         )
+        model_name = "median_model" if summary != "PARAMSET" else "best_fit_model"
         from ..utils import save_named_arrays_fits
         save_named_arrays_fits(directory / "modeling_result.fits", {
-            "best_fit_model": best_fit_model,
+            model_name: best_fit_model,
             "image_data": model.data.likelihood_image,
             "noise_map": output_noise,
             "psf": model.data.psf,
@@ -1769,7 +1770,7 @@ class FitResult:
             "contaminate_mask": model.data.contaminate_mask,
             "fit_mask_bool": model.data.likelihood_mask,
         }, extension_headers={
-            "best_fit_model": {"SUMMARY": summary},
+            model_name: {"SUMMARY": summary},
             "lens_light": {"SUMMARY": summary},
             "source_plane": {"SUMMARY": summary, "BUNIT": "pixel_flux"},
             "psf": {"PSFSSAMP": model.data.psf_supersampling_factor},
