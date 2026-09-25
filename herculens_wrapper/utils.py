@@ -693,15 +693,17 @@ def append_array_fits(path, values, *, extension_name='SIGMA'):
         hdul.flush()
 
 
-def save_named_arrays_fits(path, arrays):
+def save_named_arrays_fits(path, arrays, *, extension_headers=None):
     """Write named numerical arrays as FITS image extensions."""
     from astropy.io import fits
     hdus = [fits.PrimaryHDU()]
+    extension_headers = extension_headers or {}
     for name, values in arrays.items():
         if values is None:
             continue
         array = np.asarray(values)
         header = fits.Header()
+        header.update(extension_headers.get(name, {}))
         if array.dtype == bool:
             header['ORIGTYPE'] = ('bool', 'Original NumPy dtype')
             array = array.astype(np.uint8)

@@ -34,6 +34,65 @@ def _pixelated_source_index(type_list, kwargs_source=None):
     ), None)
 
 
+def _source_plane_fits_arrays(result, model, kwargs, type_list, components):
+    """Return source-plane pixels and, where available, their physical grid."""
+    sources = kwargs.get("kwargs_source") or []
+    if not sources:
+        return {}
+    pixelated_index = _pixelated_source_index(type_list, sources)
+    lens_image = model.lens_image
+    if pixelated_index is not None:
+        if result.samples is not None:
+            pixels = result.derived.get("source_plane")
+            if pixels is None and components is not None:
+                pixels = components.get("source_plane")
+            if pixels is None:
+                raise RuntimeError(
+                    "HMC source-plane pixelwise median is unavailable; "
+                    "cannot export a parameter-median substitute."
+                )
+        else:
+            pixels = sources[pixelated_index]["pixels"]
+        pixels = np.asarray(pixels)
+        arrays = {"source_plane": pixels}
+        if getattr(lens_image, "_rtu_grid_source", False):
+            x, y = lens_image.get_rtu_source_plane_grid(kwargs.get("kwargs_lens"))
+            arrays["source_x_corners"] = np.asarray(x)
+            arrays["source_y_corners"] = np.asarray(y)
+        else:
+            x, y, _ = lens_image.get_source_coordinates(
+                kwargs.get("kwargs_lens"), npix_src=pixels.shape[0],
+                source_grid_scale=model.source_grid_scale,
+            )
+            x, y = np.asarray(x), np.asarray(y)
+            if x.ndim == y.ndim == 1:
+                x, y = np.meshgrid(x, y)
+            if x.shape != pixels.shape or y.shape != pixels.shape:
+                raise ValueError(
+                    f"Source-plane coordinate shape {(x.shape, y.shape)} "
+                    f"does not match source pixels {pixels.shape}."
+                )
+            arrays.update({"source_x": x, "source_y": y})
+        return arrays
+
+    # Parametric sources have no stored pixel array.  Use the same fixed
+    # physical grid for every HMC draw before taking the per-pixel median.
+    from ..visualizations import _parametric_source_plane_grid
+    x, y, _ = _parametric_source_plane_grid(
+        lens_image, kwargs.get("kwargs_lens"), 80, 80, model.data.pixel_scale,
+    )
+    if result.samples is not None:
+        from ..samplers import evaluate_mcmc_parametric_source_plane_median
+        pixels = evaluate_mcmc_parametric_source_plane_median(
+            model.prob_model, result.samples, x, y,
+        )
+    else:
+        pixels = np.asarray(lens_image.SourceModel.surface_brightness(
+            x, y, sources,
+        )) * float(lens_image.Grid.pixel_area)
+    return {"source_plane": np.asarray(pixels), "source_x": x, "source_y": y}
+
+
 def is_completed_svi_run(save_path: str | Path) -> bool:
     """Return whether a standard API SVI run was exported successfully.
 
@@ -1491,12 +1550,26 @@ class FitResult:
             kwargs_best, deterministics = kwargs_with_deterministics(
                 model.prob_model, self.parameters,
             )
-        best_fit_model = np.asarray(
-            model_image_from_deterministics(model.prob_model, kwargs_best, deterministics)
+        components = (
+            self.derived.get("component_medians") if self.samples is not None
+            else self.derived.get("components")
         )
-        components = self.derived.get("components") or self.derived.get("component_medians")
+        if self.samples is not None and components is None:
+            from ..samplers import evaluate_mcmc_component_medians
+            components = evaluate_mcmc_component_medians(model.prob_model, self.samples)
+            components.pop("_sample_likelihood_summary", None)
+            self.derived["components"] = components
+            self.derived["component_medians"] = components
+        if self.samples is not None and (
+            components is None or "total" not in components or "lens_light" not in components
+        ):
+            raise RuntimeError("HMC pixelwise median model components are unavailable.")
         if components is not None:
             best_fit_model = np.asarray(components["total"])
+        else:
+            best_fit_model = np.asarray(
+                model_image_from_deterministics(model.prob_model, kwargs_best, deterministics)
+            )
         output_noise = model.noise_from_model(best_fit_model, self.parameters)
         kwargs_for_plots = kwargs_best
         skipped: dict[str, str] = {}
@@ -1667,14 +1740,43 @@ class FitResult:
         except Exception as error:
             skipped["diagnostic_plots"] = str(error)
 
+        source_arrays = _source_plane_fits_arrays(
+            self, model, kwargs_best, type_list, components,
+        )
+        if components is not None:
+            lens_light = np.asarray(components["lens_light"])
+        elif kwargs_best.get("kwargs_lens_light"):
+            lens_light = np.asarray(model.lens_image.model(
+                **kwargs_best, source_add=False, lens_light_add=True,
+                point_source_add=False,
+            ))
+        else:
+            lens_light = np.zeros_like(best_fit_model)
+        summary = (
+            "PIXMED" if self.samples is not None
+            else "GUIDEMED" if self.details.get("guide") is not None
+            else "PARAMSET"
+        )
         from ..utils import save_named_arrays_fits
         save_named_arrays_fits(directory / "modeling_result.fits", {
             "best_fit_model": best_fit_model,
             "image_data": model.data.likelihood_image,
             "noise_map": output_noise,
+            "psf": model.data.psf,
+            "lens_light": lens_light,
+            **source_arrays,
             "source_arc_mask": model.data.source_arc_mask,
             "contaminate_mask": model.data.contaminate_mask,
             "fit_mask_bool": model.data.likelihood_mask,
+        }, extension_headers={
+            "best_fit_model": {"SUMMARY": summary},
+            "lens_light": {"SUMMARY": summary},
+            "source_plane": {"SUMMARY": summary, "BUNIT": "pixel_flux"},
+            "psf": {"PSFSSAMP": model.data.psf_supersampling_factor},
+            "source_x": {"BUNIT": "arcsec"},
+            "source_y": {"BUNIT": "arcsec"},
+            "source_x_corners": {"BUNIT": "arcsec"},
+            "source_y_corners": {"BUNIT": "arcsec"},
         })
         files["modeling_result"] = directory / "modeling_result.fits"
         _write_parameter_shifts(directory, kwargs_best, type_list)

@@ -120,6 +120,111 @@ def test_no_usable_pixels_fail_with_clear_error():
         )
 
 
+def test_hmc_fits_source_uses_pixelwise_median_instead_of_parameter_pixels():
+    from herculens_wrapper.api.samplers import _source_plane_fits_arrays
+
+    posterior_median = np.full((3, 3), 5.0)
+    lens_image = SimpleNamespace(
+        _rtu_grid_source=False,
+        get_source_coordinates=lambda *_args, **_kwargs: (
+            np.arange(3), np.arange(3), [-1, 1, -1, 1],
+        ),
+    )
+    model = SimpleNamespace(lens_image=lens_image, source_grid_scale=1.0)
+    result = SimpleNamespace(samples={"pixels": np.ones((2, 3, 3))}, derived={
+        "source_plane": posterior_median,
+    })
+    arrays = _source_plane_fits_arrays(
+        result, model,
+        {"kwargs_source": [{"pixels": np.full((3, 3), 99.0)}], "kwargs_lens": []},
+        {"source_light_type_list": ["PIXELATED"]}, None,
+    )
+    assert np.array_equal(arrays["source_plane"], posterior_median)
+    assert arrays["source_x"].shape == posterior_median.shape
+    assert arrays["source_y"].shape == posterior_median.shape
+
+
+def test_hmc_parametric_source_plane_is_median_of_rendered_draws(monkeypatch):
+    import jax.numpy as jnp
+    from herculens_wrapper import samplers
+
+    monkeypatch.setattr(samplers, "get_active_sample_sites", lambda _model: ["amp"])
+
+    class _SourceModel:
+        def surface_brightness(self, x, _y, kwargs_source):
+            return jnp.ones_like(x) * kwargs_source[0]["amp"] ** 2
+
+    prob_model = SimpleNamespace(
+        lens_image=SimpleNamespace(
+            Grid=SimpleNamespace(pixel_area=2.0), SourceModel=_SourceModel(),
+        ),
+        params2kwargs=lambda sample: {"kwargs_source": [{"amp": sample["amp"]}]},
+    )
+    grid = np.zeros((2, 3))
+    median = samplers.evaluate_mcmc_parametric_source_plane_median(
+        prob_model, {"amp": np.array([1.0, 3.0])}, grid, grid,
+        batch_size=1, tile_size=1,
+    )
+    assert np.array_equal(median, np.full((2, 3), 10.0))
+
+
+def test_modeling_result_fits_writes_source_lens_light_and_psf(tmp_path, monkeypatch):
+    from astropy.io import fits
+    from herculens_wrapper.api.samplers import FitResult
+    from herculens_wrapper import samplers as sampler_backend
+    from herculens_wrapper import utils, visualizations
+
+    model = SimpleNamespace(
+        definition=SimpleNamespace(as_dicts=lambda: (
+            {"source_light_type_list": ["PIXELATED"]}, {},
+        )),
+        prob_model=object(),
+        lens_image=SimpleNamespace(
+            _rtu_grid_source=False,
+            get_source_coordinates=lambda *_args, **_kwargs: (
+                np.arange(4), np.arange(4), None,
+            ),
+        ),
+        data=SimpleNamespace(
+            likelihood_image=np.zeros((3, 3)), likelihood_mask=np.ones((3, 3), bool),
+            source_arc_mask=None, contaminate_mask=None, psf=np.eye(3),
+            psf_supersampling_factor=4, pixel_scale=0.1,
+            samples_background_rms=False,
+        ),
+        noise_from_model=lambda *_args: np.ones((3, 3)),
+        num_sampling_parameters=1, initial_parameters=None,
+        source_grid_scale=1.0,
+        _metrics=lambda _parameters: {
+            "chi2_median": 1.0, "log_likelihood_median": -1.0,
+            "n_free_parameters": 1, "n_physical_parameters": 1,
+            "reduced_chi2_median": 1.0,
+        },
+    )
+    monkeypatch.setattr(utils, "kwargs_best_to_json_pixelated_npy", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(sampler_backend, "save_metrics", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(visualizations, "generate_run_plots", lambda **_kwargs: None)
+    result = FitResult(
+        parameters={}, details={}, samples={"amp": np.array([1.0, 3.0])},
+        derived={
+            "kwargs": {"kwargs_source": [{"pixels": np.full((4, 4), 99.0)}], "kwargs_lens": []},
+            "source_plane": np.full((4, 4), 3.0),
+            "component_medians": {
+                "total": np.ones((3, 3)), "lens_light": np.full((3, 3), 2.0),
+            },
+        }, _model=model,
+    )
+
+    result.output(tmp_path, include_corner=False)
+    with fits.open(tmp_path / "modeling_result.fits") as hdus:
+        assert np.array_equal(hdus["BEST_FIT_MODEL"].data, np.ones((3, 3)))
+        assert np.array_equal(hdus["LENS_LIGHT"].data, np.full((3, 3), 2.0))
+        assert np.array_equal(hdus["SOURCE_PLANE"].data, np.full((4, 4), 3.0))
+        assert np.array_equal(hdus["PSF"].data, np.eye(3))
+        assert hdus["BEST_FIT_MODEL"].header["SUMMARY"] == "PIXMED"
+        assert hdus["SOURCE_PLANE"].header["SUMMARY"] == "PIXMED"
+        assert hdus["PSF"].header["PSFSSAMP"] == 4
+
+
 def test_sampled_background_rms_is_a_single_likelihood_latent():
     import jax
     from numpyro import handlers

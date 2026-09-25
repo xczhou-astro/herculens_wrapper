@@ -4,6 +4,7 @@ from numpyro.distributions import biject_to
 import json
 import os
 import pickle
+import tempfile
 from glob import glob
 from urllib.parse import quote, unquote
 
@@ -786,6 +787,58 @@ def evaluate_mcmc_source_pixels_summary(prob_model, samples, save_path, save_npy
     except Exception as e:
         print(f"[warning] Failed to evaluate MCMC physical source pixels summary: {e}")
         return None
+
+
+def evaluate_mcmc_parametric_source_plane_median(
+    prob_model, samples, x, y, *, batch_size=128, tile_size=16,
+):
+    """Render a parametric source on one fixed grid and median each pixel.
+
+    Draws are streamed to a temporary array so a large HMC posterior does not
+    require keeping every source-plane image in memory at once.
+    """
+    x, y = np.asarray(x), np.asarray(y)
+    if x.ndim != 2 or x.shape != y.shape:
+        raise ValueError("source-plane x and y grids must be matching 2-D arrays.")
+    lens_image = prob_model.lens_image
+    active_sites = set(get_active_sample_sites(prob_model))
+    sample_keys = [key for key in samples if key in active_sites]
+    if not sample_keys:
+        raise ValueError("HMC samples contain no active model parameters.")
+    n_draws = len(samples[sample_keys[0]])
+    if not n_draws:
+        raise ValueError("HMC samples contain no posterior draws.")
+    x_jax, y_jax = jnp.asarray(x), jnp.asarray(y)
+    pixel_area = float(getattr(lens_image.Grid, 'pixel_area'))
+
+    def render_one(sample):
+        kwargs = prob_model.params2kwargs(sample)
+        return lens_image.SourceModel.surface_brightness(
+            x_jax, y_jax, kwargs['kwargs_source'],
+        ) * pixel_area
+
+    render_batch = jax.jit(jax.vmap(render_one))
+    with tempfile.TemporaryDirectory(prefix="herculens_source_median_") as temporary_dir:
+        draws = np.memmap(
+            os.path.join(temporary_dir, 'source_planes.dat'),
+            mode='w+', dtype=np.float64, shape=(n_draws,) + x.shape,
+        )
+        for start in range(0, n_draws, batch_size):
+            end = min(start + batch_size, n_draws)
+            batch = {
+                key: jnp.asarray(samples[key][start:end]) for key in sample_keys
+            }
+            draws[start:end] = np.asarray(render_batch(batch))
+        median = np.empty(x.shape, dtype=float)
+        for row in range(0, x.shape[0], tile_size):
+            row_end = min(row + tile_size, x.shape[0])
+            for column in range(0, x.shape[1], tile_size):
+                column_end = min(column + tile_size, x.shape[1])
+                median[row:row_end, column:column_end] = np.median(
+                    np.asarray(draws[:, row:row_end, column:column_end]), axis=0,
+                )
+        del draws
+    return median
 
 
 def _build_hmc_chain_init_params(
