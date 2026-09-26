@@ -388,6 +388,7 @@ class MultiBandFitResult:
             except Exception as error: skipped[f"{name}_plots"] = str(error)
             band_results.append({"name": name, "lens_image": band["lens_image"], "kwargs_result": kwargs_for_plots,
                                  "image_data": band["image_data"], "noise_map": output_noise,
+                                 "fit_mask_bool": valid,
                                  "pixel_scale": self._model.observations[name].pixel_scale,
                                  "model_total": components["total"] if components is not None else None,
                                  "model_lensed_source": components["no_lens_light"] if components is not None else None,
@@ -1394,6 +1395,7 @@ class MultiBandModel:
                 "name": f"chain {chain}", "lens_image": band["lens_image"],
                 "kwargs_result": kwargs, "image_data": band["image_data"],
                 "noise_map": band["noise_map"],
+                "fit_mask_bool": band["fit_mask_bool"],
                 "pixel_scale": self.observations[band["name"]].pixel_scale,
                 "model_total": components["total"],
                 "model_lensed_source": components["no_lens_light"],
@@ -1454,6 +1456,7 @@ class MultiBandResultsCombination:
                     "kwargs_result": kwargs_by_band[name],
                     "image_data": band["image_data"],
                     "noise_map": band["noise_map"],
+                    "fit_mask_bool": band["fit_mask_bool"],
                     "pixel_scale": model.observations[name].pixel_scale,
                 })
 

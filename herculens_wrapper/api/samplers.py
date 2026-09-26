@@ -1891,6 +1891,7 @@ class SingleBandResultsCombination:
                 "kwargs_result": result._kwargs_result(),
                 "image_data": model.data.likelihood_image,
                 "noise_map": model.data.likelihood_noise,
+                "fit_mask_bool": model.data.likelihood_mask,
                 "pixel_scale": model.data.pixel_scale,
             })
         json_path = directory / "comparison.json"

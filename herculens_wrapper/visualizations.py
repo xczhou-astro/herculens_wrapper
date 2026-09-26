@@ -1084,9 +1084,15 @@ def plot_multiband_composite(
                 **kwargs_result, lens_light_add=True, source_add=True, point_source_add=True,
             )
         model_total = np.asarray(model_total)
-        residual = (model_total - image_data) / noise_map
-        chi2 = float(np.sum(residual ** 2))
-        data_minus_lens = image_data - model_lens_light
+        fit_mask_bool = band.get('fit_mask_bool')
+        displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
+        residual = _hide_excluded_pixels(
+            (model_total - image_data) / noise_map, fit_mask_bool,
+        )
+        chi2 = float(np.nansum(residual ** 2))
+        data_minus_lens = _hide_excluded_pixels(
+            image_data - model_lens_light, fit_mask_bool,
+        )
 
         _, pixelated_source = _pixelated_source_entry(kwargs_result)
         source_pixels = None if pixelated_source is None else pixelated_source.get('pixels')
@@ -1180,7 +1186,7 @@ def plot_multiband_composite(
             except Exception as error:
                 print(f'[plot_multiband_composite] Could not apply source-arc support: {error}')
 
-        image_panels = (image_data, model_total, residual, data_minus_lens, model_lensed_source)
+        image_panels = (displayed_data, model_total, residual, data_minus_lens, model_lensed_source)
         for column, values in enumerate(image_panels):
             axis = axes[row, column]
             if column < 2:
@@ -1271,6 +1277,7 @@ def plot_hmc_chain_comparison(
     output_filename='hmc_chain_comparison.png',
     lens_image_override=None,
     kwargs_lens_from_params=None,
+    fit_mask_bool=None,
 ):
     """Plot one six-panel posterior-median reconstruction row per HMC chain."""
     from herculens_wrapper.samplers import (
@@ -1347,6 +1354,7 @@ def plot_hmc_chain_comparison(
             'kwargs_result': kwargs_result,
             'image_data': image_data,
             'noise_map': noise_map,
+            'fit_mask_bool': fit_mask_bool,
             'pixel_scale': pixel_scale,
             'model_lens_light': component_medians['lens_light'],
             'model_lensed_source': component_medians['no_lens_light'],
@@ -3050,6 +3058,7 @@ def generate_run_plots(
             residual_vis_max=residual_vis_max,
             lens_image_override=chain_lens_image_override,
             kwargs_lens_from_params=chain_kwargs_lens_from_params,
+            fit_mask_bool=fit_mask_bool,
         ))
 
     _try('image_plane.png', lambda: plot_image_plane(

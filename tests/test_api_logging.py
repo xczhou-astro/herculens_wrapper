@@ -857,6 +857,83 @@ def test_svi_run_comparison_lensed_source_includes_point_flux(monkeypatch, tmp_p
         original_close(plots.plt.gcf())
 
 
+def test_comparison_panels_hide_likelihood_excluded_pixels(monkeypatch, tmp_path):
+    from herculens_wrapper import visualizations as plots
+
+    _mock_plot_geometry(monkeypatch, plots)
+    original_close = plots.plt.close
+    monkeypatch.setattr(plots.plt, "close", lambda *_args, **_kwargs: None)
+    image = np.ones((3, 3))
+    image[1, 1] = 0.0
+    model_total = np.ones((3, 3))
+    model_total[1, 1] = 5.0
+    lens_light = np.full((3, 3), 0.2)
+    lens_light[1, 1] = 0.8
+    mask = np.ones((3, 3), dtype=bool)
+    mask[1, 1] = False
+    band = {
+        "name": "Run 0", "lens_image": _mock_plot_lens_image(),
+        "kwargs_result": {"kwargs_lens": [], "kwargs_source": [{"pixels": np.ones((3, 3))}]},
+        "image_data": image, "noise_map": np.ones((3, 3)),
+        "fit_mask_bool": mask, "pixel_scale": 0.1,
+        "model_total": model_total, "model_lens_light": lens_light,
+        "model_lensed_source": np.ones((3, 3)),
+    }
+    try:
+        plots.plot_multiband_composite(
+            [band], str(tmp_path), output_filename="svi_run_comparison.png",
+        )
+        figure = plots.plt.gcf()
+        for title in ("Data", "Data - Lens Light"):
+            axis = next(axis for axis in figure.axes if axis.get_title() == title)
+            assert np.ma.getmaskarray(axis.images[0].get_array())[1, 1]
+        residual_axis = next(
+            axis for axis in figure.axes if axis.get_title().startswith("Residual (chi^2")
+        )
+        assert np.ma.getmaskarray(residual_axis.images[0].get_array())[1, 1]
+        assert "0.00" in residual_axis.get_title()
+        model_axis = next(axis for axis in figure.axes if axis.get_title() == "Model")
+        assert not np.ma.getmaskarray(model_axis.images[0].get_array())[1, 1]
+    finally:
+        original_close(plots.plt.gcf())
+
+
+def test_hmc_chain_comparison_passes_fit_mask_to_shared_panels(monkeypatch, tmp_path):
+    from herculens_wrapper import visualizations as plots
+    from herculens_wrapper import samplers as sampler_backend
+
+    captured = {}
+    monkeypatch.setattr(
+        plots, "plot_multiband_composite",
+        lambda rows, *_args, **_kwargs: captured.setdefault("rows", rows),
+    )
+    monkeypatch.setattr(
+        sampler_backend, "evaluate_mcmc_source_pixels_summary",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        sampler_backend, "evaluate_mcmc_component_medians",
+        lambda *_args, **_kwargs: {
+            "total": np.ones((3, 3)),
+            "lens_light": np.ones((3, 3)),
+            "no_lens_light": np.ones((3, 3)),
+        },
+    )
+    mask = np.ones((3, 3), dtype=bool)
+    mask[1, 1] = False
+    prob_model = SimpleNamespace(
+        lens_image=SimpleNamespace(),
+        params2kwargs=lambda *_args, **_kwargs: {"kwargs_source": []},
+    )
+    plots.plot_hmc_chain_comparison(
+        prob_model, {"amplitude": np.arange(4.0)}, 2, 0.1,
+        np.ones((3, 3)), np.ones((3, 3)), str(tmp_path),
+        fit_mask_bool=mask,
+    )
+    assert len(captured["rows"]) == 2
+    assert all(np.array_equal(row["fit_mask_bool"], mask) for row in captured["rows"])
+
+
 def test_stellar_nfw_einstein_radius_written_to_mass_json(monkeypatch, tmp_path):
     import json
     from herculens_wrapper import visualizations as plots
