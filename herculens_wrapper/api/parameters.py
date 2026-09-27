@@ -833,4 +833,38 @@ class PixelatedLensLight(LightProfile):
         """Backend settings; neither entry represents a scalar parameter."""
         return {"pixel_grid": self.pixel_grid, "pixelated_prior": self.pixelated_prior}
 
-class PointSourceProfile(Profile): pass
+class PointSourceProfile(Profile):
+    """Point source profile, or an ordered collection of point sources."""
+
+    def __new__(
+        cls,
+        profile_type: str | Sequence[str],
+        *,
+        prior: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        **initial_values: Any,
+    ):
+        if isinstance(profile_type, (list, tuple)):
+            names = list(profile_type)
+            if not names:
+                raise ValueError("PointSourceProfile requires at least one profile name.")
+            if initial_values:
+                raise TypeError("Use prior=[...] or value=[...] when registering multiple point sources.")
+            priors = [{} for _ in names] if prior is None else list(prior)
+            values = [{} for _ in names] if value is None else list(value)
+            if len(priors) != len(names) or len(values) != len(names):
+                raise ValueError("The prior and value lists must match the number of point sources.")
+            if any(not isinstance(item, Mapping) for item in priors + values):
+                raise TypeError("Each multi-profile prior/value entry must be a dictionary.")
+            return ProfileCollection([
+                cls(name, prior=deepcopy(item_prior), value=deepcopy(item_value))
+                for name, item_prior, item_value in zip(names, priors, values)
+            ])
+        return super().__new__(cls)
+
+    def __init__(self, profile_type: str, **kwargs: Any) -> None:
+        super().__init__(str(profile_type).upper(), **kwargs)
+
+    def __getnewargs_ex__(self):
+        """Keep individual point sources pickle-safe for spawned workers."""
+        return (self.profile_type,), {}

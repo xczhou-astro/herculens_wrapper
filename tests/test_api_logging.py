@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import os
+import pickle
 from pathlib import Path
 import sys
 
@@ -13,6 +14,8 @@ from herculens_wrapper.api import (
     MassProfile,
     PixelatedLensLight,
     PixelatedSource,
+    PointSourceProfile,
+    ProfileCollection,
     SingleBandData,
     SingleBandModel,
 )
@@ -981,3 +984,64 @@ def test_stellar_nfw_einstein_radius_written_to_mass_json(monkeypatch, tmp_path)
     unavailable = plots.lens_mass_ellipticity_summary(lens, kwargs)['einstein_radius']
     assert unavailable['status'] == 'not_found'
     assert unavailable['theta_E_eff_arcsec'] is None
+
+
+def _point_source_prior(ra):
+    return {
+        "ra": [ra, 0.03, -0.1, 0.1],
+        "dec": [0.0, 0.03, -0.1, 0.1],
+        "amp": [2.0, 0.2],
+    }
+
+
+def test_batch_point_sources_materialize_in_order():
+    priors = [_point_source_prior(-0.02), _point_source_prior(0.04)]
+    sources = PointSourceProfile(["SOURCE_POSITION"] * 2, prior=priors)
+
+    assert isinstance(sources, ProfileCollection)
+    assert len(sources) == 2
+    assert all(isinstance(source, PointSourceProfile) for source in sources)
+    assert sources[0] is not sources[1]
+    assert sources.priors == priors
+
+    types, parameters = LensProfileCollection(point_source=sources).as_definition().as_dicts()
+    assert types["point_source_type_list"] == ["SOURCE_POSITION", "SOURCE_POSITION"]
+    assert parameters["point_source_params_list"] == priors
+
+
+def test_repeated_prior_is_copied_for_each_point_source():
+    shared_prior = _point_source_prior(0.0)
+    sources = PointSourceProfile(
+        ["SOURCE_POSITION"] * 2,
+        prior=[shared_prior] * 2,
+    )
+
+    sources[0].ra.prior[0] = 0.05
+    assert sources[1].ra.prior[0] == 0.0
+    assert shared_prior["ra"][0] == 0.0
+
+
+def test_batch_point_source_values_and_single_source_pickle():
+    sources = PointSourceProfile(
+        ["SOURCE_POSITION", "SOURCE_POSITION"],
+        value=[{"ra": 0.01, "dec": 0.02, "amp": 1.0},
+               {"ra": -0.01, "dec": -0.02, "amp": 2.0}],
+    )
+    assert sources.values[0]["amp"] == 1.0
+    assert sources.values[1]["amp"] == 2.0
+
+    single = pickle.loads(pickle.dumps(sources[0]))
+    assert isinstance(single, PointSourceProfile)
+    assert single.profile_type == "SOURCE_POSITION"
+    assert single.amp.value == 1.0
+
+
+def test_batch_point_source_rejects_invalid_declarations():
+    with pytest.raises(ValueError, match="at least one profile"):
+        PointSourceProfile([])
+    with pytest.raises(ValueError, match="must match the number"):
+        PointSourceProfile(["SOURCE_POSITION"] * 2, prior=[_point_source_prior(0.0)])
+    with pytest.raises(TypeError, match="must be a dictionary"):
+        PointSourceProfile(["SOURCE_POSITION"], prior=[None])
+    with pytest.raises(TypeError, match="Use prior"):
+        PointSourceProfile(["SOURCE_POSITION"], ra=0.0)

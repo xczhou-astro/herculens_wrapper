@@ -318,6 +318,25 @@ mass_components = MassProfile(
 )
 ```
 
+### 多个点源
+
+```python
+point_prior = {
+    "ra": [0.0, 0.03, -0.1, 0.1],
+    "dec": [0.0, 0.03, -0.1, 0.1],
+    "amp": [2.0, 0.2],
+}
+point_sources = PointSourceProfile(
+    ["SOURCE_POSITION"] * 2,
+    prior=[point_prior] * 2,
+)
+profiles = LensProfileCollection(point_source=point_sources)
+```
+
+批量构造返回 `ProfileCollection`；两个源的参数分别采样，配置也分别复制。
+如果已知两个源的位置不同，可用 `prior=[first_prior, second_prior]` 分别指定。
+`amp` 的两项是对数正态分布的 `[log_loc, log_scale]`，所以上例的振幅中位数为 `exp(2)`。
+
 ### EPL/SIE 的轴比和方向
 
 EPL 和 SIE 推荐直接使用 `q` 和 `phi`：
