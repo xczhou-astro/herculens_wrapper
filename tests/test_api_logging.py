@@ -698,6 +698,107 @@ def test_mass_only_parametric_warm_start_keeps_light_new_and_mass_free(tmp_path)
     assert float(resampled["source_amp_0"]) != float(initial["source_amp_0"])
 
 
+def _model_for_component_init(*, shear: bool) -> SingleBandModel:
+    mass = [MassProfile("SIE", prior={
+        "theta_E": [0.05, 0.6], "e1": [-0.2, 0.2], "e2": [-0.2, 0.2],
+        "center_x": [-0.1, 0.1], "center_y": [-0.1, 0.1],
+    })]
+    if shear:
+        mass.append(MassProfile("SHEAR", prior={
+            "ra_0": 0.0, "dec_0": 0.0,
+            "gamma1": [-0.1, 0.1], "gamma2": [-0.1, 0.1],
+        }))
+    light = LightProfile("GAUSSIAN", prior={
+        "amp": [0.0, 0.2], "sigma": [0.03, 0.2],
+        "center_x": [-0.1, 0.1], "center_y": [-0.1, 0.1],
+    })
+    return SingleBandModel(
+        profiles=LensProfileCollection(lens_mass=mass, lens_light=light),
+        observation=SingleBandData(
+            image=np.zeros((7, 7)), noise=np.ones((7, 7)),
+            psf=np.ones((1, 1)), pixel_scale=0.03,
+        ),
+    )
+
+
+@pytest.mark.parametrize("shear", [False, True])
+def test_init_path_overlays_matches_and_keeps_unmatched_medians(tmp_path, shear):
+    """Saved extra parameters are ignored; new active sites retain the median."""
+    import json
+
+    saved = {
+        "kwargs_lens": [
+            {"theta_E": 0.4, "e1": 0.03, "e2": -0.02,
+             "center_x": 0.01, "center_y": -0.01, "old_parameter": 123},
+            {"gamma1": 0.08, "gamma2": -0.04},
+            {"theta_E": 999},
+        ],
+        "kwargs_lens_light": [{"amp": 99.0, "sigma": 0.1}],
+    }
+    source = tmp_path / "kwargs_result.json"
+    source.write_text(json.dumps(saved))
+    seed = 23
+    fresh_model = _model_for_component_init(shear=shear)
+    expected = fresh_model.initialize(seed=seed)
+    model = _model_for_component_init(shear=shear)
+    initial = model.initialize(seed=seed, init_path=source, components=["lens_mass"])
+
+    assert set(initial) == set(expected)
+    assert float(initial["lens_theta_E_0"]) == pytest.approx(0.4)
+    assert float(initial["lens_e1_0"]) == pytest.approx(0.03)
+    assert float(initial["lens_e2_0"]) == pytest.approx(-0.02)
+    np.testing.assert_array_equal(initial["lens_light_amp_0"], expected["lens_light_amp_0"])
+    if shear:
+        assert float(initial["lens_gamma1_1"]) == pytest.approx(0.08)
+    else:
+        assert "lens_gamma1_1" not in initial
+    assert isinstance(model.profiles.lens_mass[0].theta_E.prior, list)
+    assert model.initialization_components == ("lens_mass",)
+
+
+def test_init_path_missing_saved_parameters_keep_median(tmp_path):
+    import json
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [{"theta_E": 0.4}],
+    }))
+    seed = 17
+    expected = _model_for_component_init(shear=True).initialize(seed=seed)
+    model = _model_for_component_init(shear=True)
+    initial = model.initialize(
+        seed=seed, init_path=tmp_path, components=["lens_mass", "lens_light"],
+    )
+    assert float(initial["lens_theta_E_0"]) == pytest.approx(0.4)
+    for site in ("lens_e1_0", "lens_e2_0", "lens_gamma1_1", "lens_gamma2_1",
+                 "lens_light_amp_0"):
+        np.testing.assert_array_equal(initial[site], expected[site])
+
+
+def test_init_path_only_loads_selected_light(tmp_path):
+    import json
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [{"theta_E": 0.4}],
+        "kwargs_lens_light": [{"amp": 0.15}],
+    }))
+    expected = _model_for_component_init(shear=False).initialize(seed=11)
+    model = _model_for_component_init(shear=False)
+    initial = model.initialize(seed=11, init_path=tmp_path, components=["lens_light"])
+    assert float(initial["lens_light_amp_0"]) == pytest.approx(0.15)
+    np.testing.assert_array_equal(initial["lens_theta_E_0"], expected["lens_theta_E_0"])
+    np.testing.assert_array_equal(initial["lens_light_sigma_0"], expected["lens_light_sigma_0"])
+
+
+def test_init_path_components_are_validated(tmp_path):
+    model = _model_for_component_init(shear=False)
+    with pytest.raises(ValueError, match="requires init_path"):
+        model.initialize(components=["lens_mass"])
+    with pytest.raises(ValueError, match="Unknown initialization component"):
+        model.initialize(init_path=tmp_path, components=["mass"])
+    with pytest.raises(ValueError, match="only one of"):
+        model.initialize(init_path=tmp_path, init_params_path=tmp_path)
+
+
 def _double_image_model(amp):
     observation = SingleBandData(
         image=np.zeros((7, 7)), noise=np.ones((7, 7)),

@@ -26,6 +26,25 @@ def _sampler_backend():
     return run_hmc, run_optax, run_svi
 
 
+_INIT_COMPONENTS = frozenset({"lens_mass", "lens_light", "source_light", "point_source"})
+
+
+def _checked_init_components(components: Sequence[str] | None) -> tuple[str, ...] | None:
+    if components is None:
+        return None
+    if isinstance(components, (str, bytes)) or not isinstance(components, (list, tuple)):
+        raise TypeError("components must be a list or tuple of physical component names.")
+    if not components:
+        raise ValueError("components must not be empty; omit it to load all components.")
+    names = tuple(components)
+    unknown = [name for name in names if name not in _INIT_COMPONENTS]
+    if unknown:
+        raise ValueError(f"Unknown initialization component(s) {unknown!r}; choose from {sorted(_INIT_COMPONENTS)}.")
+    if len(set(names)) != len(names):
+        raise ValueError("components must not contain duplicate names.")
+    return names
+
+
 def _svi_many_worker(spec, run_id, device):
     """Spawn one SVI worker with an isolated file-only process log."""
     run_dir = Path(spec["directory"]) / f"run_{run_id}"
@@ -54,7 +73,8 @@ def _svi_many_worker_impl(spec, run_id, device):
         return
     sampler = SamplerConfig("svi", random_seed=spec["seed"] + run_id, options=dict(spec["options"]))
     initial = model.initialize(
-        seed=sampler.random_seed, run_id=run_id, init_params_path=spec["init_path"],
+        seed=sampler.random_seed, run_id=run_id, init_path=spec.get("median_init_path"),
+        components=spec.get("median_components"), init_params_path=spec["init_path"],
         init_lens_mass_path=spec.get("init_lens_mass_path"),
         init_lens_mass_light_path=spec.get("init_lens_mass_light_path"),
         pixelated_init_match=spec["pixelated_init_match"], num_iterations_warmup=spec["warmup"],
@@ -94,6 +114,8 @@ class SingleBandModel:
         self.result: FitResult | None = None
         self.initial_parameters: Mapping[str, Any] | None = None
         self.initialization_path: Path | None = None
+        self.initialization_components: tuple[str, ...] | None = None
+        self._initialization_uses_median = False
         # HMC is deliberately loaded separately from a point-estimate run:
         # the archive may be large, and posterior image products are only
         # evaluated when get_results() is requested.
@@ -597,6 +619,8 @@ class SingleBandModel:
         *,
         seed: int = 42,
         run_id: int | str | None = None,
+        init_path: str | Path | None = None,
+        components: Sequence[str] | None = None,
         init_params_path: str | Path | None = None,
         init_lens_mass_path: str | Path | None = None,
         init_lens_mass_light_path: str | Path | None = None,
@@ -606,9 +630,11 @@ class SingleBandModel:
         """Create the constrained SVI start point with ``init_to_median``.
 
         A fresh model uses NumPyro's ``init_to_median(num_samples=25)`` with
-        ``seed``.  Passing the returned parameters to :meth:`run` therefore
-        makes the displayed initial model the actual SVI initialization.  An
-        ``init_params_path`` remains a deliberate warm start from a prior run.
+        ``seed``.  ``init_path`` overlays matching values from a saved result
+        on this median baseline.  ``components`` selects physical groups to
+        restore; omitted means all groups.  Every active parameter remains
+        free, and any unmatched current parameter keeps its median start.
+        ``init_params_path`` remains a legacy warm-start entry point.
         ``init_lens_mass_path`` is the cross-band alternative: it restores
         only matching ``kwargs_lens`` values as initial values, while every
         mass parameter remains free in the new fit.  It is particularly useful
@@ -620,15 +646,19 @@ class SingleBandModel:
         fits Matérn hyperparameters to the inherited analytic source.
         """
         supplied_paths = [path for path in (
-            init_params_path, init_lens_mass_path, init_lens_mass_light_path,
+            init_path, init_params_path, init_lens_mass_path, init_lens_mass_light_path,
         ) if path is not None]
         if len(supplied_paths) > 1:
             raise ValueError(
-                "Provide only one of init_params_path (full warm start), "
+                "Provide only one of init_path (component-selected median warm start), "
+                "init_params_path (legacy full warm start), "
                 "init_lens_mass_path (mass-only warm start), and "
                 "init_lens_mass_light_path (mass-and-light warm start)."
             )
-        restore_components = None
+        if init_path is None and components is not None:
+            raise ValueError("components requires init_path.")
+        uses_median_warm_start = init_path is not None
+        restore_components = _checked_init_components(components) if uses_median_warm_start else None
         if init_lens_mass_path is not None:
             restore_components = ("lens_mass",)
         elif init_lens_mass_light_path is not None:
@@ -648,12 +678,14 @@ class SingleBandModel:
         if requested_init_path is None and declared_lens_light_path is not None:
             requested_init_path = declared_lens_light_path
         _, _, get_init_params, _ = _model_backend()
+        self.initialization_components = restore_components if uses_median_warm_start else None
+        self._initialization_uses_median = uses_median_warm_start
         if requested_init_path is None:
             self.initialization_path = None
         else:
             from ..utils import resolve_init_run_dir
             self.initialization_path = Path(resolve_init_run_dir(requested_init_path)).expanduser()
-        if requested_init_path is None:
+        if requested_init_path is None or uses_median_warm_start:
             import jax
             from numpyro import infer
             from numpyro.infer.util import initialize_model
@@ -668,13 +700,15 @@ class SingleBandModel:
                 for name, site in model_info.model_trace.items()
                 if site["type"] == "sample" and not site["is_observed"]
             }
-        else:
+        if requested_init_path is not None:
             type_list, param_list = self.definition.as_dicts()
             initial = get_init_params(
                 self.prob_model, param_list, type_list,
                 init_params_path=self.initialization_path, random_seed=seed,
                 lens_image=self.lens_image,
                 restore_components=restore_components,
+                baseline_params=initial if uses_median_warm_start else None,
+                require_requested_components=not uses_median_warm_start,
             )
             type_list, param_list = self.definition.as_dicts()
             source_types = type_list.get("source_light_type_list", [])
@@ -690,7 +724,7 @@ class SingleBandModel:
                     "A component-only warm start has no analytic source to match; use "
                     "pixelated_init_match='image'."
                 )
-            if is_pixelated and pixelated_init_match == "source":
+            if is_pixelated and pixelated_init_match == "source" and not uses_median_warm_start:
                 from ..models import PowerSpectrum
 
                 iterations = num_iterations_warmup or 2_000
@@ -715,7 +749,8 @@ class SingleBandModel:
                     if name in initial:
                         initial[name] = value
                 print("[pixelated-init: source] Source-matched initialization complete.")
-            if is_pixelated and pixelated_init_match == "image" and num_iterations_warmup > 0:
+            if (is_pixelated and pixelated_init_match == "image"
+                    and num_iterations_warmup > 0 and not uses_median_warm_start):
                 if not isinstance(num_iterations_warmup, int):
                     raise TypeError("num_iterations_warmup must be an integer.")
                 create_lens_image, create_prob_model, _, _ = _model_backend()
@@ -754,7 +789,7 @@ class SingleBandModel:
                 index for index, profile_type in enumerate(type_list.get("lens_light_type_list", []))
                 if profile_type == "PIXELATED"
             ]
-            if pixelated_lens_indices:
+            if pixelated_lens_indices and not uses_median_warm_start:
                 from ..models import PowerSpectrum, load_kwargs_init_json
 
                 saved = load_kwargs_init_json(self.initialization_path)
@@ -903,6 +938,8 @@ class SingleBandModel:
         n_runs: int = 1,
         parallel: bool = False,
         gpus: str | Sequence[str] | None = None,
+        init_path: str | Path | None = None,
+        components: Sequence[str] | None = None,
         init_lens_mass_path: str | Path | None = None,
         init_lens_mass_light_path: str | Path | None = None,
         pixelated_init_match: str = "image",
@@ -911,6 +948,8 @@ class SingleBandModel:
     ) -> FitResult | "SingleBandResultsCombination":
         """Run inference from supplied or automatically initialized parameters.
 
+        ``init_path`` and ``components`` apply the median-based, partial
+        warm start supported by :meth:`initialize`.
         ``init_lens_mass_path`` imports only lens-mass values from a prior
         result as a free-parameter warm start (for example F277W → F150W).
         ``init_lens_mass_light_path`` also imports the lens light, but not the
@@ -923,11 +962,17 @@ class SingleBandModel:
         """
         if not isinstance(n_runs, int) or n_runs < 1:
             raise ValueError("n_runs must be a positive integer.")
-        if (init_lens_mass_path is not None and init_lens_mass_light_path is not None
-                or init_params is not None and (
-                    init_lens_mass_path is not None or init_lens_mass_light_path is not None
-                )):
+        if (sum(path is not None for path in (
+                init_path, init_lens_mass_path, init_lens_mass_light_path,
+            )) > 1 or init_params is not None and (
+                init_path is not None or init_lens_mass_path is not None
+                or init_lens_mass_light_path is not None
+            )):
             raise ValueError("Provide only one warm-start path or init_params.")
+        if init_path is None and components is not None:
+            raise ValueError("components requires init_path.")
+        if init_path is not None:
+            _checked_init_components(components)
         if n_runs > 1:
             return self._run_svi_many(
                 sampler,
@@ -936,6 +981,8 @@ class SingleBandModel:
                 parallel=parallel,
                 gpus=gpus,
                 init_params=init_params,
+                init_path=init_path,
+                components=components,
                 init_lens_mass_path=init_lens_mass_path,
                 init_lens_mass_light_path=init_lens_mass_light_path,
                 pixelated_init_match=pixelated_init_match,
@@ -944,13 +991,20 @@ class SingleBandModel:
             )
         if init_params is not None:
             initial = dict(init_params)
+        elif (init_path is not None or init_lens_mass_path is not None
+                or init_lens_mass_light_path is not None):
+            initial = self.initialize(
+                seed=sampler.random_seed, init_path=init_path, components=components,
+                init_lens_mass_path=init_lens_mass_path,
+                init_lens_mass_light_path=init_lens_mass_light_path,
+                pixelated_init_match=pixelated_init_match,
+                num_iterations_warmup=num_iterations_warmup,
+            )
         elif self.initial_parameters is not None:
             initial = dict(self.initial_parameters)
         else:
             initial = self.initialize(
                 seed=sampler.random_seed,
-                init_lens_mass_path=init_lens_mass_path,
-                init_lens_mass_light_path=init_lens_mass_light_path,
                 pixelated_init_match=pixelated_init_match,
                 num_iterations_warmup=num_iterations_warmup,
             )
@@ -1010,6 +1064,8 @@ class SingleBandModel:
         parallel: bool,
         gpus: str | Sequence[str] | None,
         init_params: Mapping[str, Any] | None,
+        init_path: str | Path | None,
+        components: Sequence[str] | None,
         init_lens_mass_path: str | Path | None,
         init_lens_mass_light_path: str | Path | None,
         pixelated_init_match: str,
@@ -1059,9 +1115,24 @@ class SingleBandModel:
             "seed": int(sampler.random_seed),
             "options": deepcopy(sampler.options),
             "init_path": (
-                None if (init_lens_mass_path is not None or init_lens_mass_light_path is not None
+                None if (init_path is not None or self._initialization_uses_median
+                         or init_lens_mass_path is not None or init_lens_mass_light_path is not None
                          or self.initialization_path is None)
                 else str(self.initialization_path)
+            ),
+            "median_init_path": (
+                str(Path(init_path).expanduser()) if init_path is not None else
+                str(self.initialization_path) if (
+                    self._initialization_uses_median and self.initialization_path is not None
+                    and init_lens_mass_path is None and init_lens_mass_light_path is None
+                ) else None
+            ),
+            "median_components": (
+                _checked_init_components(components) if init_path is not None else
+                self.initialization_components if (
+                    self._initialization_uses_median and init_lens_mass_path is None
+                    and init_lens_mass_light_path is None
+                ) else None
             ),
             "init_lens_mass_path": (
                 None if init_lens_mass_path is None else str(Path(init_lens_mass_path).expanduser())

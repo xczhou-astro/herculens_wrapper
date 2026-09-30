@@ -715,6 +715,25 @@ print(model.num_sampling_parameters)
 ```python
 initial = model.initialize(seed=42)
 
+# 按成分从旧模型的 kwargs_result.json warm start；也可传结果目录。
+# 这里的 mass 参数仍然是自由参数。新模型多出的参数保留 init_to_median 初值，
+# 旧文件多出的参数会被忽略。省略 components 时加载所有匹配的成分。
+initial = model.initialize(
+    seed=42,
+    init_path="previous_svi/run_0/kwargs_result.json",
+    components=["lens_mass"],
+)
+result = model.run(SamplerConfig.svi(max_iterations=5000), init_params=initial)
+
+# 也可以直接交给 run；n_runs>1 时各次运行分别按自己的 seed 初始化。
+result = model.run(
+    SamplerConfig.svi(max_iterations=5000),
+    save_path="new_svi",
+    n_runs=3,
+    init_path="previous_svi/run_0",
+    components=["lens_mass", "lens_light"],
+)
+
 # 从以前的 SVI 结果初始化
 initial = model.initialize(
     seed=42,

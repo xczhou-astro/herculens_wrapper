@@ -2069,6 +2069,8 @@ def get_init_params(
     regul_model=None,
     require_pixelated_svi=False,
     restore_components=None,
+    baseline_params=None,
+    require_requested_components=True,
 ):
     """
     Return constrained NumPyro site parameters (physical values).
@@ -2083,10 +2085,16 @@ def get_init_params(
     ``restore_components`` optionally limits a warm start to selected physical
     components.  For example ``('lens_mass',)`` imports only ``kwargs_lens``
     from a different band while leaving light and source sites at their new
-    model's seeded initial values.
+    model's seeded initial values.  ``baseline_params`` supplies an already
+    initialized set of active sites (for example ``init_to_median``) instead
+    of drawing a new sample.  Sites absent from the saved result keep those
+    baseline values.
     """
-    key_init = jax.random.PRNGKey(random_seed)
-    init_params = prob_model.get_sample(key_init)
+    if baseline_params is None:
+        key_init = jax.random.PRNGKey(random_seed)
+        init_params = prob_model.get_sample(key_init)
+    else:
+        init_params = dict(baseline_params)
 
     if require_pixelated_svi and init_params_path is None:
         raise ValueError(
@@ -2153,7 +2161,7 @@ def get_init_params(
                 component_keys[name]: init_info[component_keys[name]]
                 for name in requested if component_keys[name] in init_info
             }
-            if 'lens_mass' in requested and 'kwargs_lens' not in init_info:
+            if require_requested_components and 'lens_mass' in requested and 'kwargs_lens' not in init_info:
                 raise ValueError(
                     f"Mass-only warm start at {init_dir!r} has no kwargs_lens."
                 )
@@ -2224,7 +2232,8 @@ def get_init_params(
                 )
                 for axis in ('ra', 'dec'):
                     site = f'ps_{axis}_{i}'
-                    if site in init_params and site not in loaded_params and axis not in saved_point_source:
+                    if (baseline_params is None and site in init_params
+                            and site not in loaded_params and axis not in saved_point_source):
                         loaded_params[site] = jnp.asarray(point_source_model[axis])
             src_types = type_list.get('source_light_type_list', [])
             pixelated_source_index = _single_pixelated_index(src_types, 'source-light')
@@ -2277,8 +2286,8 @@ def get_init_params(
                     else:
                         print(
                             "[Init] Prior run was parametric. Source light parameters "
-                            "(pixels_wn, n, rho, sigma) will be randomly sampled from "
-                            "their prior distributions."
+                            "(pixels_wn, n, rho, sigma) keep their new-model "
+                            "initial values."
                         )
 
             if require_pixelated_svi:
@@ -2335,7 +2344,9 @@ def get_init_params(
                 v_arr = jnp.asarray(v)
                 ref_arr = jnp.asarray(init_params[k])
                 if v_arr.shape != ref_arr.shape:
-                    if v_arr.size == ref_arr.size:
+                    if v_arr.size == ref_arr.size and (
+                        baseline_params is None or v_arr.size == 1
+                    ):
                         v_arr = jnp.reshape(v_arr, ref_arr.shape)
                     else:
                         n_skipped += 1
@@ -2344,16 +2355,25 @@ def get_init_params(
                 n_matched += 1
             print(f"[Init] Inherited kwargs from prior run: matched={n_matched}, skipped={n_skipped}")
         else:
-            init_params = {
+            raw = {
                 k: jnp.asarray(v) for k, v in init_info.items()
                 if k != 'likelihood_parameters'
             }
+            if baseline_params is None:
+                init_params = raw
+            else:
+                for key, value in raw.items():
+                    if key in init_params and jnp.shape(value) == jnp.shape(init_params[key]):
+                        init_params[key] = value
 
         # Likelihood-level nuisance parameters are not part of the profile
         # kwargs converted above.  Restore those that are both saved by the
         # result and active in the new probabilistic model.  This is currently
         # used by the sampled global background RMS.
-        likelihood_parameters = init_info.get('likelihood_parameters', {})
+        likelihood_parameters = (
+            init_info.get('likelihood_parameters', {})
+            if restore_components is None else {}
+        )
         if likelihood_parameters is not None and not isinstance(likelihood_parameters, Mapping):
             raise TypeError(
                 "kwargs_result.json field 'likelihood_parameters' must be a mapping."
