@@ -46,10 +46,10 @@ def _checked_init_components(components: Sequence[str] | None) -> tuple[str, ...
 
 
 def _svi_many_worker(spec, run_id, device):
-    """Spawn one SVI worker with an isolated file-only process log."""
+    """Log each SVI run; mirror sequential workers to the terminal."""
     run_dir = Path(spec["directory"]) / f"run_{run_id}"
-    context = RunContext(run_dir, console=False, run_id=run_id)
-    with context.capture(f"parallel SVI worker run_{run_id} device={device}"):
+    context = RunContext(run_dir, console=device is None, run_id=run_id)
+    with context.capture(f"SVI worker run_{run_id} device={device}"):
         return _svi_many_worker_impl(spec, run_id, device)
 
 
@@ -1158,6 +1158,8 @@ class SingleBandModel:
                 context = mp.get_context("spawn")
                 for first in range(0, len(pending), len(devices)):
                     batch_ids = pending[first:first + len(devices)]
+                    for run_id in batch_ids:
+                        print(f"[svi] Starting run_{run_id}; output: {directory / f'run_{run_id}' / 'log.txt'}")
                     workers = [
                         context.Process(
                             target=_svi_many_worker,
@@ -1183,8 +1185,11 @@ class SingleBandModel:
                             f"One or more parallel SVI runs failed ({summary}). "
                             "See each run_i/log.txt for its traceback."
                         )
+                    for run_id in batch_ids:
+                        print(f"[svi] Completed run_{run_id}")
             else:
                 for run_id in pending:
+                    print(f"[svi] Starting run_{run_id}")
                     _svi_many_worker(spec, run_id, None)
         else:
             print(f"All {n_runs} SVI runs are already complete; reloading outputs from {directory}.")

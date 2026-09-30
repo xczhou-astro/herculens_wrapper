@@ -799,6 +799,16 @@ def test_init_path_components_are_validated(tmp_path):
         model.initialize(init_path=tmp_path, init_params_path=tmp_path)
 
 
+def test_sequential_svi_worker_mirrors_output_to_terminal_and_log(tmp_path, monkeypatch, capsys):
+    from herculens_wrapper.api import session
+
+    monkeypatch.setattr(session, "_svi_many_worker_impl", lambda *_: print("worker progress"))
+    session._svi_many_worker({"directory": str(tmp_path)}, 0, None)
+
+    assert "worker progress" in capsys.readouterr().out
+    assert "worker progress" in (tmp_path / "run_0" / "log.txt").read_text()
+
+
 def _double_image_model(amp):
     observation = SingleBandData(
         image=np.zeros((7, 7)), noise=np.ones((7, 7)),
