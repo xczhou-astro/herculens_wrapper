@@ -574,8 +574,13 @@
                 <div class="control-group" style="margin-bottom: 24px;">
                     <div class="section-title">Output Settings</div>
                     <div class="control-group">
-                        <label>Output Folder (Defaults to FITS File Path)</label>
-                        <input type="text" id="output-folder" placeholder="Defaults to FITS file directory">
+                        <label for="output-folder">Output Folder (Defaults to FITS File Path)</label>
+                        <div style="display: flex; gap: 8px;">
+                            <input type="text" id="output-folder" placeholder="Select or enter output folder" style="flex: 1; min-width: 0;">
+                            <button type="button" class="secondary" id="btn-browse-output-folder" style="white-space: nowrap;">
+                                Browse...
+                            </button>
+                        </div>
                     </div>
                 </div>
 
@@ -842,6 +847,7 @@
             pctMaxSlider: document.getElementById('pct-max'),
             pctMaxVal: document.getElementById('pct-max-val'),
             outputFolderInput: document.getElementById('output-folder'),
+            btnBrowseOutputFolder: document.getElementById('btn-browse-output-folder'),
             
             cropControls: document.getElementById('crop-controls'),
             paintControls: document.getElementById('paint-controls'),
@@ -1158,6 +1164,24 @@
                     }
                 } catch (err) {
                     showToast("Error opening file dialog", true);
+                }
+            });
+
+            el.btnBrowseOutputFolder.addEventListener('click', async () => {
+                el.btnBrowseOutputFolder.disabled = true;
+                try {
+                    const res = await fetch('/api/select_folder', { method: 'POST' });
+                    const data = await res.json();
+                    if (res.ok && data.success && data.folder) {
+                        el.outputFolderInput.value = data.folder;
+                        state.outputFolder = data.folder;
+                    } else if (!res.ok) {
+                        showToast(data.message || "Error opening folder dialog", true);
+                    }
+                } catch (err) {
+                    showToast("Error opening folder dialog. Please enter the output folder path manually.", true);
+                } finally {
+                    el.btnBrowseOutputFolder.disabled = false;
                 }
             });
 

@@ -2,6 +2,37 @@
 
 本文只介绍公开 API 的方法和用法。所有公开对象均从 `herculens_wrapper.api` 导入。
 
+## Sky Workbench：从 FITS 大图生成 STARRED PSF
+
+本地网页按「载入 sky 图像 → 查找点源候选 → 人工选择 → STARRED 拟合 PSF」
+的顺序工作。PSF 优化步骤参考 `coadd/psf_modelling.py`。启动：
+
+```bash
+python -m pip install -r sky_workbench/requirements.txt
+python -m sky_workbench.app
+```
+
+打开 <http://127.0.0.1:5073>，选择本机 FITS（默认识别 `SCI` 和 `ERR` HDU）。
+图像使用与 `coadd/starfinder.py` 相同的 `viridis` 对数配色，并保持原始像素比例。
+滚轮缩放、拖动平移，在当前视野查找候选，点击选用或取消点源。
+设置奇数像素的输出 PSF 尺寸并选择输出文件夹后运行 STARRED。拟合切片比
+输出 PSF 每边多 10 像素，输出从中心裁取，仅保存与原图相同像素尺度的
+`psf_modelled.fits`。同时保存 `selected_stars.csv`、`selection.json` 和
+`starred.log`。拟合时为每颗星估计并拟合局部常数背景，读取可用的
+`COVERAGE_MASK` / `DQ`，屏蔽附近明显点源。页面显示 PSF 和观测、模型、
+`残差 / ERR` 对比图；输出目录还有 `quality.json`、`quality.png`、
+`star_residuals.fits` 和 `radial_profiles.csv`。选中至少 3 颗星时，先留出
+最后一颗做独立验证，再用全部星拟合最终 PSF，并保存 `holdout_quality.png`。
+边缘点源的缩略图可显示缺失区域；输出 PSF 覆盖的区域仍须完全落在原图内。
+
+`coadd/coadd.py` 使用 WCS 双线性重采样和逆方差合并，并未调用 AstroDrizzle。
+重采样仍会产生相邻像素间的噪声相关性；`ERR` 只描述逐像素标准差，因此
+质量图中的 `残差 / ERR` 是诊断量，不能单独当作严格的独立像素卡方检验。
+
+STARRED 需要 `starred-astro` 和 JAX。程序优先使用当前 Python；也会查找本机
+Conda 的 `utils` 或 `herculens` 环境。可用 `STARRED_PYTHON=/path/to/python`
+指定拟合所用的解释器。网页默认只监听 `127.0.0.1`。
+
 ## 交互式点源 ray-tracing viewer
 
 仓库包含一个独立的本地界面，用于从已有质量模型检查点源及其扩展

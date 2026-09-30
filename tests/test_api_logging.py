@@ -634,6 +634,135 @@ def test_mass_light_warm_start_leaves_source_and_point_source_new(tmp_path):
     np.testing.assert_array_equal(initial["ps_amp_0"], np.full(4, 5.0))
 
 
+def test_mass_only_parametric_warm_start_keeps_light_new_and_mass_free(tmp_path):
+    """Cross-band EPL starts import no light, pixels, or fixed mass priors."""
+    import json
+    import jax
+
+    mass = MassProfile(["EPL", "SHEAR"], prior=[
+        {
+            "theta_E": [0.1, 0.6], "gamma": [1.5, 2.5],
+            "e1": [-0.2, 0.2], "e2": [-0.2, 0.2],
+            "center_x": [-0.1, 0.1], "center_y": [-0.1, 0.1],
+        },
+        {"ra_0": 0.0, "dec_0": 0.0, "gamma1": [-0.1, 0.1], "gamma2": [-0.1, 0.1]},
+    ])
+    light_prior = {
+        "amp": [2.0, 0.1], "sigma": [0.03, 0.2],
+        "center_x": [-0.1, 0.1], "center_y": [-0.1, 0.1],
+    }
+    model = SingleBandModel(
+        profiles=LensProfileCollection(
+            lens_mass=mass,
+            lens_light=LightProfile("GAUSSIAN", prior=light_prior),
+            source_light=LightProfile("GAUSSIAN", prior=light_prior),
+        ),
+        observation=SingleBandData(
+            image=np.zeros((7, 7)), noise=np.ones((7, 7)),
+            psf=np.ones((1, 1)), pixel_scale=0.03,
+        ),
+    )
+    saved_mass = [
+        {"theta_E": 0.4, "gamma": 2.1, "e1": 0.03, "e2": -0.02,
+         "center_x": 0.01, "center_y": -0.01},
+        {"ra_0": 0.0, "dec_0": 0.0, "gamma1": 0.02, "gamma2": -0.01},
+    ]
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": saved_mass,
+        "kwargs_lens_light": [{"amp": 999.0, "sigma": 999.0}],
+        "kwargs_source": [{
+            "pixels": {"_format": "pixelated_pixels_fits", "file": "missing.fits"},
+        }],
+    }))
+
+    seed = 42
+    fresh = model.prob_model.get_sample(jax.random.PRNGKey(seed))
+    initial = model.initialize(seed=seed, init_lens_mass_path=tmp_path)
+    # The light values are exactly the new model's seed draw, not the old band.
+    for name, value in fresh.items():
+        if name.startswith(("lens_light_", "source_")):
+            np.testing.assert_array_equal(initial[name], value)
+    for index, component in enumerate(saved_mass):
+        for name, value in component.items():
+            site = f"lens_{name}_{index}"
+            if site in initial:
+                assert float(initial[site]) == value
+
+    # Updating stored initial values must not turn a mass prior into a scalar.
+    _, parameters = model.definition.as_dicts()
+    assert isinstance(parameters["lens_mass_params_list"][0]["theta_E"], list)
+    resampled = model.prob_model.get_sample(jax.random.PRNGKey(seed + 1))
+    assert "lens_theta_E_0" in resampled
+    assert float(resampled["lens_theta_E_0"]) != 0.4
+    assert float(resampled["lens_light_amp_0"]) != float(initial["lens_light_amp_0"])
+    assert float(resampled["source_amp_0"]) != float(initial["source_amp_0"])
+
+
+def _double_image_model(amp):
+    observation = SingleBandData(
+        image=np.zeros((7, 7)), noise=np.ones((7, 7)),
+        psf=np.eye(3), pixel_scale=0.1,
+    )
+    mass = MassProfile("SIE", prior={
+        "theta_E": [0.05, 0.2], "e1": [-0.1, 0.1], "e2": [-0.1, 0.1],
+        "center_x": 0.0, "center_y": 0.0,
+    })
+    points = PointSourceProfile("IMAGE_POSITIONS", prior={
+        "ra": [-0.1, 0.1], "dec": [0.0, 0.0],
+        "n_images": 2, "sigma_image": 0.01, "sigma_source": 0.001,
+        "amp": amp,
+    })
+    return SingleBandModel(
+        profiles=LensProfileCollection(lens_mass=mass, point_source=points),
+        observation=observation,
+    )
+
+
+def test_double_image_explicit_log_normal_amplitudes_are_free_and_restored(tmp_path):
+    import json
+    import jax
+
+    model = _double_image_model({"lognormal": [-1.0, 0.3]})
+    draw = model.prob_model.get_sample(jax.random.PRNGKey(42))
+    assert np.shape(draw["ps_amp_0"]) == (2,)
+    assert np.all(np.asarray(draw["ps_amp_0"]) > 0)
+    assert model.definition.has_free_parameters
+    kwargs = model.prob_model.params2kwargs(draw)
+    np.testing.assert_array_equal(kwargs["kwargs_point_source"][0]["amp"], draw["ps_amp_0"])
+
+    (tmp_path / "kwargs_result.json").write_text(json.dumps({
+        "kwargs_lens": [{"theta_E": 0.12, "e1": 0.0, "e2": 0.0,
+                         "center_x": 0.0, "center_y": 0.0}],
+        "kwargs_point_source": [{"ra": [-0.1, 0.1], "dec": [0.0, 0.0],
+                                 "amp": [0.4, 0.7]}],
+    }))
+    restored = model.initialize(seed=42, init_params_path=tmp_path)
+    np.testing.assert_allclose(restored["ps_amp_0"], [0.4, 0.7])
+
+
+def test_double_image_length_two_amplitudes_remain_fixed():
+    import jax
+
+    model = _double_image_model([0.4, 0.7])
+    draw = model.prob_model.get_sample(jax.random.PRNGKey(42))
+    assert "ps_amp_0" not in draw
+    kwargs = model.prob_model.params2kwargs(draw)
+    np.testing.assert_allclose(kwargs["kwargs_point_source"][0]["amp"], [0.4, 0.7])
+
+
+@pytest.mark.parametrize("prior", [
+    {"lognormal": [-1.0, 0.0]},
+    {"lognormal": [0.0]},
+    {"uniform": [0.1, 1.0]},
+])
+def test_double_image_rejects_invalid_amplitude_prior(prior):
+    import jax
+
+    model = _double_image_model(prior)
+    with pytest.raises(ValueError, match="point_source\\[0\\]\\.amp"):
+        model.prob_model.get_sample(jax.random.PRNGKey(42))
+
+
 def test_image_match_warmup_keeps_mass_light_and_copies_point_source(monkeypatch, tmp_path):
     """Warmup updates Matérn and point-source sites before the full SVI."""
     import json

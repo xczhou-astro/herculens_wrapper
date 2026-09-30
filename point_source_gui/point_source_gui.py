@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """Interactive ray-tracing viewer for an image and a fitted Herculens mass model.
 
-The viewer deliberately keeps its input contract small: an observed FITS image,
-a ``kwargs_result.json`` (or its run directory), the pixel scale, and the mass
-profile order.  The profile order is discovered from a neighbouring saved
-configuration when available, otherwise it can be entered in the browser.
+The viewer reads an observed FITS image, ``kwargs_result.json``, and the saved
+source-plane FITS when available. The mass profile order is discovered from a
+neighbouring configuration or entered in the browser.
 """
 
 from __future__ import annotations
@@ -58,6 +57,7 @@ class ViewerModel:
     magnification_display: list[int]
     critical_curves: list[list[list[float]]]
     caustics: list[list[list[float]]]
+    source: dict[str, Any] | None
 
 
 ACTIVE_MODEL: ViewerModel | None = None
@@ -101,6 +101,36 @@ def _load_json(path: Path) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object in {path}.")
     return payload
+
+
+def _find_source_file(value: str | None, result: dict[str, Any], result_file: Path) -> Path | None:
+    """Prefer an explicit source FITS, then the file referenced by the fit."""
+    if value:
+        supplied = Path(value).expanduser()
+        candidate = supplied / "kwargs_source_pixels.fits" if supplied.is_dir() else supplied
+        if not candidate.is_file() or candidate.suffix.lower() not in (".fits", ".fit", ".fts"):
+            raise FileNotFoundError(f"Choose a valid source-plane FITS file: {candidate}")
+        return candidate.resolve()
+    for entry in result.get("kwargs_source") or []:
+        pixels = entry.get("pixels") if isinstance(entry, dict) else None
+        if isinstance(pixels, dict) and isinstance(pixels.get("file"), str):
+            candidate = result_file.parent / pixels["file"]
+            if candidate.is_file() and candidate.suffix.lower() in (".fits", ".fit", ".fts"):
+                return candidate.resolve()
+    candidate = result_file.parent / "kwargs_source_pixels.fits"
+    return candidate.resolve() if candidate.is_file() else None
+
+
+def _run_configuration(result_file: Path) -> dict[str, Any]:
+    for directory in (result_file.parent, result_file.parent.parent):
+        for name in ("model_configuration.json", "config.json", "configuration.json"):
+            candidate = directory / name
+            if candidate.is_file():
+                try:
+                    return _load_json(candidate)
+                except (OSError, ValueError, json.JSONDecodeError) as error:
+                    LOGGER.warning("Unable to read model configuration %s: %s", candidate, error)
+    return {}
 
 
 def _mass_types_from_configuration(result_file: Path) -> list[str]:
@@ -206,11 +236,13 @@ def _display_image(image: np.ndarray) -> list[int]:
 
 def _display_scalar_map(
     values: np.ndarray, *, logarithmic: bool = False, unit_interval: bool = False,
+    flip_vertical: bool = True,
 ) -> list[int]:
     """Encode a model map for the canvas, with its y axis matching the FITS view."""
     data = np.asarray(values, dtype=float)
     if unit_interval:
-        return np.flipud(np.clip(np.nan_to_num(data, nan=0.0), 0.0, 1.0) * 255).astype(np.uint8).ravel().tolist()
+        normalized = np.clip(np.nan_to_num(data, nan=0.0), 0.0, 1.0) * 255
+        return (np.flipud(normalized) if flip_vertical else normalized).astype(np.uint8).ravel().tolist()
     if logarithmic:
         data = np.log10(np.maximum(data, 1e-8))
     finite = data[np.isfinite(data)]
@@ -221,14 +253,140 @@ def _display_scalar_map(
         normalized = np.zeros_like(data)
     else:
         normalized = np.clip((np.nan_to_num(data, nan=low, posinf=high, neginf=low) - low) / (high - low), 0, 1)
-    return np.flipud(normalized * 255).astype(np.uint8).ravel().tolist()
+    normalized *= 255
+    return (np.flipud(normalized) if flip_vertical else normalized).astype(np.uint8).ravel().tolist()
 
 
-def _fixed_source_extent(caustics: list[list[list[float]]], beta_x: np.ndarray, beta_y: np.ndarray) -> list[float]:
+def _source_mask(
+    result_file: Path, image_path: Path, image_shape: tuple[int, int],
+    config: dict[str, Any],
+) -> np.ndarray:
+    """Use the saved arc mask for the adaptive source grid when available."""
+    observation = config.get("observation", {})
+    mask_name = (
+        observation.get("input_paths", {}).get("source_arc_mask")
+        or observation.get("source_arc_mask_path")
+    ) if isinstance(observation, dict) else None
+    names = ["source_arc_mask.fits", "mask_1.fits", "mask.fits"]
+    candidates = []
+    if mask_name:
+        configured = Path(mask_name).expanduser()
+        candidates.append(configured)
+        names.insert(0, configured.name)
+    directories = (result_file.parent / "data", result_file.parent.parent / "data", image_path.parent)
+    for directory in directories:
+        for name in names:
+            candidates.append(directory / name)
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        with fits.open(candidate) as hdul:
+            mask = np.asarray(hdul[0].data, dtype=bool)
+        if mask.shape == image_shape and np.any(mask):
+            return mask
+    return np.ones(image_shape, dtype=bool)
+
+
+def _uniform_source_extent(
+    mask: np.ndarray, pixel_scale: float,
+    center_x: float, center_y: float, mass_model: Any, kwargs_lens: list[dict[str, Any]],
+    grid_scale: float, supersampling: int,
+) -> list[float]:
+    """Recreate Herculens' square adaptive source grid from its mask outline."""
+    from scipy.ndimage import binary_erosion
+
+    if not np.isfinite(grid_scale) or grid_scale <= 0:
+        raise ValueError("source_grid_scale must be positive.")
+    if supersampling < 1:
+        raise ValueError("supersampling_factor must be positive.")
+    support = np.repeat(np.repeat(mask, supersampling, axis=0), supersampling, axis=1)
+    outline = support & ~binary_erosion(support)
+    rows, columns = np.nonzero(outline)
+    ny, nx = mask.shape
+    step = pixel_scale / supersampling
+    x = (columns + 0.5 - nx * supersampling / 2) * step + center_x
+    y = (rows + 0.5 - ny * supersampling / 2) * step + center_y
+    bx, by = mass_model.ray_shooting(x, y, kwargs_lens)
+    bx, by = np.asarray(bx, dtype=float), np.asarray(by, dtype=float)
+    finite = np.isfinite(bx) & np.isfinite(by)
+    if not np.any(finite):
+        raise ValueError("Cannot locate the source grid: ray tracing returned no finite mask points.")
+    x0, x1 = float(bx[finite].min()), float(bx[finite].max())
+    y0, y1 = float(by[finite].min()), float(by[finite].max())
+    half_size = grid_scale * max(x1 - x0, y1 - y0) / 2
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    return [cx - half_size, cx + half_size, cy - half_size, cy + half_size]
+
+
+def _read_source_plane(
+    path: Path, result_file: Path, image_path: Path, image_shape: tuple[int, int],
+    pixel_scale: float, center_x: float, center_y: float,
+    mass_model: Any, kwargs_lens: list[dict[str, Any]],
+) -> dict[str, Any]:
+    with fits.open(path, memmap=False) as hdul:
+        pixels = np.asarray(hdul[0].data, dtype=float)
+        if pixels.ndim != 2 or not np.any(np.isfinite(pixels)):
+            raise ValueError(f"Source-plane FITS must contain a finite 2-D primary image: {path}")
+        ny, nx = pixels.shape
+        source: dict[str, Any] = {"width": nx, "height": ny, "path": str(path)}
+        if ("X_CORNERS" in hdul) != ("Y_CORNERS" in hdul):
+            raise ValueError(f"Source-plane FITS must contain both X_CORNERS and Y_CORNERS: {path}")
+        if "X_CORNERS" in hdul:
+            x_corners = np.asarray(hdul["X_CORNERS"].data, dtype=float)
+            y_corners = np.asarray(hdul["Y_CORNERS"].data, dtype=float)
+            if x_corners.shape != (ny + 1, nx + 1) or y_corners.shape != x_corners.shape:
+                raise ValueError(f"Source-plane corner arrays do not match source pixels: {path}")
+            if not (np.all(np.isfinite(x_corners)) and np.all(np.isfinite(y_corners))):
+                raise ValueError(f"Source-plane corners contain non-finite coordinates: {path}")
+            source["x_corners"] = x_corners.ravel().tolist()
+            source["y_corners"] = y_corners.ravel().tolist()
+            source["extent"] = [float(x_corners.min()), float(x_corners.max()),
+                                float(y_corners.min()), float(y_corners.max())]
+            source["pixels"] = _display_scalar_map(pixels, flip_vertical=False)
+        else:
+            header = hdul[0].header
+            if all(key in header for key in ("CRPIX1", "CRPIX2", "CRVAL1", "CRVAL2", "CDELT1", "CDELT2")):
+                x_edges = (
+                    (np.array([0.5, nx + 0.5]) - float(header["CRPIX1"]))
+                    * float(header["CDELT1"]) + float(header["CRVAL1"])
+                )
+                y_edges = (
+                    (np.array([0.5, ny + 0.5]) - float(header["CRPIX2"]))
+                    * float(header["CDELT2"]) + float(header["CRVAL2"])
+                )
+                if not (np.all(np.isfinite(x_edges)) and np.all(np.isfinite(y_edges))):
+                    raise ValueError("Source-plane FITS has non-finite physical coordinates.")
+                if x_edges[0] > x_edges[1]:
+                    pixels = np.fliplr(pixels)
+                if y_edges[0] > y_edges[1]:
+                    pixels = np.flipud(pixels)
+                source["extent"] = [float(min(x_edges)), float(max(x_edges)),
+                                    float(min(y_edges)), float(max(y_edges))]
+            else:
+                config = _run_configuration(result_file)
+                grid_scale = float(config.get("source_grid_scale", 1.0))
+                supersampling = int(config.get("supersampling_factor", config.get("numerics", {}).get("supersampling_factor", 1)))
+                mask = _source_mask(result_file, image_path, image_shape, config)
+                source["extent"] = _uniform_source_extent(
+                    mask, pixel_scale, center_x, center_y,
+                    mass_model, kwargs_lens, grid_scale, supersampling,
+                )
+            x0, x1, y0, y1 = source["extent"]
+            if not (x0 < x1 and y0 < y1):
+                raise ValueError(f"Source-plane FITS has zero physical extent: {path}")
+            source["pixels"] = _display_scalar_map(pixels)
+    return source
+
+
+def _fixed_source_extent(caustics: list[list[list[float]]], beta_x: np.ndarray, beta_y: np.ndarray,
+                         source: dict[str, Any] | None = None) -> list[float]:
     """Choose one stationary source-plane field centered on the caustic."""
     curves = [np.asarray(curve, dtype=float) for curve in caustics if len(curve)]
-    if curves:
-        points = np.concatenate(curves, axis=0)
+    if curves or source is not None:
+        points = np.concatenate(curves, axis=0) if curves else np.empty((0, 2))
+        if source is not None:
+            sx0, sx1, sy0, sy1 = source["extent"]
+            points = np.vstack((points, [[sx0, sy0], [sx1, sy1]]))
         x_values, y_values = points[:, 0], points[:, 1]
     else:
         x_values, y_values = beta_x[np.isfinite(beta_x)], beta_y[np.isfinite(beta_y)]
@@ -326,7 +484,14 @@ def _build_model(payload: dict[str, Any]) -> tuple[ViewerModel, Path, Path]:
         vertices = np.asarray(curve, dtype=float)
         mapped_x, mapped_y = mass_model.ray_shooting(vertices[:, 0], vertices[:, 1], kwargs_lens)
         caustics.append(np.column_stack([np.asarray(mapped_x), np.asarray(mapped_y)]).astype(float).tolist())
-    source_extent = _fixed_source_extent(caustics, beta_x, beta_y)
+    source_path = _find_source_file(payload.get("source_path"), result, result_path)
+    source = (
+        _read_source_plane(
+            source_path, result_path, image_path, image.shape, pixel_scale,
+            center_x, center_y, mass_model, kwargs_lens,
+        ) if source_path is not None else None
+    )
+    source_extent = _fixed_source_extent(caustics, beta_x, beta_y, source)
     with np.errstate(divide="ignore", invalid="ignore"):
         absolute_magnification = 1.0 / np.abs(determinant)
 
@@ -337,7 +502,7 @@ def _build_model(payload: dict[str, Any]) -> tuple[ViewerModel, Path, Path]:
         inverse_magnification=determinant, image_extent=extent,
         source_extent=source_extent,
         magnification_display=_display_scalar_map(absolute_magnification, logarithmic=True),
-        critical_curves=critical_curves, caustics=caustics,
+        critical_curves=critical_curves, caustics=caustics, source=source,
     ), image_path, result_path
 
 
@@ -352,11 +517,12 @@ def select_path():
     kind = request.args.get("kind", "file")
     try:
         if sys.platform == "darwin":
-            script = (
-                'POSIX path of (choose folder with prompt "Select result directory")'
-                if kind == "folder"
-                else 'POSIX path of (choose file with prompt "Select FITS image" of type {"fits", "fit", "fts"})'
-            )
+            if kind == "folder":
+                script = 'POSIX path of (choose folder with prompt "Select result directory")'
+            elif kind == "source":
+                script = 'POSIX path of (choose file with prompt "Select source-plane FITS" of type {"fits", "fit", "fts"})'
+            else:
+                script = 'POSIX path of (choose file with prompt "Select FITS image" of type {"fits", "fit", "fts"})'
             response = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
             if response.returncode == 0 and response.stdout.strip():
                 return jsonify({"success": True, "path": response.stdout.strip()})
@@ -377,7 +543,7 @@ def load_model():
             "mass_types": model.mass_types,
             "image_path": str(image_path), "result_path": str(result_path),
             "critical_curves": model.critical_curves, "caustics": model.caustics,
-            "source_extent": model.source_extent,
+            "source_extent": model.source_extent, "source": model.source,
             "magnification": {"pixels": model.magnification_display, "scale": "log10_abs_mu"},
         })
     except Exception as error:

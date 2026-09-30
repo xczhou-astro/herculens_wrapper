@@ -834,7 +834,12 @@ class PixelatedLensLight(LightProfile):
         return {"pixel_grid": self.pixel_grid, "pixelated_prior": self.pixelated_prior}
 
 class PointSourceProfile(Profile):
-    """Point source profile, or an ordered collection of point sources."""
+    """Point source profile, or an ordered collection of point sources.
+
+    For IMAGE_POSITIONS, ``amp={'lognormal': [log_loc, log_scale]}``
+    samples one positive amplitude per image. This explicit form avoids the
+    ambiguity of a two-element list when ``n_images=2`` (two fixed values).
+    """
 
     def __new__(
         cls,

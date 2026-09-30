@@ -1329,7 +1329,31 @@ def create_prob_model(
                                     f"list/array of observed image positions."
                                 )
                         elif ps_type == 'IMAGE_POSITIONS' and key == 'amp':
-                            if isinstance(param, (list, tuple, np.ndarray)) and len(param) == n_img and all(
+                            if isinstance(param, Mapping):
+                                # A length-two list is ambiguous for a double:
+                                # it already means two fixed image amplitudes.
+                                # Use an explicit mapping for a sampled prior.
+                                if set(param) != {'lognormal'}:
+                                    raise ValueError(
+                                        f"For IMAGE_POSITIONS, point_source[{i}].amp "
+                                        "mapping must be {'lognormal': [log_loc, log_scale]}."
+                                    )
+                                prior = param['lognormal']
+                                if (
+                                    not isinstance(prior, (list, tuple)) or len(prior) != 2
+                                    or not all(isinstance(v, (int, float, np.floating)) for v in prior)
+                                    or not np.isfinite(prior).all() or prior[1] <= 0
+                                ):
+                                    raise ValueError(
+                                        f"For IMAGE_POSITIONS, point_source[{i}].amp "
+                                        "lognormal prior requires finite [log_loc, log_scale] "
+                                        "with log_scale > 0."
+                                    )
+                                model[key] = numpyro.sample(
+                                    f'ps_{key}_{i}',
+                                    dist.LogNormal(prior[0], prior[1]).expand((n_img,)).to_event(1),
+                                )
+                            elif isinstance(param, (list, tuple, np.ndarray)) and len(param) == n_img and all(
                                 isinstance(v, (int, float, np.floating)) for v in param
                             ):
                                 model[key] = jnp.asarray(param)
@@ -1344,7 +1368,7 @@ def create_prob_model(
                                 raise ValueError(
                                     f"For IMAGE_POSITIONS, point_source[{i}].amp must be a length-{n_img} "
                                     "list/array, a scalar, or a LogNormal prior "
-                                    "[log_loc, log_scale]."
+                                    "{'lognormal': [log_loc, log_scale]}."
                                 )
                         elif isinstance(param, (list, tuple)):
                             model[key] = _sample_param_from_prior(f'ps_{key}_{i}', key, param)
@@ -1678,7 +1702,18 @@ def create_prob_model(
                         if link_spec is not None:
                             kw[key] = _resolve_link(bank, link_spec, context=f"params2kwargs point_source[{i}].{key}")
                         elif ps_type == 'IMAGE_POSITIONS' and key in ('ra', 'dec', 'amp'):
-                            kw[key] = params[f'ps_{key}_{i}']
+                            site = f'ps_{key}_{i}'
+                            if site in params:
+                                kw[key] = params[site]
+                            elif key == 'amp':
+                                n_img = int(point_source_model.get('n_images', 4))
+                                kw[key] = (
+                                    jnp.full((n_img,), float(param))
+                                    if isinstance(param, (int, float, np.floating))
+                                    else jnp.asarray(param)
+                                )
+                            else:
+                                raise KeyError(f"Missing sampled point-source position {site!r}.")
                         elif isinstance(param, list):
                             kw[key] = params[f'ps_{key}_{i}']
                         else:
@@ -2010,7 +2045,10 @@ def kwargs2params(
                     continue
                 if _normalize_link_spec(param) is not None:
                     continue
-                if isinstance(param, list):
+                if isinstance(param, list) or (
+                    ps_type == 'IMAGE_POSITIONS' and key == 'amp'
+                    and isinstance(param, Mapping) and 'lognormal' in param
+                ):
                     if i >= len(kwargs['kwargs_point_source']) or key not in kwargs['kwargs_point_source'][i]:
                         continue
                     params[f'ps_{key}_{i}'] = jnp.asarray(kwargs['kwargs_point_source'][i][key])

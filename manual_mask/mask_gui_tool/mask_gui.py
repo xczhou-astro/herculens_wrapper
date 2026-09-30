@@ -217,6 +217,41 @@ def select_file_dialog():
         return jsonify({"file": file_path, "success": True})
     return jsonify({"file": None, "success": False, "message": "No file selected"})
 
+@app.route("/api/select_folder", methods=["POST"])
+def select_folder_dialog():
+    """Open a native OS folder dialog to select the output directory."""
+    folder_path = None
+    root = None
+    try:
+        if sys.platform == "darwin":
+            script = 'POSIX path of (choose folder with prompt "Select Output Folder:")'
+            res = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=120)
+            if res.returncode == 0:
+                folder_path = res.stdout.strip()
+            elif "(-128)" not in res.stderr:
+                raise RuntimeError(res.stderr.strip() or "Folder dialog failed")
+        else:
+            import tkinter as tk
+            from tkinter import filedialog
+            root = tk.Tk()
+            root.withdraw()
+            root.attributes('-topmost', True)
+            folder_path = filedialog.askdirectory(title="Select Output Folder", mustexist=True)
+    except Exception as ex:
+        logger.error(f"Folder dialog error: {ex}")
+        return jsonify({
+            "folder": None,
+            "success": False,
+            "message": "Could not open folder dialog. Please enter the output folder path manually."
+        }), 500
+    finally:
+        if root is not None:
+            root.destroy()
+
+    if folder_path:
+        return jsonify({"folder": folder_path, "success": True})
+    return jsonify({"folder": None, "success": False, "message": "No folder selected"})
+
 @app.route("/api/files", methods=["GET"])
 def get_files():
     """Return initial target file if provided via CLI."""

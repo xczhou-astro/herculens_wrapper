@@ -153,7 +153,8 @@ class ModelDefinition:
     def has_free_parameters(self) -> bool:
         self._refresh_object_profiles()
         return any(
-            isinstance(value, (list, tuple)) and not (len(value) == 4 and value[0] == "correlated")
+            (isinstance(value, (list, tuple)) and not (len(value) == 4 and value[0] == "correlated"))
+            or (name == "amp" and isinstance(value, Mapping) and "lognormal" in value)
             for components in self.parameters.values()
             for profile in components
             for name, value in profile.items()
