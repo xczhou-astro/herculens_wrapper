@@ -153,6 +153,27 @@ amplitudes；`upsilon_kappa` 则设定全局 stellar-mass normalization。若在
 阶段希望固定 light 但保留这条 dependency，在写入或载入 lens-light 参数值后使用
 `profiles.with_fixed(lens_light=True)`。
 
+质量 Gaussian 的积分振幅为
+`A_i = upsilon_kappa * (F_i / sum(F)) * (sigma_i / sigma_ref)**(-ml_gradient)`，
+其中 `F_i=amp_i` 是光的积分通量，`sigma_ref` 是所有 sigma 的几何平均。
+最简单的常数 M/L 情形应固定 `ml_gradient=0.0`；此时
+`kappa_star = upsilon_kappa * I_light / sum(F)`。
+`upsilon_kappa` 的量纲是坐标单位的平方（通常 arcsec²），不是物理 M/L，
+只有梯度为零时才等于总 stellar convergence integral。非零梯度的权重没有
+再次归一化。底层 stellar Gaussian 也没有精确圆形分支，不能同时固定
+某个 Gaussian 的 `e1=e2=0`。
+
+独立验证入口是 `utils/validate_stellar_mge_nfw.py`，在 Herculens 环境运行：
+
+```bash
+python utils/validate_stellar_mge_nfw.py --results-dir /path/to/pixelated_svi
+```
+
+它使用独立的 projected-density 积分验证偏折、收敛度和 Hessian，核对
+sampled lens-light dependency，并生成独立模拟及六参数回收结果。
+NFW 是有限个 Gaussian 的近似，其误差随 `r/R_s` 变化；验证输出保留失败的
+精度门槛、严格圆形边界和径向误差图。不能用拟合优劣或一次回收替代这些检验。
+
 ### 标准椭圆 NFW halo
 
 `NFWEllipseHalo` 对应 `NFW_ELLIPSE_KAPPA`。其 3-D density 是标准 NFW

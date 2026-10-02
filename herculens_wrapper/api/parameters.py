@@ -519,8 +519,12 @@ class StellarMassMGE(MassProfile):
     the stellar MGE is instead rebuilt at every likelihood evaluation from the
     corresponding sampled lens-light Gaussian parameters.  In both modes,
     only ``upsilon_kappa`` and optionally ``ml_gradient`` are independent mass
-    parameters.  ``upsilon_kappa`` is a dimensionless lensing normalization,
-    not a physical mass-to-light ratio.
+    parameters. ``upsilon_kappa`` is an integrated-convergence scale (in
+    squared lens-plane coordinate units), not a physical mass-to-light ratio.
+    At zero gradient it equals the total integral of stellar convergence;
+    at nonzero gradient the Gaussian weights are not renormalized.
+    The current elliptical-Gaussian backend has no exactly circular branch;
+    do not fix a Gaussian's two ellipticity components simultaneously to zero.
     """
 
     def __new__(cls, *args: Any, **kwargs: Any):

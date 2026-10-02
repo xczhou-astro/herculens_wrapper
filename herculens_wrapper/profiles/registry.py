@@ -38,7 +38,16 @@ def register_mass_profiles():
         "INCLINED_EXPONENTIAL_DISK": InclinedExponentialDiskMGE,
     }.items():
         existing = profile_mapping.STRING_MAPPING.get(name)
-        if existing is not None and existing is not profile:
+        # Importing jax_lensing_profiles registers its native elliptical NFW
+        # under this same name. It is the backend of our adapter, so allow
+        # this specific replacement regardless of which package loads first.
+        native_nfw_backend = (
+            name == "NFW_ELLIPSE_KAPPA"
+            and getattr(existing, "__module__", None)
+            == "jax_lensing_profiles.MassModel.Profiles.NFW_ellipse_kappa"
+            and getattr(existing, "__name__", None) == "NFWEllipseKappa"
+        )
+        if existing is not None and existing is not profile and not native_nfw_backend:
             raise RuntimeError(f"Herculens already registered a different profile as {name!r}.")
         profile_mapping.STRING_MAPPING[name] = profile
         mass_model_base.STRING_MAPPING[name] = profile

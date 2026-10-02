@@ -45,6 +45,8 @@ class StellarMGE:
     ``light_*`` vectors are fixed properties of an already fitted lens-light
     MGE.  The sampled ``upsilon_kappa`` and ``ml_gradient`` transform those
     light amplitudes into integrated Gaussian convergence amplitudes.
+    ``upsilon_kappa`` has squared coordinate units; at zero gradient it is
+    the total convergence area. Gradient weighting is not renormalized.
     """
 
     param_names = [

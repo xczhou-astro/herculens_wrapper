@@ -48,3 +48,5 @@ point_source_gui
 source_point_lens_explorer
 manual_mask
 
+presentations/
+.codex-ppt-build/
