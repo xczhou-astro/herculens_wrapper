@@ -127,6 +127,44 @@ result.output()
 
 参数使用四元列表 `[mean, sigma, lower, upper]` 表示采样 prior；标量表示固定参数。
 
+### 独立的批量质量 MGE
+
+`MassProfile.mge()` 返回一个 `MASS_MGE` profile，用数组批量计算 Gaussian
+偏折，与 lens light 没有参数链接。Gaussian 数目在构建模型时指定；改变数目
+需要重建模型和重新编译。
+
+```python
+mass_mge = MassProfile.mge(
+    n_gauss=10,
+    sigma_lims=(0.5 * args.pixel_scale,
+                0.5 * args.pixel_scale * args.crop_size),
+    amp_prior=(-3.0, 1.0),
+    shared_center=True,
+    shared_ellipticity=True,
+    center_prior=(0.0, 0.1, -0.2, 0.2),
+    ellipticity_prior=(0.0, 0.1, -0.5, 0.5),
+)
+profiles = LensProfileCollection(
+    lens_mass=[mass_mge, shear], lens_light=lens_light, source_light=source_light,
+)
+```
+
+`amp_prior=(log_loc, log_scale)` 与 `LightProfile.mge` 使用同样的 LogNormal
+约定：每个 Gaussian 独立满足 `ln(amp_i) ~ Normal(log_loc, log_scale)`，
+使用自然对数。例如 `(-3, 1)` 的中位数约为 `0.05`。
+质量 Gaussian 的振幅是积分 convergence，坐标为 arcsec 时单位为 arcsec²；
+因此数值需按质量尺度设置，不能直接照搬 lens-light 的 flux 振幅。
+`sigma_lims` 被分为 N 个非重叠对数区间，各宽度在自己的区间内按 LogUniform 采样。
+中心和椭率使用 `[mean, std, lower, upper]` TruncatedNormal 先验，分别应用于
+`center_x/center_y` 和 `e1/e2`。
+
+两个共享开关独立：共享时每个坐标/椭率分量只采样一个标量；不共享时采样 N
+个独立值，并且必须显式提供相应的 `center_prior` 或 `ellipticity_prior`。
+共享且未提供先验时，默认分别为 `(0, 0.1, -0.2, 0.2)` 和 `(0, 0.1, -0.5, 0.5)`。
+两者均共享时有 `2*N+4` 个质量参数，均不共享时有 `6*N` 个；剪切另计。
+底层椭圆 Gaussian 没有精确圆形分支，不应将 `e1=e2=0` 同时固定。
+向量化缩小了计算图，具体 GPU 编译和执行速度仍需在目标环境计时。
+
 ### 联合采样 lens light 与 stellar mass MGE
 
 `StellarMassMGE` 默认读取固定的 lens-light MGE，适合将先前结果用于

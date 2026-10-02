@@ -11,6 +11,8 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from ..priors import is_sampled_prior
+
 from .collections import LensProfileCollection
 from .data import SingleBandData
 from ._logging import RunContext, format_configuration, logged_model_run, logged_result_output
@@ -814,7 +816,7 @@ class MultiBandModel:
             values = kwargs_lens[index]
             profile_type = self.prob_model.lens_mass_type_list[index]
             for key, specification in definition.items():
-                if not isinstance(specification, (list, tuple)):
+                if not is_sampled_prior(specification):
                     continue
                 sites = (
                     [f"{band['site_prefix']}/lens_{key}_{index}" for band in self.bands]
@@ -949,7 +951,7 @@ class MultiBandModel:
                     continue
                 profile_type = band["type_list"]["lens_mass_type_list"][index]
                 for key, specification in definition.items():
-                    if not isinstance(specification, (list, tuple)):
+                    if not is_sampled_prior(specification):
                         continue
                     site = (
                         f"{prefix}lens_{key}_{index}"

@@ -2,6 +2,8 @@
 
 import re
 
+from herculens_wrapper.priors import is_sampled_prior
+
 import numpyro
 from herculens.Inference.ProbModel.numpyro import NumpyroModel
 
@@ -108,7 +110,7 @@ def create_multiband_prob_model(
             for key, param in mass_model.items():
                 if is_band_specific(index, key):
                     continue
-                if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
+                if _normalize_link_spec(param) is None and is_sampled_prior(param):
                     site = f'lens_{key}_{index}'
                     values[(index, key)] = _sample_param_from_prior(site, key, param)
         return values
@@ -128,7 +130,7 @@ def create_multiband_prob_model(
                 link_spec = _normalize_link_spec(param)
                 if link_spec is not None:
                     kwargs[key] = _resolve_link(bank, link_spec, context=f'multiband lens_mass[{index}].{key}')
-                elif isinstance(param, (list, tuple)):
+                elif is_sampled_prior(param):
                     site = f'lens_{key}_{index}'
                     if is_band_specific(index, key):
                         kwargs[key] = (
@@ -399,7 +401,7 @@ def _shareable_entries(param_list, type_list, component):
         for key, prior in model.items():
             if component == 'point_source' and key in ('n_images', 'sigma_image', 'sigma_source'):
                 continue
-            if _normalize_link_spec(prior) is not None or not isinstance(prior, (list, tuple)):
+            if _normalize_link_spec(prior) is not None or not is_sampled_prior(prior):
                 continue
             entries.append((component, index, key, prior, _shared_site_name(component, key, index)))
     return entries

@@ -1,7 +1,7 @@
 """Register wrapper-local profile names with the installed Herculens package."""
 
 from .multipole import ELLMPPLOffset, EPLM1M3M4, EPLM3M4, MPPL, MPPLOffset
-from .composite import GNFWMGE, InclinedExponentialDiskMGE, NFWEllipseKappa, StellarMGE
+from .composite import GNFWMGE, InclinedExponentialDiskMGE, MassMGE, NFWEllipseKappa, StellarMGE
 
 
 def register_mass_profiles():
@@ -32,6 +32,7 @@ def register_mass_profiles():
             mass_model_base.SUPPORTED_MODELS.append(name)
 
     for name, profile in {
+        "MASS_MGE": MassMGE,
         "STELLAR_MGE": StellarMGE,
         "GNFW_MGE": GNFWMGE,
         "NFW_ELLIPSE_KAPPA": NFWEllipseKappa,

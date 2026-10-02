@@ -9,6 +9,8 @@ from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
+from ..priors import is_sampled_prior
+
 
 class Parameter:
     """A parameter's sampling definition (``prior``) and current state (``value``)."""
@@ -237,12 +239,12 @@ class Profile:
             link = self._specification(name)["link"]
             if link is not None and mode == "inference": values[name] = link
             elif link is not None:
-                candidate = link.value if link.value is not None else link.prior if not isinstance(link.prior, (list, tuple)) else None
+                candidate = link.value if link.value is not None else link.prior if not is_sampled_prior(link.prior) else None
                 if candidate is None: raise ValueError(f"Cannot freeze {self.profile_type}.{name}; linked value is unavailable.")
                 values[name] = candidate
             elif mode == "inference" and parameter.prior is not None: values[name] = parameter.prior
             elif mode == "fixed" and parameter.value is not None: values[name] = parameter.value
-            elif mode == "fixed" and parameter.prior is not None and not isinstance(parameter.prior, (list, tuple)): values[name] = parameter.prior
+            elif mode == "fixed" and parameter.prior is not None and not is_sampled_prior(parameter.prior): values[name] = parameter.prior
             elif mode == "inference" and parameter.value is not None: values[name] = parameter.value
             else: raise ValueError(f"{self.profile_type}.{name} has no {mode} specification.")
         return values
@@ -508,6 +510,72 @@ class MassProfile(Profile):
         method unless this hook is present.
         """
         return (self.profile_type,), {}
+
+    @classmethod
+    def mge(
+        cls,
+        n_gauss: int,
+        sigma_lims: tuple[float, float] | list[float],
+        *,
+        amp_prior: tuple[float, float] | list[float],
+        shared_center: bool = True,
+        shared_ellipticity: bool = True,
+        center_prior: tuple[float, float, float, float] | list[float] | None = None,
+        ellipticity_prior: tuple[float, float, float, float] | list[float] | None = None,
+    ) -> "MassProfile":
+        """One batched projected-mass MGE, independent of lens light.
+
+        ``amp_prior=[log_loc, log_scale]`` defines independent LogNormal
+        amplitudes, using the same natural-log convention as
+        :meth:`LightProfile.mge`. Each mass amplitude is the Gaussian's
+        integral of convergence (normally arcsec²).
+        Widths are independently LogUniform in disjoint logarithmic bins.
+        Geometry priors are ``[mean, std, lower, upper]`` TruncatedNormals,
+        applied separately to both coordinates or both ellipticity components.
+        Sharing samples one scalar per coordinate/component; otherwise each
+        is a vector of ``n_gauss`` independent draws and an explicit prior is
+        required. Shared geometry defaults to the light-MGE convention.
+        The backend does not support fixing both ellipticities to exactly zero.
+        """
+        if not isinstance(n_gauss, int) or isinstance(n_gauss, bool) or n_gauss < 1:
+            raise ValueError("n_gauss must be a positive integer.")
+        if not isinstance(shared_center, bool) or not isinstance(shared_ellipticity, bool):
+            raise TypeError("shared_center and shared_ellipticity must be bools.")
+        widths = np.asarray(sigma_lims, dtype=float)
+        if widths.shape != (2,) or not np.isfinite(widths).all() or not 0 < widths[0] < widths[1]:
+            raise ValueError("sigma_lims must satisfy 0 < minimum < maximum.")
+        amplitudes = np.asarray(amp_prior, dtype=float)
+        if amplitudes.shape != (2,) or not np.isfinite(amplitudes).all() or amplitudes[1] <= 0:
+            raise ValueError("amp_prior must be finite [log_loc, log_scale] with log_scale > 0.")
+
+        def geometry_prior(prior, shared, name):
+            if prior is None:
+                if not shared:
+                    raise ValueError(f"{name} is required when its shared flag is False.")
+                prior = (0.0, 0.1, -0.2, 0.2) if name == "center_prior" else (0.0, 0.1, -0.5, 0.5)
+            values = np.asarray(prior, dtype=float)
+            if values.shape != (4,) or not np.isfinite(values).all() or values[1] <= 0 or values[2] >= values[3]:
+                raise ValueError(f"{name} must be finite [mean, std, lower, upper] with std > 0 and lower < upper.")
+            if name == "ellipticity_prior" and np.sqrt(2)*max(abs(values[2]), abs(values[3])) >= 1:
+                raise ValueError("ellipticity_prior must keep hypot(e1, e2) < 1.")
+            if shared:
+                return values.tolist()
+            return {"distribution": "truncated_normal", **{
+                key: np.full(n_gauss, value).tolist()
+                for key, value in zip(("loc", "scale", "low", "high"), values)
+            }}
+
+        centers = geometry_prior(center_prior, shared_center, "center_prior")
+        ellipticities = geometry_prior(ellipticity_prior, shared_ellipticity, "ellipticity_prior")
+        edges = np.geomspace(*widths, n_gauss + 1)
+        return cls("MASS_MGE", prior={
+            "amp": {"distribution": "lognormal",
+                    "loc": np.full(n_gauss, amplitudes[0]).tolist(),
+                    "scale": np.full(n_gauss, amplitudes[1]).tolist()},
+            "sigma": {"distribution": "log_uniform", "low": edges[:-1].tolist(), "high": edges[1:].tolist()},
+            "center_x": deepcopy(centers), "center_y": deepcopy(centers),
+            "e1": deepcopy(ellipticities), "e2": deepcopy(ellipticities),
+        })
 
 
 class StellarMassMGE(MassProfile):

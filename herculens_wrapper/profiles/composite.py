@@ -39,6 +39,40 @@ def _nfw_ellipse_backend():
     return _NFWEllipseKappa
 
 
+class MassMGE:
+    """Independent Gaussian convergence evaluated by one vectorized backend.
+
+    Amplitudes and widths are vectors; each geometry parameter may be a
+    shared scalar or a vector. The vector length determines the fixed model
+    size and is not an additional sampling parameter.
+    """
+    param_names = ["amp", "sigma", "center_x", "center_y", "e1", "e2"]
+    lower_limit_default = {name: -1e6 for name in param_names}
+    upper_limit_default = {name: 1e6 for name in param_names}
+    fixed_default = {name: False for name in param_names}
+
+    def __init__(self):
+        _, backend = _mge_backend()
+        self._mge = backend()
+
+    @staticmethod
+    def _arrays(amp, sigma, center_x, center_y, e1, e2):
+        amp, sigma = jnp.asarray(amp), jnp.asarray(sigma)
+        if amp.ndim != 1 or sigma.shape != amp.shape or amp.size == 0:
+            raise ValueError("MASS_MGE requires nonempty, matching 1-D amp and sigma vectors.")
+        return (amp, sigma, *(jnp.broadcast_to(jnp.asarray(value), amp.shape)
+                            for value in (e1, e2, center_x, center_y)))
+
+    def function(self, x, y, amp, sigma, center_x, center_y, e1, e2):
+        return self._mge.function(x, y, *self._arrays(amp, sigma, center_x, center_y, e1, e2))
+
+    def derivatives(self, x, y, amp, sigma, center_x, center_y, e1, e2):
+        return self._mge.derivatives(x, y, *self._arrays(amp, sigma, center_x, center_y, e1, e2))
+
+    def hessian(self, x, y, amp, sigma, center_x, center_y, e1, e2):
+        return self._mge.hessian(x, y, *self._arrays(amp, sigma, center_x, center_y, e1, e2))
+
+
 class StellarMGE:
     """Light-tracing stellar convergence with global scale and M/L gradient.
 

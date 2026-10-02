@@ -7,6 +7,8 @@ from typing import Any, Literal, Mapping, Sequence
 
 import numpy as np
 
+from ..priors import is_distribution_prior
+
 from .parameters import (
     LightProfile,
     MassProfile,
@@ -154,6 +156,7 @@ class ModelDefinition:
         self._refresh_object_profiles()
         return any(
             (isinstance(value, (list, tuple)) and not (len(value) == 4 and value[0] == "correlated"))
+            or is_distribution_prior(value)
             or (name == "amp" and isinstance(value, Mapping) and "lognormal" in value)
             for components in self.parameters.values()
             for profile in components

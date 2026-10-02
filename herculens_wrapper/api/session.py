@@ -473,15 +473,16 @@ class SingleBandModel:
         """
         if self.initial_parameters is not None:
             return int(sum(np.asarray(value).size for value in self.initial_parameters.values()))
+        from ..priors import is_sampled_prior, sampled_prior_size
         _, parameter_lists = self.definition.as_dicts()
         return sum(
-            1
+            sampled_prior_size(prior)
             for component in parameter_lists.values()
             for profile in component
             for name, prior in profile.items()
             if name != "_stellar_lens_light_indices"
-            if isinstance(prior, (list, tuple))
-            and not (len(prior) == 4 and prior[0] == "correlated")
+            if is_sampled_prior(prior)
+            and not (isinstance(prior, (list, tuple)) and len(prior) == 4 and prior[0] == "correlated")
         )
     def _build(self) -> None:
         """Create the backend model from the declared profiles and numerics."""

@@ -42,6 +42,7 @@ from herculens.MassModel.mass_model import MassModel
 from herculens.PointSourceModel.point_source_model import PointSourceModel
 
 from herculens_wrapper.profiles import register_mass_profiles
+from herculens_wrapper.priors import is_distribution_prior, is_sampled_prior
 
 # Register wrapper-local mass profiles before any LensImage builds a MassModel.
 register_mass_profiles()
@@ -665,6 +666,29 @@ def _is_dynamic_stellar_definition(mass_definition):
     return _STELLAR_LENS_LIGHT_INDICES in mass_definition
 
 
+def _named_prior_distribution(param):
+    """Construct a scalar or vector distribution from an explicit specification."""
+    name = param['distribution']
+    fields = {
+        'uniform': ('low', 'high'),
+        'log_uniform': ('low', 'high'),
+        'lognormal': ('loc', 'scale'),
+        'truncated_normal': ('loc', 'scale', 'low', 'high'),
+    }
+    if name not in fields or set(param) != {'distribution', *fields[name]}:
+        raise ValueError(f"Invalid named prior specification: {param!r}.")
+    values = {key: jnp.asarray(param[key]) for key in fields[name]}
+    if name == 'uniform':
+        distribution = dist.Uniform(**values)
+    elif name == 'log_uniform':
+        distribution = dist.LogUniform(**values)
+    elif name == 'lognormal':
+        distribution = dist.LogNormal(**values)
+    else:
+        distribution = dist.TruncatedNormal(**values)
+    return distribution.to_event(len(distribution.batch_shape))
+
+
 def _sample_param_from_prior(site_name, key, param):
     """
     Sample a parameter prior based on specification convention:
@@ -673,6 +697,8 @@ def _sample_param_from_prior(site_name, key, param):
     - len == 4: TruncatedNormal(mean, std, low, high)
     - scalar: fixed value
     """
+    if is_distribution_prior(param):
+        return numpyro.sample(site_name, _named_prior_distribution(param))
     if isinstance(param, (list, tuple)):
         if len(param) == 2:
             if key == 'amp' or key.endswith('_amp'):
@@ -851,7 +877,13 @@ def param_list_to_init_kwargs(param_list, type_list, lens_image):
             if link_spec is not None and link_spec[0] == 'lens_light' and link_spec[1] == 'flux_centroid':
                 pending_lens_light_links.append((index, k, link_spec))
                 continue
-            if isinstance(v, (list, tuple)):
+            if is_distribution_prior(v):
+                distribution = _named_prior_distribution(v)
+                # Independent wraps the vector distribution; use its base
+                # distribution for elementwise quantiles.
+                base_distribution = getattr(distribution, 'base_dist', distribution)
+                kwargs_model[k] = base_distribution.icdf(jnp.full(distribution.event_shape, .5))
+            elif isinstance(v, (list, tuple)):
                 kwargs_model[k] = v[0]
             else:
                 kwargs_model[k] = v
@@ -1174,7 +1206,7 @@ def create_prob_model(
                             model[key] = override_value
                         elif link_spec is not None:
                             model[key] = _resolve_link(bank, link_spec, context=f"lens_mass[{i}].{key}")
-                        elif isinstance(param, (list, tuple)):
+                        elif is_sampled_prior(param):
                             model[key] = _sample_param_from_prior(f'lens_{key}_{i}', key, param)
                         else:
                             model[key] = param
@@ -1540,7 +1572,7 @@ def create_prob_model(
                                 bank, link_spec,
                                 context=f"params2kwargs lens_mass[{i}].{key}",
                             )
-                        elif isinstance(param, (list, tuple)):
+                        elif is_sampled_prior(param):
                             kw[key] = params[f'lens_{key}_{i}']
                         else:
                             kw[key] = param
@@ -1981,7 +2013,7 @@ def kwargs2params(
             for key, param in lens_mass_model.items():
                 if key == _STELLAR_LENS_LIGHT_INDICES:
                     continue
-                if _normalize_link_spec(param) is None and isinstance(param, (list, tuple)):
+                if _normalize_link_spec(param) is None and is_sampled_prior(param):
                     if restored_q_phi is not None and key in {'q', 'phi'}:
                         params[f'lens_{key}_{i}'] = jnp.asarray(
                             restored_q_phi[0 if key == 'q' else 1]
