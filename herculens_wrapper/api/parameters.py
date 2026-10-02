@@ -131,15 +131,27 @@ class Profile:
         for name, item in values.items(): self.parameter(name).value = item
         return self
 
-    def initialize_from(self, path: str | Path, *, component: str) -> "Profile":
-        """Declare a saved component whose values should be fixed at model initialization.
+    def initialize_from(
+        self, initial_parameters: Any, *, components: Sequence[str] | None = None,
+        component_idx: Sequence[int] | None = None,
+        component: str | None = None,
+    ) -> "Profile":
+        """Fix selected profiles using strictly aligned parameter values.
 
-        ``path`` must explicitly name a ``kwargs_result.json`` file.  The
-        profile itself deliberately does not read that file: its enclosing
-        model resolves the declaration during :meth:`initialize`, validates
-        the component and profile index, and rebuilds the inference model so
-        these parameters are not sampled.
+        ``components`` selects unique profile names, not physical groups.
+        Use ``component_idx`` for zero-based indices when names repeat. Values may
+        be a mapping, an ordered parameter list, or a kwargs_result.json file.
+        Configure profiles before constructing the model. PixelatedSource
+        takes a fixed physical 2D ``pixels`` array and retains its grid settings.
+
+        The legacy ``initialize_from(path, component='lens_mass')`` form
+        remains a deferred declaration resolved by the enclosing model.
         """
+        if not (isinstance(initial_parameters, (str, Path))
+                and component is not None and components is None and component_idx is None):
+            _initialize_fixed_profiles([self], initial_parameters, components, component_idx, component)
+            return self
+        path = initial_parameters
         component = str(component)
         allowed = {"lens_mass", "lens_light", "source_light", "point_source"}
         if component not in allowed:
@@ -291,6 +303,21 @@ class ProfileCollection(Sequence[Profile]):
         self._warm_start = None
         return self
 
+    def initialize_from(
+        self, initial_parameters: Any, *, components: Sequence[str] | None = None,
+        component_idx: Sequence[int] | None = None,
+        component: str | None = None,
+    ) -> "ProfileCollection":
+        """Fix selected mass/light profiles after strict parameter validation.
+
+        ``components`` contains unique profile names, e.g. ``['EPL']``.
+        Use zero-based ``component_idx=[0]`` to select repeated profiles.
+        The selectors are mutually exclusive; omitted means every profile.
+        Returns this group for chaining.
+        """
+        _initialize_fixed_profiles(list(self), initial_parameters, components, component_idx, component)
+        return self
+
 
 def _validate_component_name(component: str, *, method: str) -> str:
     component = str(component)
@@ -298,6 +325,137 @@ def _validate_component_name(component: str, *, method: str) -> str:
     if component not in allowed:
         raise ValueError(f"component must be one of {sorted(allowed)}, got {component!r}.")
     return component
+
+
+def _initialize_fixed_profiles(profiles, initial_parameters, components, component_idx, component):
+    """Validate the complete selection before changing any profile."""
+    if not profiles or not (all(isinstance(p, MassProfile) for p in profiles)
+                            or all(isinstance(p, LightProfile) for p in profiles)):
+        raise TypeError("initialize_from() supports homogeneous mass or light profile groups.")
+    names = [p.profile_type for p in profiles]
+    if component is not None:
+        allowed_roles = {"lens_mass"} if isinstance(profiles[0], MassProfile) else {"lens_light", "source_light"}
+        if component not in allowed_roles:
+            raise ValueError(f"This profile group requires component in {sorted(allowed_roles)}.")
+    if components is not None and component_idx is not None:
+        raise ValueError("Use only one of components or component_idx.")
+    if component_idx is not None:
+        if isinstance(component_idx, (str, bytes)) or not isinstance(component_idx, (list, tuple)):
+            raise TypeError("component_idx must be a list of zero-based profile indices.")
+        if not component_idx or any(not isinstance(i, int) or isinstance(i, bool) for i in component_idx):
+            raise ValueError("component_idx must contain integer profile indices.")
+        if any(i < 0 or i >= len(profiles) for i in component_idx):
+            raise IndexError(f"component_idx must be within 0..{len(profiles) - 1}.")
+        if len(set(component_idx)) != len(component_idx):
+            raise ValueError("component_idx must not contain duplicate indices.")
+        selected = list(component_idx)
+    elif components is None:
+        requested = set(names)
+        selected = list(range(len(profiles)))
+    else:
+        if isinstance(components, (str, bytes)) or not isinstance(components, (list, tuple)):
+            raise TypeError("components must be a list of profile names.")
+        if not components or any(not isinstance(name, str) for name in components):
+            raise ValueError("components must contain profile names.")
+        requested = {name.upper() for name in components}
+        unknown = requested - set(names)
+        if unknown:
+            raise ValueError(f"Unknown profile components {sorted(unknown)}; available: {names}.")
+        repeated = [name for name in requested if names.count(name) > 1]
+        if repeated:
+            raise ValueError(f"Ambiguous profile names {sorted(repeated)}; use component_idx instead.")
+        selected = [i for i, name in enumerate(names) if name in requested]
+    directory = None
+    saved = initial_parameters
+    if isinstance(saved, (str, Path)):
+        path = Path(saved).expanduser()
+        if path.name != "kwargs_result.json":
+            raise ValueError("initialize_from() requires an explicit kwargs_result.json file.")
+        saved = json.loads(path.read_text())
+        directory = path.parent
+    result_keys = {"lens_mass": "kwargs_lens", "lens_light": "kwargs_lens_light",
+                   "source_light": "kwargs_source"}
+    from_result = isinstance(saved, Mapping) and any(key in saved for key in result_keys.values())
+    if from_result:
+        if component is None:
+            if isinstance(profiles[0], MassProfile):
+                component = "lens_mass"
+            elif all(isinstance(p, PixelatedSource) for p in profiles):
+                component = "source_light"
+            else:
+                candidates = [name for name in ("lens_light", "source_light")
+                              if result_keys[name] in saved]
+                if len(candidates) != 1:
+                    raise ValueError("Select the light kwargs list explicitly, or supply component='lens_light'/'source_light'.")
+                component = candidates[0]
+        if component not in result_keys or result_keys[component] not in saved:
+            raise ValueError(f"Saved result has no parameter list for {component!r}.")
+        saved = saved[result_keys[component]]
+    if isinstance(saved, Mapping):
+        if len(selected) == 1 and not any(name in saved for name in names):
+            entries = {selected[0]: saved}
+        else:
+            entries = {}
+            for i in selected:
+                name = names[i]
+                if names.count(name) > 1:
+                    raise ValueError(f"Repeated {name} profiles require an ordered parameter list.")
+                if name not in saved:
+                    raise ValueError(f"Missing saved parameters for {name}.")
+                entries[i] = saved[name]
+    elif isinstance(saved, (list, tuple)):
+        if from_result:
+            if any(i >= len(saved) for i in selected):
+                raise ValueError("Saved result has no entry for one or more selected profile indices.")
+            entries = {i: saved[i] for i in selected}
+        elif len(saved) == len(profiles):
+            entries = {i: saved[i] for i in selected}
+        elif len(saved) == len(selected):
+            entries = dict(zip(selected, saved))
+        else:
+            raise ValueError("Parameter list must match the whole group or the selected profiles in order.")
+    else:
+        raise TypeError("initial_parameters must be a parameter mapping, ordered list, or kwargs_result.json path.")
+    updates = []
+    for i in selected:
+        profile, values = profiles[i], entries[i]
+        if not isinstance(values, Mapping):
+            raise TypeError(f"Saved parameters for {names[i]}[{i}] must be a mapping.")
+        if isinstance(profile, PixelatedSource):
+            allowed = {"pixels", "pixels_wn", "n_source_grid", "rho_source_grid",
+                       "sigma_source_grid", "pow_lam_source_grid", "scale_lam_source_grid"}
+            if "pixels" not in values or set(values) - allowed:
+                raise ValueError("Fixed PixelatedSource requires pixels and only recognized source parameters.")
+            pixels = values["pixels"]
+            if isinstance(pixels, Mapping):
+                if directory is None or "file" not in pixels:
+                    raise ValueError("Pixel file references require a kwargs_result.json path.")
+                from ..utils import load_array_file
+                pixels = load_array_file(directory / pixels["file"])
+            pixels = np.asarray(pixels)
+            if pixels.ndim != 2 or not np.issubdtype(pixels.dtype, np.number) or not np.all(np.isfinite(pixels)):
+                raise ValueError("Fixed source pixels must be a finite numeric 2D array.")
+            updates.append((profile, {"pixels": pixels.copy()}))
+            continue
+        missing, extra = set(profile._parameters) - set(values), set(values) - set(profile._parameters)
+        if missing or extra:
+            raise ValueError(f"Parameters for {names[i]}[{i}] must align exactly; missing={sorted(missing)}, extra={sorted(extra)}.")
+        fixed = {}
+        for name, value in values.items():
+            array = np.asarray(value)
+            if not np.issubdtype(array.dtype, np.number) or not np.all(np.isfinite(array)):
+                raise ValueError(f"{names[i]}[{i}].{name} must be a finite numeric value.")
+            prior = profile.parameter(name).prior
+            if isinstance(prior, (list, tuple)) and array.ndim:
+                raise ValueError(f"{names[i]}[{i}].{name} requires a scalar fixed value.")
+            fixed[name] = array.copy() if array.ndim else array.item()
+        updates.append((profile, fixed))
+    for profile, values in updates:
+        for name, value in values.items():
+            profile.parameter(name).prior = deepcopy(value)
+            profile.parameter(name).value = deepcopy(value)
+        profile._initialization = None
+        profile._warm_start = None
 
 
 class MassProfile(Profile):

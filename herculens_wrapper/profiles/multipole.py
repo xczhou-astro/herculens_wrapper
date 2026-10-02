@@ -23,6 +23,23 @@ def _normalization(three_minus_gamma, m, radius):
     return jnp.where(coincident, limiting, regular)
 
 
+def _exprel(value):
+    """Evaluate expm1(value)/value, with smooth autodiff at zero.
+
+    Both branches must stay finite: reverse-mode autodiff can otherwise
+    propagate a NaN from the unused 0/0 branch. The Taylor polynomial also
+    supplies the nonzero derivatives needed when gamma is exactly two.
+    """
+    small = jnp.abs(value) < 1e-3
+    safe_value = jnp.where(small, 1.0, value)
+    series = 1.0 + value * (1.0 / 2.0 + value * (
+        1.0 / 6.0 + value * (1.0 / 24.0 + value * (
+            1.0 / 120.0 + value * (1.0 / 720.0 + value / 5040.0)
+        ))
+    ))
+    return jnp.where(small, series, jnp.expm1(safe_value) / safe_value)
+
+
 class MPPL:
     """Multipole perturbation whose radial scaling follows an EPL slope.
 
@@ -43,6 +60,9 @@ class MPPL:
         Cartesian form, so no phase needs to be formed at ``e = 0``.
     gamma : float
         EPL three-dimensional density slope. Normally link this to the EPL.
+        The m=1 potential uses a continuous gauge through gamma=2 by removing
+        a linear potential (constant deflection). The logarithm uses a fixed
+        reference radius of 1 arcsec, preserving the isothermal convention.
     center_x, center_y : float
         Perturbation centre. Normally link these to the EPL centre.
     b : float
@@ -94,8 +114,8 @@ class MPPL:
     def _polar_coordinates(x, y, center_x, center_y):
         x_shifted = x - center_x
         y_shifted = y - center_y
-        # Keeping the epsilon inside sqrt gives finite JAX derivatives at the
-        # exact centre without affecting resolved lens-plane pixels.
+        # Radius softening stabilizes radial derivatives. For m>1 the angular
+        # singularity at the exact centre remains; m=1 uses a Cartesian form.
         radius = jnp.sqrt(x_shifted**2 + y_shifted**2 + 1e-10)
         angle = jnp.arctan2(y_shifted, x_shifted)
         return radius, angle
@@ -127,31 +147,52 @@ class MPPL:
         elif a_m is None or phi_m is None:
             raise ValueError("MPPL requires both 'a_m' and 'phi_m' when ellipticity coordinates are absent.")
 
-        radius, angle = MPPL._polar_coordinates(x, y, center_x, center_y)
+        radius = jnp.sqrt((x - center_x)**2 + (y - center_y)**2 + 1e-10)
         three_minus_gamma = 3.0 - gamma
-        amplitude = _normalization(three_minus_gamma, m, radius)
         if using_ellipticity:
-            # Let e_x = e cos(alpha), e_y = e sin(alpha), where
-            # alpha = m phi_m.  Then
-            #
-            #   a_m cos[m(theta - phi_m)]
-            #       = 2 [e_x cos(m theta) + e_y sin(m theta)] / (1 + e).
-            #
-            # This is algebraically identical to the public e_x/e_y
-            # convention but avoids atan2(0, 0), whose phase is undefined.
             ellipticity = jnp.hypot(e_x, e_y)
-            angular_amplitude = 2.0 * (
-                e_x * jnp.cos(m * angle) + e_y * jnp.sin(m * angle)
-            ) / (1.0 + ellipticity)
-        else:
-            angular_amplitude = a_m * jnp.cos(m * (angle - phi_m))
-        return (
-            radius**three_minus_gamma
-            * amplitude
-            / three_minus_gamma
-            * b ** (gamma - 1.0)
-            * angular_amplitude
-        )
+
+        def dipole(_):
+            # For p=3-gamma, subtract the harmonic r*cos(theta-phi_m)
+            # from the ordinary r**p solution. This changes only a constant
+            # deflection away from the softened centre, leaving kappa and
+            # shear unchanged. The continuous radial factor is
+            #
+            # p/(p+1) * log(r) * exprel((p-1)*log(r)).
+            #
+            # At p=1 it equals log(r)/2; its gamma derivatives also exist.
+            # Use the exact Cartesian dipole rather than softened r*cos(theta)
+            # so the subtracted term is linear and the centre is well defined.
+            x_shifted, y_shifted = x - center_x, y - center_y
+            if using_ellipticity:
+                projection = 2.0 * (e_x * x_shifted + e_y * y_shifted) / (1.0 + ellipticity)
+            else:
+                projection = a_m * (x_shifted * jnp.cos(phi_m) + y_shifted * jnp.sin(phi_m))
+            log_radius = jnp.log(radius)  # r / (1 arcsec)
+            return (
+                b ** (gamma - 1.0) * projection
+                * three_minus_gamma / (three_minus_gamma + 1.0)
+                * log_radius
+                * _exprel((three_minus_gamma - 1.0) * log_radius)
+            )
+
+        def regular(_):
+            _, angle = MPPL._polar_coordinates(x, y, center_x, center_y)
+            if using_ellipticity:
+                # Equivalent to a_m*cos[m*(theta-phi_m)], without forming
+                # atan2(e_y, e_x) at zero amplitude.
+                angular_amplitude = 2.0 * (
+                    e_x * jnp.cos(m * angle) + e_y * jnp.sin(m * angle)
+                ) / (1.0 + ellipticity)
+            else:
+                angular_amplitude = a_m * jnp.cos(m * (angle - phi_m))
+            amplitude = _normalization(three_minus_gamma, m, radius)
+            return (
+                radius**three_minus_gamma * amplitude / three_minus_gamma
+                * b ** (gamma - 1.0) * angular_amplitude
+            )
+
+        return jax.lax.cond(jnp.asarray(m) == 1, dipole, regular, operand=None)
 
     @staticmethod
     def _gradient_at_point(x, y, **kwargs):
@@ -614,12 +655,17 @@ class EPLM1M3M4:
 
 
 class EPLM3M4:
-    """JAXtronomy's EPL plus elliptical ``m=3,4`` multipoles.
+    """EPL plus elliptical ``m=3,4`` multipoles, following lenstronomy/JAXtronomy.
 
     This is the wrapper equivalent of JAXtronomy's
     ``EPL_MULTIPOLE_M3M4_ELL``.  It is intentionally a separate profile from
     :class:`EPLM1M3M4`: omitting ``m=1`` removes both its two nuisance
     parameters and its analytic evaluation from the compiled lens equation.
+
+    ``gamma`` controls only the EPL; the elliptical perturbations retain their
+    isothermal radial dependence. Native phase offsets are eccentric anomalies
+    in radians. The public API accepts degrees and converts them before calling
+    this profile. Hessians use Herculens's ``(f_xx, f_yy, f_xy)`` order.
     """
 
     param_names = [

@@ -315,7 +315,13 @@ class EllipticalMultipole(LensProfileBase):
         def error(x, y, m, a_m, phi_m, center_x, center_y, r_E):
             return jnp.ones_like(x) * jnp.nan
 
-        func_list = [m_equal_1, m_equal_3, m_equal_4, Multipole.function, error]
+        def circular(x, y, m, a_m, phi_m, center_x, center_y, r_E):
+            # The phase is relative to the reference ellipse in every branch.
+            # Evaluate the circular limit in that same frame.
+            x_ref, y_ref = util.rotate(x - center_x, y - center_y, phi_ref)
+            return Multipole.function(x_ref, y_ref, m, a_m, phi_m, r_E=r_E)
+
+        func_list = [m_equal_1, m_equal_3, m_equal_4, circular, error]
 
         return lax.switch(
             case, func_list, x, y, m, a_m, varphi_m, center_x, center_y, r_E
@@ -414,7 +420,11 @@ class EllipticalMultipole(LensProfileBase):
         def error(x, y, m, a_m, phi_m, center_x, center_y, r_E):
             return jnp.ones_like(x) * jnp.nan, jnp.ones_like(x) * jnp.nan
 
-        func_list = [m_equal_1, m_equal_3, m_equal_4, Multipole.derivatives, error]
+        def circular(x, y, m, a_m, phi_m, center_x, center_y, r_E):
+            x_ref, y_ref = util.rotate(x - center_x, y - center_y, phi_ref)
+            return Multipole.derivatives(x_ref, y_ref, m, a_m, phi_m, r_E=r_E)
+
+        func_list = [m_equal_1, m_equal_3, m_equal_4, circular, error]
 
         f_x, f_y = lax.switch(
             case, func_list, x, y, m, a_m, varphi_m, center_x, center_y, r_E
@@ -540,7 +550,11 @@ class EllipticalMultipole(LensProfileBase):
                 jnp.ones_like(x) * jnp.nan,
             )
 
-        func_list = [m_equal_1, m_equal_3, m_equal_4, Multipole.hessian, error]
+        def circular(x, y, m, a_m, phi_m, center_x, center_y, r_E):
+            x_ref, y_ref = util.rotate(x - center_x, y - center_y, phi_ref)
+            return Multipole.hessian(x_ref, y_ref, m, a_m, phi_m, r_E=r_E)
+
+        func_list = [m_equal_1, m_equal_3, m_equal_4, circular, error]
 
         f_xx, f_xy, f_yx, f_yy = lax.switch(
             case, func_list, x, y, m, a_m, varphi_m, center_x, center_y, r_E
@@ -865,4 +879,3 @@ def _F_m4_2_derivative(phi, q):
     )
 
     return term1 + term2 + term3
-

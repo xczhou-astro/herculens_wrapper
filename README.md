@@ -420,6 +420,32 @@ source.center_x.link_to(mass.center_x)
 
 ### 从已有结果固定初始化
 
+在构建模型之前调用 `initialize_from()`。`components` 选择当前组内唯一的
+profile 名称；有重复名称时用从 0 开始的 `component_idx`。两个选择器不能同时使用，
+省略两者会固定所有 profile。所选 profile 的参数名必须完全一致，缺失或多余都会报错；
+未选中的 profile 保留原先的 prior，继续采样。
+
+```python
+mass = MassProfile(["EPL", "SHEAR"], prior=[epl_prior, shear_prior])
+mass.initialize_from({"EPL": epl_values}, components=["EPL"])
+
+# 重复的 EPL 必须使用索引；只有第一个 EPL 被固定。
+mass = MassProfile(["EPL", "EPL", "SHEAR"], prior=[epl_prior, epl_prior, shear_prior])
+mass.initialize_from(initial_parameters, component_idx=[0])
+
+# initial_parameters 可为整个组的有序参数列表，也可仅包含所选项的参数列表。
+# kwargs_result.json 的物理成分列表始终按原始 profile 索引读取。
+mass.initialize_from("previous_run/kwargs_result.json", component_idx=[0])
+
+# LightProfile 组使用相同接口。PixelatedSource 固定物理源图，保留当前网格配置；
+# 像素和正则化参数都不再采样，pixels 的二维形状必须匹配模型源网格。
+source = PixelatedSource(pixel_grid=source_grid)
+source.initialize_from({"pixels": source_pixels}, component_idx=[0])
+```
+
+无需专用的 mass collection，也无需在 `LensProfileCollection` 上添加此方法。
+下面的旧版声明方式继续兼容：
+
 ```python
 mass.initialize_from(
     "previous_run/kwargs_result.json",
@@ -505,6 +531,21 @@ print(profiles.values)
 `m` 必须是固定正整数。两元素列表
 `[low, high]` 表示该区间上的均匀 prior。
 
+`MPPL(m=1)` 支持自由采样 `gamma`，包括穿过 `gamma=2`。
+令 `p=3-gamma`，其势函数采用连续规范：
+`psi_1 = b**(gamma-1) * a_1 * r*cos(theta-phi_1) * p/(p+1)`
+`* log(r) * exprel((p-1)*log(r))`，其中 `exprel(z)=expm1(z)/z`，
+零点用 Taylor 展开计算，保留正确的 `gamma` 梯度。
+半径以 arcsec 表示，对数的参考尺度固定为 1 arcsec；
+`gamma=2` 时连续回到 `a_1*b*r*log(r)*cos(theta-phi_1)/2`。
+实现使用 Cartesian dipole 与已有的微小半径软化，以避免中心角度奇点。
+
+这个规范从旧的非等温 `m=1` 解中减去线性势，去掉发散的常量偏折；
+在远离软化中心处保留同一个密度／剪切扰动。`MPPL_OFFSET(m=1)` 同样采用该解。
+旧的非等温 `m=1` 拟合结果若继续使用，需要同步平移源坐标；
+建议新采样重新初始化，避免直接沿用旧规范下的源位置或源像素图。
+`m=3,4` 的势函数保持原公式。可运行 `utils/validate_mppl.py` 验证密度与导数。
+
 ```python
 epl = MassProfile("EPL", prior=epl_prior)
 
@@ -553,6 +594,42 @@ multipole = MassProfile(
     },
 )
 ```
+
+### EPL plus elliptical m=3,4 multipoles (`EPL_MULTIPOLE_M3M4_ELL`)
+
+`EPL_MULTIPOLE_M3M4_ELL` is the wrapper's JAX-compatible adaptation of the
+lenstronomy/JAXtronomy joint profile. It includes the EPL and both elliptical
+perturbations in one mass component:
+
+```python
+from herculens_wrapper.api import MassProfile, LensProfileCollection
+
+epl_m3m4 = MassProfile("EPL_MULTIPOLE_M3M4_ELL", prior={
+    "theta_E": [0.5, 2.0], "gamma": [1.6, 2.4],
+    "q": [0.3, 0.9], "phi": [-90.0, 90.0],
+    "center_x": [-0.2, 0.2], "center_y": [-0.2, 0.2],
+    "a3_a": [-0.02, 0.02], "delta_phi_m3": [-15.0, 15.0],
+    "a4_a": [-0.02, 0.02], "delta_phi_m4": [-15.0, 15.0],
+})
+profiles = LensProfileCollection(lens_mass=[epl_m3m4])
+```
+
+`gamma` is sampled freely for the EPL. The perturbations remain isothermal,
+with convergence proportional to `1/R`, and do not receive `gamma`. Both terms
+share the EPL center, axis ratio, and reference direction. API angles are in
+degrees; `delta_phi_m3` and `delta_phi_m4` are eccentric anomalies relative to
+the EPL major axis. Amplitudes are dimensionless and become
+`a_m = a*_a * theta_E` internally. Native `e1`, `e2` may replace `q`, `phi`.
+
+The local circular fallback evaluates the perturbation in the reference
+ellipse's frame, preserving its orientation and consistency between the
+potential, deflection, and Hessian as `q` approaches one.
+
+To reproduce the checks against a local lenstronomy source checkout, run
+`python utils/validate_epl_m3m4_ell.py --reference-root ../lenstronomy` in the
+Herculens environment. This checks potential, deflection, and Hessian values,
+the circular limit, derivatives through `gamma=2`, and public API sampling.
+The report is saved to `results/epl_m3m4_validation/validation.json`.
 
 ### JAXtronomy EPL plus elliptical multipoles (`EPL_MULTIPOLE_M1M3M4_ELL`)
 
@@ -627,11 +704,6 @@ not a generalized-EPL elliptical multipole.
 
 `ELL_MPPL_OFFSET` supersedes the earlier `ELL_MPPL` public name.  The older
 `ELL_MPPL` and `EPL_M1M3M4` public profile names are not registered.
-
-`EPL_MULTIPOLE_M3M4_ELL` uses the same JAXtronomy elliptical construction but
-omits m1.  It takes the same parameters except `a1_a` and `delta_phi_m1`:
-`theta_E`, `gamma`, `e1`, `e2`, `center_x`, `center_y`, `a3_a`,
-`delta_phi_m3`, `a4_a`, and `delta_phi_m4`.
 
 ## 5. Pixelated source
 
