@@ -832,9 +832,21 @@ class FitResult:
             raise RuntimeError("This FitResult is not attached to a SingleBandModel.")
         return self._model
 
-    def metrics(self) -> dict[str, float | int | None]:
-        """Return median and, for HMC, maximum-likelihood sample metrics."""
-        metrics = self._require_model()._metrics(self.parameters)
+    def metrics(self) -> dict[str, Any]:
+        """Return image-median and, for HMC, maximum-likelihood sample metrics."""
+        model = self._require_model()
+        if self.samples is not None:
+            components = self.derived.get("component_medians")
+            if components is None or self.derived.get("sample_likelihood_summary") is None:
+                from ..samplers import evaluate_mcmc_component_medians
+                evaluated = evaluate_mcmc_component_medians(model.prob_model, self.samples)
+                summary = evaluated.pop("_sample_likelihood_summary", None)
+                self.derived["component_medians"] = components = evaluated
+                if summary is not None:
+                    self.derived["sample_likelihood_summary"] = summary
+            metrics = model._metrics(self.parameters, prediction=components["total"])
+        else:
+            metrics = model._metrics(self.parameters)
         summary = self.derived.get("sample_likelihood_summary") if self.samples is not None else None
         if summary is None:
             metrics.update({
@@ -854,6 +866,7 @@ class FitResult:
             "reduced_chi2_max_loglike": chi2 / metrics["degrees_of_freedom"],
             "bic_physical_max_loglike": n_physical * np.log(max(n_data, 1)) - 2.0 * max_loglike,
             "max_loglike_sample_index": summary.get("max_loglike_sample_index"),
+            "max_loglike_metric_basis": "maximum_likelihood_hmc_sample",
         })
         return metrics
 
@@ -1560,7 +1573,9 @@ class FitResult:
         if self.samples is not None and components is None:
             from ..samplers import evaluate_mcmc_component_medians
             components = evaluate_mcmc_component_medians(model.prob_model, self.samples)
-            components.pop("_sample_likelihood_summary", None)
+            summary = components.pop("_sample_likelihood_summary", None)
+            if summary is not None:
+                self.derived["sample_likelihood_summary"] = summary
             self.derived["components"] = components
             self.derived["component_medians"] = components
         if self.samples is not None and (

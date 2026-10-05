@@ -204,10 +204,11 @@ def test_modeling_result_fits_writes_source_lens_light_and_psf(
         noise_from_model=lambda *_args: np.ones((3, 3)),
         num_sampling_parameters=1, initial_parameters=None,
         source_grid_scale=1.0,
-        _metrics=lambda _parameters: {
+        _metrics=lambda _parameters, **_kwargs: {
             "chi2_median": 1.0, "log_likelihood_median": -1.0,
             "n_free_parameters": 1, "n_physical_parameters": 1,
             "reduced_chi2_median": 1.0,
+            "n_data_pixels": 9, "degrees_of_freedom": 8,
         },
     )
     monkeypatch.setattr(utils, "kwargs_best_to_json_pixelated_npy", lambda *_args, **_kwargs: {})
@@ -217,6 +218,9 @@ def test_modeling_result_fits_writes_source_lens_light_and_psf(
         parameters={}, details={"guide": object()} if mode == "svi" else {},
         samples={"amp": np.array([1.0, 3.0])} if mode == "hmc" else None,
         derived={
+            "sample_likelihood_summary": {
+                "max_log_likelihood": -1., "chi2_max_loglike": 1., "max_loglike_sample_index": 0,
+            },
             "kwargs": {"kwargs_source": [{"pixels": np.full((4, 4), 99.0)}], "kwargs_lens": []},
             "source_plane": np.full((4, 4), 3.0),
             "component_medians": {

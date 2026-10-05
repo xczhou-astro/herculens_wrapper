@@ -1063,6 +1063,9 @@ def save_metrics(
             'MAX_LOG_LIKELIHOOD': metric_summary['max_log_likelihood'],
             'MAX_LOGLIKE_SAMPLE_INDEX': metric_summary['max_loglike_sample_index'],
         }
+        for name in ("median_metric_basis", "max_loglike_metric_basis", "likelihood_scale"):
+            if name in metric_summary:
+                metrics[name.upper()] = metric_summary[name]
         if source_pixel_scale is not None:
             metrics['SOURCE_PIXEL_SCALE'] = float(source_pixel_scale)
         with open(os.path.join(save_path, 'metrics.json'), 'w') as f:

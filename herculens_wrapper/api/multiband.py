@@ -265,22 +265,29 @@ class MultiBandFitResult:
     def metrics(self) -> dict[str, Any]:
         """Return joint and per-band Gaussian-residual fit metrics."""
         per_band, total_chi2, total_pixels, log_likelihood = {}, 0.0, 0, 0.0
-        kwargs_by_band = self.kwargs_by_band()
+        from .metrics import gaussian_image_metrics
+        hmc_components = None
+        if self.samples is not None:
+            hmc_components = self.details.get("component_medians_by_band")
+            if hmc_components is None or self.details.get("sample_likelihood_summary") is None:
+                hmc_components = self._model._evaluate_hmc_component_medians(self.samples)
+                self.details["component_medians_by_band"] = hmc_components
+                self.details["sample_likelihood_summary"] = self._model._last_hmc_likelihood_summary
+        kwargs_by_band = self.kwargs_by_band() if hmc_components is None else None
         for band in self._model.bands:
-            kwargs = kwargs_by_band[band["name"]]
-            prediction = np.asarray(band["lens_image"].model(**kwargs))
-            noise_map = self._noise_for_band(band, prediction)
-            residual = (prediction - band["image_data"]) / noise_map
-            valid = np.isfinite(residual)
-            if band["fit_mask_bool"] is not None: valid &= np.asarray(band["fit_mask_bool"], bool)
-            chi2, n_pixels = float(np.sum(residual[valid] ** 2)), int(np.sum(valid))
-            noise = noise_map[valid]
-            per_band[band["name"]] = {"chi2": chi2, "n_data_pixels": n_pixels}
-            total_chi2 += chi2; total_pixels += n_pixels
-            log_likelihood += float(
-                -0.5 * self._model.likelihood_scale
-                * np.sum(residual[valid] ** 2 + np.log(2 * np.pi * noise ** 2))
+            prediction = np.asarray(
+                band["lens_image"].model(**kwargs_by_band[band["name"]])
+                if hmc_components is None else hmc_components[band["name"]]["total"]
             )
+            noise_map = self._noise_for_band(band, prediction)
+            band_metrics = gaussian_image_metrics(
+                band["image_data"], prediction, noise_map,
+                mask=band["fit_mask_bool"], likelihood_scale=self._model.likelihood_scale,
+            )
+            chi2, n_pixels = band_metrics["chi2"], band_metrics["n_data_pixels"]
+            per_band[band["name"]] = band_metrics
+            total_chi2 += chi2; total_pixels += n_pixels
+            log_likelihood += band_metrics["log_likelihood"]
         n_parameters = int(sum(np.asarray(value).size for value in self.parameters.values()))
         n_physical = count_physical_parameters(self.parameters)
         dof = max(total_pixels - n_parameters, 1)
@@ -290,7 +297,9 @@ class MultiBandFitResult:
                 "degrees_of_freedom": dof, "reduced_chi2_median": total_chi2 / dof,
                 "log_likelihood_median": log_likelihood,
                 "bic_physical_median": bic_physical,
-                "bands": per_band}
+                "bands": per_band,
+                "median_metric_basis": ("pixelwise_posterior_median_image" if hmc_components is not None else "parameter_snapshot"),
+                "likelihood_scale": float(self._model.likelihood_scale)}
         summary = self.details.get("sample_likelihood_summary") if self.samples is not None else None
         if summary is None:
             metrics.update({"max_log_likelihood": None, "chi2_max_loglike": None,
@@ -306,6 +315,7 @@ class MultiBandFitResult:
                 "reduced_chi2_max_loglike": chi2 / dof,
                 "bic_physical_max_loglike": n_physical * np.log(total_pixels) - 2 * max_loglike,
                 "max_loglike_sample_index": summary.get("max_loglike_sample_index"),
+                "max_loglike_metric_basis": "maximum_likelihood_hmc_sample",
             })
         return metrics
 

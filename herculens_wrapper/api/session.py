@@ -1364,40 +1364,47 @@ class SingleBandModel:
             pass
         return output
 
-    def _metrics(self, parameters: Mapping[str, Any]) -> dict[str, float | int | None]:
-        """Evaluate metrics at the coordinate-wise posterior median parameters."""
+    def _metrics(self, parameters: Mapping[str, Any], *, prediction=None) -> dict[str, Any]:
+        """Evaluate a parameter snapshot, or an explicit posterior median image.
+
+        An image median need not correspond to a parameter vector, so it has
+        an image likelihood but no joint log probability or prior density.
+        """
         if self.prob_model is None:
             raise RuntimeError("Call build() before evaluating metrics.")
-        model_image = self.model_image(parameters)
+        image_median = prediction is not None
+        model_image = self.model_image(parameters) if prediction is None else np.asarray(prediction)
         model_noise = self.noise_from_model(model_image, parameters)
-        valid = np.isfinite(self.data.likelihood_image) & np.isfinite(model_noise) & (model_noise > 0)
-        if self.data.likelihood_mask is not None:
-            valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
-        residual = (self.data.likelihood_image - model_image) / model_noise
-        chi2 = float(np.sum(np.square(residual[valid])))
-        n_data = int(np.sum(valid))
+        from .metrics import gaussian_image_metrics
+        image_metrics = gaussian_image_metrics(
+            self.data.likelihood_image, model_image, model_noise,
+            mask=self.data.likelihood_mask, likelihood_scale=self.likelihood_scale,
+        )
+        chi2, n_data = image_metrics["chi2"], image_metrics["n_data_pixels"]
         n_free = int(sum(np.asarray(value).size for value in parameters.values()))
         n_physical = count_physical_parameters(parameters)
         dof = max(n_data - n_free, 1)
 
         # NumPyro evaluates the exact model likelihood, priors, and any
         # registered factor penalties.  Observed sample sites are likelihoods.
-        from numpyro.infer.util import log_density
-
-        log_probability, trace = log_density(self.prob_model.model, (), {}, parameters)
-        log_probability_value = float(np.asarray(log_probability))
-        log_likelihood = 0.0
-        for site in trace.values():
-            if site.get("type") == "sample" and site.get("is_observed", False):
-                scale = site.get("scale", 1.0)
-                scale = 1.0 if scale is None else float(np.asarray(scale))
-                log_likelihood += scale * float(np.asarray(site["fn"].log_prob(site["value"])).sum())
-        log_prior_and_penalties = log_probability_value - log_likelihood
+        log_probability_value = log_prior_and_penalties = None
+        log_likelihood = image_metrics["log_likelihood"]
+        if not image_median:
+            from numpyro.infer.util import log_density
+            log_probability, trace = log_density(self.prob_model.model, (), {}, parameters)
+            log_probability_value = float(np.asarray(log_probability))
+            log_likelihood = 0.0
+            for site in trace.values():
+                if site.get("type") == "sample" and site.get("is_observed", False):
+                    scale = site.get("scale", 1.0)
+                    scale = 1.0 if scale is None else float(np.asarray(scale))
+                    log_likelihood += scale * float(np.asarray(site["fn"].log_prob(site["value"])).sum())
+            log_prior_and_penalties = log_probability_value - log_likelihood
         bic_physical = n_physical * np.log(max(n_data, 1)) - 2.0 * log_likelihood
         return {
             "log_likelihood_median": float(log_likelihood),
             "log_probability_median": log_probability_value,
-            "log_prior_and_penalties_median": float(log_prior_and_penalties),
+            "log_prior_and_penalties_median": log_prior_and_penalties,
             "chi2_median": chi2,
             "reduced_chi2_median": float(chi2 / dof),
             "bic_physical_median": float(bic_physical),
@@ -1405,4 +1412,8 @@ class SingleBandModel:
             "n_free_parameters": n_free,
             "n_physical_parameters": n_physical,
             "degrees_of_freedom": int(dof),
+            "median_metric_basis": (
+                "pixelwise_posterior_median_image" if image_median else "parameter_snapshot"
+            ),
+            "likelihood_scale": float(self.likelihood_scale),
         }

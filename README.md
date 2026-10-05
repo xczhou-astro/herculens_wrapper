@@ -1062,6 +1062,25 @@ source = result.get_source_plane()
 convergence = result.mass_component_convergence()
 ```
 
+HMC 的 `chi2_median`、`log_likelihood_median`、`bic_physical_median` 和
+`reduced_chi2_median` 统一使用逐像素后验中位数图像，与 `composite.png` 和
+`MEDIAN_MODEL` 一致，不再使用逐参数中位数生成的图像。若噪声依赖模型，
+在该中位数图像上计算噪声；噪声的自由参数使用后验参数中位数。
+图像中位数通常不对应一个真实参数向量，因此其 `log_probability_median`
+及 `log_prior_and_penalties_median` 为 `None`。
+
+`max_log_likelihood` 遍历所有保留的 HMC 样本，计算含 Gaussian normalization
+和 `likelihood_scale` 的观测 likelihood，再取最大值；`chi2_max_loglike` 和
+`bic_physical_max_loglike` 使用同一个样本。它不按 posterior（含先验）选样本，
+也不按中位数参数或最小 χ² 选样本。`max_loglike_sample_index` 为扁平样本的
+零起始索引。χ² 本身不乘 `likelihood_scale`。
+
+两类 BIC 均沿用 `k_physical * ln(N_data) - 2 * log_likelihood`。
+图像中位数的 BIC 是该汇总图像的诊断指标；用于基于拟合参数的模型比较时，
+应使用 `bic_physical_max_loglike`。输出的 `MEDIAN_METRIC_BASIS` 和
+`LIKELIHOOD_SCALE` 记录计算方式。旧结果可用
+`model.recompute_hmc_metrics(run_directory, write=True)` 更新。
+
 ### 保存和绘图
 
 ```python
@@ -1217,3 +1236,34 @@ from herculens_wrapper.api import (
 SingleBandResultsCombination(single_band_results).output("svi")
 MultiBandResultsCombination(multiband_results).output("multiband_svi")
 ```
+
+## 13. HMC 质量与形状的后验误差
+
+可以直接读取保存的 HMC 文件夹，不必重建 image/source model：
+
+```python
+from herculens_wrapper.api import LensGeometry, summarize_hmc_lens
+
+summary = summarize_hmc_lens(
+    "/path/to/pixelated_hmc",
+    geometry=LensGeometry(z_lens=1.53, z_source=3.417, cosmology="Planck18"),
+    max_samples=2000,  # 0 表示使用全部样本；固定 seed 随机选取联合 draws
+)
+print(summary["summaries"])
+```
+
+需要 `hmc_samples.h5`、`kwargs_result.json`，以及当前文件夹或父文件夹中的
+`model_configuration.json` / `config.json`。Joint HMC 用 `band="F277W"`
+选择该 band 的中心及质量定义；`component_index` 选择报告 q/PA 的质量分量。
+结果给出 median、equal-tail 68.27% credible interval 和非对称上下误差，
+由每个联合 posterior draw 计算，保留参数协方差。
+
+有 `theta_E` 参数时默认报告该参数；否则求全模型的圆孔径平均收敛度
+`mean(kappa)=1` 的半径。用 `einstein_definition="mean-kappa"` 可显式选择
+后者。这两种定义对于非圆模型不一定相同，也不等于 critical curve 的面积等效半径。
+质量是圆孔径内所有分量的投影质量 `M_2D`；MGE 的 q/PA 数组逐个 Gaussian 报告，
+不假设 composite 模型存在唯一 q/PA。PA 从模型 +x 轴逆时针计量，模 180°。
+
+后验结果中的质量仅保留 `summaries.mass_within_theta_E_msun`，单位为太阳质量。
+每个样本的积分半径和中心随该样本变化；质量包括圆孔径内全部质量分量。
+`enclosed_mass_from_kwargs` 也可直接对已恢复的 native mass kwargs 调用原孔径质量 API。
