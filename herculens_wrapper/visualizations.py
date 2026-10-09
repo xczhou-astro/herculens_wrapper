@@ -2226,6 +2226,10 @@ def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supe
 def lens_mass_ellipticity_summary(lens_image, kwargs_result):
     """Return API-facing, unit-explicit values for every lens-mass profile.
 
+    Derived quantities use angular coordinates and dimensionless lensing
+    parameters only. No redshift, cosmology, physical mass, or distance
+    conversion is performed, including for the effective Einstein radius.
+
     Herculens evaluates MPPL/elliptical-multipole angles in radians, but public wrapper
     inputs and all human-facing outputs use degrees.  This summary is never
     fed back into the solver, so it intentionally converts those native
@@ -2958,7 +2962,6 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
         lens_image, kwargs_lens, profile_types,
     )
     effective_radius = einstein.get('theta_E_eff_arcsec') if einstein.get('status') == 'ok' else None
-    radial_products = []
 
     for row_index, (label, kappa_map, abs_mag_map, is_total) in enumerate(rows):
         ax_kappa, ax_mag, ax_radial = axes[row_index]
@@ -3023,24 +3026,6 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
         ax_radial.set_xlabel('radius from primary mass centre (arcsec)')
         ax_radial.set_ylabel(r'$\kappa$')
         ax_radial.legend(loc='best', fontsize=8)
-        def finite_values(values):
-            return [float(value) if np.isfinite(value) else None for value in values]
-        radial_products.append({
-            'label': label, 'is_total_model': is_total,
-            'radius_arcsec': finite_values(radii), 'kappa_mean': finite_values(radial_mean),
-            'kappa_p16': finite_values(radial_p16), 'kappa_p84': finite_values(radial_p84),
-        })
-
-    with open(os.path.join(save_path, 'lens_mass_convergence.json'), 'w') as stream:
-        json.dump({
-            'einstein_radius': einstein,
-            'reference_center_arcsec': [center_x, center_y],
-            'radial_coordinate': 'circular radius from the primary mass centre, in arcsec',
-            'percentiles_meaning': 'Spatial azimuthal spread of kappa in each radial bin, not posterior uncertainty.',
-            'decomposition_meaning': 'Convergence is additive; component magnifications are isolated responses. Critical curves belong to the total model.',
-            'mass_parameters': lens_mass_summary.get('profiles', []),
-            'radial_profiles': radial_products,
-        }, stream, indent=2, default=json_serializer, allow_nan=False)
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, 'mass_profile_convergence.png'), dpi=300, bbox_inches='tight')
     plt.close(fig)

@@ -732,8 +732,10 @@ The total-model row marks the effective Einstein radius
 all mass components and external shear and can differ from the EPL/SIE
 `theta_E` parameter. Open, radial, or edge-truncated critical curves are
 excluded; an unavailable radius has a status and reason in
-`lens_mass_convergence.json`. That file also records radial convergence
-statistics and mass parameter conversions. The plotted percentile band
+`lens_mass_parameters.json`, alongside the mass parameter conversions.
+These derived quantities use angular scales and dimensionless lensing
+parameters; no redshift, cosmology, physical-mass, or kpc conversion is made.
+There is no separate convergence JSON output. The plotted percentile band
 describes angular variation within each radial bin, not posterior uncertainty.
 The figure omits the parameter conversion footer, and `mass_light_overlay.png`
 labels its convergence contours with their numerical κ values.
