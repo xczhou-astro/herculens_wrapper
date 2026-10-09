@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.colors import LogNorm, SymLogNorm
 from matplotlib.lines import Line2D
+from matplotlib.patches import Circle, Rectangle
 
 try:
     import corner
@@ -501,6 +502,131 @@ def plot_image_plane(
     plt.tight_layout()
     plt.savefig(os.path.join(save_path, output_filename), dpi=300, bbox_inches='tight')
     plt.close()
+
+
+def source_plane_ray_tracing_data(lens_image, kwargs_result, source_arc_mask=None):
+    """Back-project native image pixels; preserve mask holes/disconnected arcs."""
+    x, y = (np.asarray(value) for value in lens_image.Grid.pixel_coordinates)
+    mask = source_arc_mask if source_arc_mask is not None else getattr(lens_image, 'source_arc_mask', None)
+    shape = np.shape(mask) if mask is not None else (x.shape if x.ndim == 2 else tuple(reversed(lens_image.Grid.num_pixel_axes)))
+    if len(shape) != 2:
+        raise ValueError('source_arc_mask must be a two-dimensional image-plane mask.')
+    if x.ndim == y.ndim == 1 and x.size == shape[1] and y.size == shape[0]:
+        x, y = np.meshgrid(x, y)
+    x, y = x.reshape(shape), y.reshape(shape)
+    mask = np.ones(shape, dtype=bool) if mask is None else np.asarray(mask, dtype=bool)
+    if mask.shape != x.shape:
+        raise ValueError('source_arc_mask does not match the image coordinate grid.')
+    beta_x, beta_y = lens_image.MassModel.ray_shooting(
+        x.ravel(), y.ravel(), kwargs_result.get('kwargs_lens'),
+    )
+    beta_x, beta_y = np.asarray(beta_x).reshape(shape), np.asarray(beta_y).reshape(shape)
+    from scipy.ndimage import binary_erosion
+    boundary = mask & ~binary_erosion(mask)
+    return {'image_x': x, 'image_y': y, 'source_x': beta_x, 'source_y': beta_y,
+            'source_arc_mask': mask, 'mask_boundary': boundary}
+
+
+def plot_source_plane_ray_tracing(
+    lens_image, kwargs_result, save_path, *, image_data=None, source_arc_mask=None,
+    plot_scale='linear', output_filename='source_plane_ray_tracing.png',
+    source_for_plot_override=None,
+):
+    """Show image-mask rays on the complete, unmasked source reconstruction.
+
+    The diagnostic does not interpret folded ray-traced mask boundaries as
+    polygons. Each point represents an actual native image pixel, including
+    disconnected mask islands and holes. This is a visualization only.
+    """
+    rays = source_plane_ray_tracing_data(lens_image, kwargs_result, source_arc_mask)
+    image_x, image_y = rays['image_x'], rays['image_y']
+    beta_x, beta_y, mask = rays['source_x'], rays['source_y'], rays['source_arc_mask']
+    valid = np.isfinite(beta_x) & np.isfinite(beta_y)
+    selected, excluded = mask & valid, ~mask & valid
+    _, pixelated = _pixelated_source_entry(kwargs_result)
+    is_rtu = bool(getattr(lens_image, '_rtu_grid_source', False))
+    if pixelated is not None:
+        source = np.asarray(pixelated['pixels'] if source_for_plot_override is None else source_for_plot_override)
+        if is_rtu:
+            xx, yy = (np.asarray(value) for value in lens_image.get_rtu_source_plane_grid(kwargs_result.get('kwargs_lens')))
+            extent = [float(xx.min()), float(xx.max()), float(yy.min()), float(yy.max())]
+        elif getattr(lens_image, '_src_adaptive_grid', False):
+            xx, yy, extent = lens_image.get_source_coordinates(
+                kwargs_result.get('kwargs_lens'), npix_src=source.shape[0],
+                source_grid_scale=getattr(lens_image, '_source_grid_scale', 1.0),
+            )
+            extent = np.asarray(extent).tolist()
+        else:
+            extent = list(lens_image.SourceModel.pixel_grid.extent)
+    else:
+        shape = np.shape(source_for_plot_override) if source_for_plot_override is not None else (200, 200)
+        xx, yy, extent = _parametric_source_plane_grid(
+            lens_image, kwargs_result.get('kwargs_lens'), *shape, float(lens_image.Grid.pixel_width),
+        )
+        source = (np.asarray(source_for_plot_override) if source_for_plot_override is not None else
+                  np.asarray(lens_image.SourceModel.surface_brightness(xx, yy, kwargs_result['kwargs_source']))
+                  * float(lens_image.Grid.pixel_area))
+    if source.ndim != 2:
+        raise ValueError('The reconstructed source must be a two-dimensional raster.')
+    norm, _ = _norm_from_plot_scale(plot_scale, source)
+    figure, axes = plt.subplots(1, 3, figsize=(18, 5.5), constrained_layout=True)
+    image_extent = _grid_extent(image_x, image_y)
+    if image_data is None:
+        axes[0].imshow(mask, origin='lower', extent=image_extent, cmap='gray', vmin=0, vmax=1)
+    else:
+        image = np.asarray(image_data)
+        if image.shape != mask.shape:
+            raise ValueError('image_data must match the image-plane mask.')
+        image_norm, _ = _norm_from_plot_scale('linear', image)
+        axes[0].imshow(image, origin='lower', extent=image_extent, cmap='gray', norm=image_norm)
+    axes[0].scatter(image_x[selected], image_y[selected], s=5, color='orange', alpha=0.6,
+                    linewidths=0, label=f'Mask selected ({selected.sum()} pixels)')
+    if np.any(mask) and not np.all(mask):
+        axes[0].contour(image_x, image_y, mask.astype(float), levels=[0.5], colors='cyan', linewidths=0.8)
+    axes[0].set_title('Image plane: source arc mask')
+    axes[0].legend(loc='upper right', fontsize=8)
+
+    for axis in axes[1:]:
+        if is_rtu:
+            rendered = axis.pcolormesh(xx, yy, source, shading='flat', cmap='twilight', norm=norm)
+            for edge_index, (gx, gy) in enumerate(((xx[0], yy[0]), (xx[-1], yy[-1]),
+                                                   (xx[:, 0], yy[:, 0]), (xx[:, -1], yy[:, -1]))):
+                axis.plot(gx, gy, color='cyan', ls='--', lw=1.0,
+                          label='Source grid' if edge_index == 0 else None)
+        else:
+            rendered = axis.imshow(source, origin='lower', extent=extent, cmap='twilight', norm=norm)
+            axis.add_patch(Rectangle((extent[0], extent[2]), extent[1]-extent[0], extent[3]-extent[2],
+                                     fill=False, edgecolor='cyan', lw=1.2, ls='--', label='Source grid'))
+        axis.scatter(beta_x[excluded], beta_y[excluded], s=4, color='0.6', alpha=0.35,
+                     linewidths=0, label='Mask excluded rays', zorder=3)
+        axis.scatter(beta_x[selected], beta_y[selected], s=6, color='orange', alpha=0.7,
+                     linewidths=0, label='Mask selected rays', zorder=4)
+        boundary = rays['mask_boundary'] & valid
+        axis.scatter(beta_x[boundary], beta_y[boundary], s=13, facecolors='none', edgecolors='cyan',
+                     linewidths=0.5, label='Mask boundary rays', zorder=5)
+    if np.any(valid):
+        axes[1].set_xlim(min(extent[0], float(beta_x[valid].min())), max(extent[1], float(beta_x[valid].max())))
+        axes[1].set_ylim(min(extent[2], float(beta_y[valid].min())), max(extent[3], float(beta_y[valid].max())))
+    axes[1].set_title('Source plane: all image rays')
+    axes[1].legend(loc='upper right', fontsize=7)
+    xlim, ylim = [extent[0], extent[1]], [extent[2], extent[3]]
+    if np.any(selected):
+        xlim = [min(xlim[0], float(beta_x[selected].min())), max(xlim[1], float(beta_x[selected].max()))]
+        ylim = [min(ylim[0], float(beta_y[selected].min())), max(ylim[1], float(beta_y[selected].max()))]
+    padding = 0.04 * max(xlim[1]-xlim[0], ylim[1]-ylim[0], np.finfo(float).eps)
+    axes[2].set_xlim(xlim[0]-padding, xlim[1]+padding)
+    axes[2].set_ylim(ylim[0]-padding, ylim[1]+padding)
+    axes[2].set_title('Source reconstruction + mask rays (zoom)')
+    figure.colorbar(rendered, ax=axes[1:], shrink=0.8,
+                    label='Pixel flux' + (' (log scale)' if plot_scale == 'log' else ''))
+    for axis in axes:
+        axis.set(xlabel='x (arcsec)', ylabel='y (arcsec)', aspect='equal')
+    figure.suptitle('Each dot traces one image pixel; the source raster is shown without a mask polygon cut.', fontsize=11)
+    os.makedirs(save_path, exist_ok=True)
+    output = os.path.join(save_path, output_filename)
+    figure.savefig(output, dpi=200, bbox_inches='tight')
+    plt.close(figure)
+    return output
 
 
 def plot_source_plane(
@@ -1850,14 +1976,16 @@ def display_init(
     type_list=None,
     residual_vis_max=0.0,
     fit_mask_bool=None,
+    save_initial_kwargs=True,
 ):
     """Plot the initial guess model before inference."""
     kwargs_init = prob_model.params2kwargs(init_params)
-    if save_path is not None and type_list is not None:
+    if save_initial_kwargs and save_path is not None and type_list is not None:
         kwargs_init_json = kwargs_best_to_json_pixelated_npy(
             kwargs_init, save_path, type_list,
             pixels_filename='kwargs_source_pixels_init.fits',
-            pixels_wn_filename='kwargs_source_pixels_wn_init.fits'
+            pixels_wn_filename='kwargs_source_pixels_wn_init.fits',
+            lens_light_pixels_prefix='kwargs_lens_light_pixels_init',
         )
         with open(os.path.join(save_path, 'kwargs_init.json'), 'w') as f:
             json.dump(kwargs_init_json, f, indent=4, default=json_serializer)
@@ -2006,11 +2134,11 @@ def _normalized_multipole_phase(phi_m, m):
     return float((phi_m + 0.5 * period) % period - 0.5 * period)
 
 
-def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supersampling=5):
+def _effective_einstein_radius(lens_image, kwargs_lens, profile_types, *, supersampling=5):
     """Circularized radius of the total tangential critical curve, in arcsec.
 
-    Both the stellar and NFW components (and any external shear) contribute to
-    the critical curve.  An open, edge-truncated, or radial curve must not be
+    All mass components (including external shear) contribute to the critical
+    curve. An open, edge-truncated, or radial curve must not be
     mistaken for a measured Einstein radius.
     """
     halo_index = next(
@@ -2019,17 +2147,18 @@ def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supe
     )
     result = {
         'theta_E_eff_arcsec': None,
+        'R_E_eff_arcsec': None,
         'area_arcsec2': None,
         'definition': 'sqrt(area of the total tangential critical curve / pi)',
         'status': 'not_found',
         'supersampling': supersampling,
     }
-    if halo_index is None or halo_index >= len(kwargs_lens):
-        result['status'] = 'missing_nfw_halo'
+    if not kwargs_lens:
+        result['status'] = 'no_mass_model'
         return result
-    halo = kwargs_lens[halo_index]
-    center = (float(np.asarray(halo.get('center_x', 0.0))),
-              float(np.asarray(halo.get('center_y', 0.0))))
+    reference = kwargs_lens[halo_index] if halo_index is not None and halo_index < len(kwargs_lens) else kwargs_lens[0]
+    center = (float(np.asarray(reference.get('center_x', 0.0))),
+              float(np.asarray(reference.get('center_y', 0.0))))
     result['reference_center_arcsec'] = list(center)
 
     try:
@@ -2082,10 +2211,16 @@ def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supe
         area = max(candidates)
         result['area_arcsec2'] = area
         result['theta_E_eff_arcsec'] = float(np.sqrt(area / np.pi))
+        result['R_E_eff_arcsec'] = result['theta_E_eff_arcsec']
         result['status'] = 'ok'
     else:
-        result['reason'] = 'No closed tangential critical curve enclosing the halo centre lies fully inside the image grid.'
+        result['reason'] = 'No closed tangential critical curve enclosing the reference centre lies fully inside the image grid.'
     return result
+
+
+def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supersampling=5):
+    """Compatibility entry point for the generalized total-model calculation."""
+    return _effective_einstein_radius(lens_image, kwargs_lens, profile_types, supersampling=supersampling)
 
 
 def lens_mass_ellipticity_summary(lens_image, kwargs_result):
@@ -2276,11 +2411,9 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
         profiles.append(profile)
 
     summary = {'profiles': profiles}
-    normalized_types = {str(kind).upper() for kind in profile_types}
-    if 'STELLAR_MGE' in normalized_types and normalized_types.intersection({'NFW', 'NFW_ELLIPSE_KAPPA'}):
-        summary['einstein_radius'] = _stellar_nfw_einstein_radius(
-            lens_image, kwargs_result.get('kwargs_lens', []), profile_types,
-        )
+    summary['einstein_radius'] = _effective_einstein_radius(
+        lens_image, kwargs_result.get('kwargs_lens', []), profile_types,
+    )
     return summary
 
 
@@ -2621,8 +2754,10 @@ def plot_mass_light_overlay(lens_image, kwargs_result, image_data, save_path,
     _mark_point_sources(axes[0], point_positions, 'image')
     axes[0].set_title('Observed image with mass convergence contours')
     if kappa_levels:
-        axes[0].contour(x_map, y_map, kappa, levels=kappa_levels,
-                        colors='cyan', linewidths=1.2)
+        contours = axes[0].contour(x_map, y_map, kappa, levels=kappa_levels,
+                                  colors='cyan', linewidths=1.2)
+        axes[0].clabel(contours, fmt=lambda value: rf'$\kappa={value:g}$',
+                       inline=True, fontsize=8)
 
     mass_image = axes[1].imshow(kappa, origin='lower', extent=extent, cmap=cmap_kappa,
                                 norm=norm_kappa)
@@ -2819,6 +2954,11 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
     radius_map = np.hypot(np.asarray(x_grid_img) - center_x, np.asarray(y_grid_img) - center_y)
     extent = _image_extent(ny, nx, pixel_scale)
     fig, axes = plt.subplots(len(rows), 3, figsize=(18, max(5.0, 4.4 * len(rows))), squeeze=False)
+    einstein = lens_mass_summary.get('einstein_radius') or _effective_einstein_radius(
+        lens_image, kwargs_lens, profile_types,
+    )
+    effective_radius = einstein.get('theta_E_eff_arcsec') if einstein.get('status') == 'ok' else None
+    radial_products = []
 
     for row_index, (label, kappa_map, abs_mag_map, is_total) in enumerate(rows):
         ax_kappa, ax_mag, ax_radial = axes[row_index]
@@ -2837,6 +2977,12 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
                     label='Critical lines' if line_index == 0 else None,
                 )
             _mark_point_sources(ax_kappa, point_positions, 'image')
+            if effective_radius is not None:
+                centre = einstein['reference_center_arcsec']
+                for axis in (ax_kappa, ax_mag):
+                    axis.add_patch(Circle(centre, effective_radius, fill=False,
+                                          edgecolor='magenta', ls='--', lw=1.2,
+                                          label=rf'$R_{{E,\mathrm{{eff}}}}={effective_radius:.3f}$ arcsec'))
             if crit_lines:
                 ax_kappa.legend(loc='upper right', fontsize=8)
         plt.colorbar(im_kappa, ax=ax_kappa, label=cbar_label_kappa)
@@ -2870,28 +3016,32 @@ def plot_mass_and_convergence(lens_image, kwargs_result, pixel_scale, save_path,
             color='tab:blue', alpha=0.25, label='16th--84th percentile',
         )
         ax_radial.axhline(0.0, color='0.5', lw=0.8, ls='--')
+        if is_total and effective_radius is not None:
+            ax_radial.axvline(effective_radius, color='magenta', ls='--', lw=1.2,
+                              label=rf'$R_{{E,\mathrm{{eff}}}}={effective_radius:.3f}$ arcsec')
         ax_radial.set_title(f'{label}: radial convergence')
         ax_radial.set_xlabel('radius from primary mass centre (arcsec)')
         ax_radial.set_ylabel(r'$\kappa$')
         ax_radial.legend(loc='best', fontsize=8)
+        def finite_values(values):
+            return [float(value) if np.isfinite(value) else None for value in values]
+        radial_products.append({
+            'label': label, 'is_total_model': is_total,
+            'radius_arcsec': finite_values(radii), 'kappa_mean': finite_values(radial_mean),
+            'kappa_p16': finite_values(radial_p16), 'kappa_p84': finite_values(radial_p84),
+        })
 
-    annotation = _mass_ellipticity_annotation(lens_mass_summary)
-    if any(not row[3] for row in rows):
-        decomposition_note = (
-            'Joint-profile decomposition: $\\kappa$ is additive.  Multipole $|\\mu|$ maps are '
-            'isolated responses; only the total row has physical critical lines.'
-        )
-        annotation = f'{annotation}\n{decomposition_note}' if annotation else decomposition_note
-    if annotation is not None:
-        fig.text(
-            0.01, 0.005, annotation, ha='left', va='bottom', fontsize=8,
-            bbox={'facecolor': 'white', 'edgecolor': '0.6', 'alpha': 0.85, 'pad': 3},
-        )
-        annotation_lines = annotation.count('\n') + 1
-        annotation_margin = min(0.32, 0.035 + 0.022 * annotation_lines)
-        plt.tight_layout(rect=(0, annotation_margin, 1, 1))
-    else:
-        plt.tight_layout()
+    with open(os.path.join(save_path, 'lens_mass_convergence.json'), 'w') as stream:
+        json.dump({
+            'einstein_radius': einstein,
+            'reference_center_arcsec': [center_x, center_y],
+            'radial_coordinate': 'circular radius from the primary mass centre, in arcsec',
+            'percentiles_meaning': 'Spatial azimuthal spread of kappa in each radial bin, not posterior uncertainty.',
+            'decomposition_meaning': 'Convergence is additive; component magnifications are isolated responses. Critical curves belong to the total model.',
+            'mass_parameters': lens_mass_summary.get('profiles', []),
+            'radial_profiles': radial_products,
+        }, stream, indent=2, default=json_serializer, allow_nan=False)
+    plt.tight_layout()
     plt.savefig(os.path.join(save_path, 'mass_profile_convergence.png'), dpi=300, bbox_inches='tight')
     plt.close(fig)
 
@@ -3079,6 +3229,10 @@ def generate_run_plots(
         lens_image, kwargs_best, save_path,
         plot_scale='log', output_filename='source_plane_log.png',
         source_for_plot_override=svi_source_plane,
+    ))
+    _try('source_plane_ray_tracing.png', lambda: plot_source_plane_ray_tracing(
+        lens_image, kwargs_best, save_path, image_data=image_data,
+        source_arc_mask=mask, source_for_plot_override=svi_source_plane,
     ))
 
     _try('lens_light_subtracted_image.png', lambda: plot_lens_light_subtracted_image(

@@ -1413,6 +1413,27 @@ class FitResult:
             ), save_path, "ring_model_comparison.png",
         )
 
+    def get_source_plane_ray_tracing(self) -> dict[str, Any]:
+        """Native image pixels and their source-plane positions, split by arc mask."""
+        from ..visualizations import source_plane_ray_tracing_data
+        model = self._require_model()
+        kwargs = self.derived.get("kwargs") or self._kwargs_result()
+        return source_plane_ray_tracing_data(model.lens_image, kwargs, model.data.source_arc_mask)
+
+    def plot_source_plane_ray_tracing(self, *, save_path: str | Path | None = None,
+                                     scale: str = "linear") -> Path:
+        """Overlay selected/excluded image rays on the unmasked source raster."""
+        from ..visualizations import plot_source_plane_ray_tracing
+        model = self._require_model()
+        kwargs = self.derived.get("kwargs") or self._kwargs_result()
+        return self._legacy_plot_result(
+            lambda directory, filename: plot_source_plane_ray_tracing(
+                model.lens_image, kwargs, str(directory), image_data=model.data.likelihood_image,
+                source_arc_mask=model.data.source_arc_mask, plot_scale=scale,
+                output_filename=filename, source_for_plot_override=self.derived.get("source_plane"),
+            ), save_path, "source_plane_ray_tracing.png",
+        )
+
     def plot_lens_light_subtraction(self, *, save_path: str | Path | None = None,
                                     scale: str = "linear", residual_vis_max: float = 0.0) -> Path:
         """Plot data, lens-light model, and lens-light-subtracted image."""
@@ -1726,6 +1747,7 @@ class FitResult:
                     model.data.likelihood_noise, model.data.pixel_scale, str(directory),
                     model.num_sampling_parameters, type_list=type_list,
                     residual_vis_max=residual_vis_max, fit_mask_bool=model.data.likelihood_mask,
+                    save_initial_kwargs=not (directory / "kwargs_init.json").is_file(),
                 )
                 files["kwargs_init"] = directory / "kwargs_init.json"
             except Exception as error:

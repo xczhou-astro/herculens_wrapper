@@ -727,6 +727,17 @@ total-model row: its convergence is identically zero, while its physically
 meaningful effect is already present in the total critical lines and
 magnification.
 
+The total-model row marks the effective Einstein radius
+`R_E_eff = sqrt(tangential critical curve area / pi)` in arcsec. This includes
+all mass components and external shear and can differ from the EPL/SIE
+`theta_E` parameter. Open, radial, or edge-truncated critical curves are
+excluded; an unavailable radius has a status and reason in
+`lens_mass_convergence.json`. That file also records radial convergence
+statistics and mass parameter conversions. The plotted percentile band
+describes angular variation within each radial bin, not posterior uncertainty.
+The figure omits the parameter conversion footer, and `mass_light_overlay.png`
+labels its convergence contours with their numerical κ values.
+
 ### SIE elliptical multipole with an offset phase (`ELL_MPPL_OFFSET`)
 
 `ELL_MPPL_OFFSET` is a standalone elliptical multipole for an **SIE**
@@ -1059,6 +1070,7 @@ samples = result.samples       # HMC posterior；SVI 通常为 None
 loss = result.loss_history
 metrics = result.metrics()
 source = result.get_source_plane()
+rays = result.get_source_plane_ray_tracing()
 convergence = result.mass_component_convergence()
 ```
 
@@ -1094,8 +1106,27 @@ result.plot_loss_curve(save_path="loss.png")
 result.plot_image_plane(save_path="image_plane.png")
 result.plot_composite(save_path="composite.png")
 result.plot_source_plane(save_path="source_plane.png")
+result.plot_source_plane_ray_tracing(save_path="source_plane_ray_tracing.png")
 result.plot_corner(save_path="corner.png")
 result.plot_mass_profile_convergence(save_path="convergence.png")
+```
+
+`result.output()` 自动生成 `source_plane_ray_tracing.png`：左侧显示图像平面
+的 source arc mask，中间显示所有原生图像像素反投射到源平面的位置，右侧
+放大源重建区域。橙色为 mask 选中的光线，灰色为未选中的光线，青色空心点
+为 mask 边缘的光线，青色虚线为实际源网格边界。背景显示完整源光分布，保留
+mask 的孔洞和不相连区域；它不会按反投射边界构造多边形来裁剪源图像。
+HMC 使用后验中值源图像和代表性的中值质量参数，这些点不是光线位置的后验分布。
+
+初始化快照在采样开始前保存。`model.run(..., save_path=...)` 和初始模型绘图
+都会写出 `kwargs_init.json` 及初始 pixel FITS；恢复 HMC 时保留已有快照。
+也可以在初始化完成时立即保存，并绘制初始光线诊断：
+
+```python
+initial = model.initialize(seed=42, save_path="results/run_0")
+model.plot_initial_source_ray_tracing(save_path="results/run_0/initial_source_plane_ray_tracing.png")
+# 已初始化的模型也可以单独保存
+model.save_initialization("results/run_0")
 ```
 
 ## 10. 自动 logging

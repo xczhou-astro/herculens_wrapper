@@ -27,7 +27,7 @@ from scipy.optimize import root
 
 DEFAULT_RESULT_DIR = Path(
     "/Users/xczhou/Library/CloudStorage/GoogleDrive-xczhou95@gmail.com/My Drive/"
-    "modelling/cowls_data/modelling_F150W_SIE/pixelated_hmc"
+    "modelling/edgeon_source/modelling_F277W_EPL/pixelated_hmc"
 )
 APP_ROOT = Path(__file__).resolve().parent
 SAVED_SOURCES_FILENAME = "point_source_lens_explorer_results.json"

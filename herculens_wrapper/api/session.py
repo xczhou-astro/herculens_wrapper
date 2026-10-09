@@ -78,6 +78,7 @@ def _svi_many_worker_impl(spec, run_id, device):
         init_lens_mass_path=spec.get("init_lens_mass_path"),
         init_lens_mass_light_path=spec.get("init_lens_mass_light_path"),
         pixelated_init_match=spec["pixelated_init_match"], num_iterations_warmup=spec["warmup"],
+        save_path=run_dir,
     )
     model.plot_initial_model(
         scale="linear", save_path=run_dir / "initial_guess_model.png",
@@ -86,6 +87,7 @@ def _svi_many_worker_impl(spec, run_id, device):
     source_types = model.definition.as_dicts()[0].get("source_light_type_list", [])
     if any("PIXELATED" in str(profile_type).upper() for profile_type in source_types):
         model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
+        model.plot_initial_source_ray_tracing(save_path=run_dir / "initial_source_plane_ray_tracing.png")
     model.run(
         sampler, init_params=initial, save_path=run_dir,
         residual_vis_max=spec["residual_vis_max"],
@@ -627,8 +629,12 @@ class SingleBandModel:
         init_lens_mass_light_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
+        save_path: str | Path | None = None,
     ) -> Mapping[str, Any]:
         """Create the constrained SVI start point with ``init_to_median``.
+
+        ``save_path`` writes kwargs_init.json and initial pixel FITS immediately
+        after initialization, before plotting or inference.
 
         A fresh model uses NumPyro's ``init_to_median(num_samples=25)`` with
         ``seed``.  ``init_path`` overlays matching values from a saved result
@@ -827,7 +833,40 @@ class SingleBandModel:
                 print("[pixelated-init: lens-light] Lens-light-matched initialization complete.")
         initial = self._apply_declared_warm_starts(initial, seed=seed)
         self.definition.update_values(initial); self.initial_parameters = initial
+        if save_path is not None:
+            self.save_initialization(save_path)
         return initial
+
+    def save_initialization(self, save_path: str | Path, *,
+                            parameters: Mapping[str, Any] | None = None,
+                            overwrite: bool = True) -> Path:
+        """Write physical initial kwargs and pixel FITS independently of plotting.
+
+        Call immediately after ``initialize`` or supply its ``save_path``.
+        ``overwrite=False`` preserves the original snapshot when resuming HMC.
+        """
+        initial = self.initial_parameters if parameters is None else parameters
+        if initial is None:
+            raise RuntimeError("Call initialize() before saving initial parameters.")
+        directory = Path(save_path).expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / "kwargs_init.json"
+        if destination.is_file() and not overwrite:
+            return destination
+        from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy
+        types, _ = self.definition.as_dicts()
+        saved = kwargs_best_to_json_pixelated_npy(
+            self.prob_model.params2kwargs(initial), str(directory), types,
+            pixels_filename="kwargs_source_pixels_init.fits",
+            pixels_wn_filename="kwargs_source_pixels_wn_init.fits",
+            lens_light_pixels_prefix="kwargs_lens_light_pixels_init",
+        )
+        if self.data.samples_background_rms and "background_rms" in initial:
+            saved["likelihood_parameters"] = {"background_rms": float(np.asarray(initial["background_rms"]))}
+        temporary = destination.with_suffix(".json.tmp")
+        temporary.write_text(json.dumps(saved, indent=4, default=json_serializer))
+        temporary.replace(destination)
+        return destination
 
     def _hmc_manifest(self, sampler: SamplerConfig) -> dict[str, Any]:
         """Return the immutable identity of an HMC chain and its model."""
@@ -1010,6 +1049,9 @@ class SingleBandModel:
                 num_iterations_warmup=num_iterations_warmup,
             )
         self.definition.update_values(initial)
+        self.initial_parameters = dict(initial)
+        if save_path is not None and sampler.name != "hmc":
+            self.save_initialization(save_path)
         run_hmc, run_optax, run_svi = _sampler_backend(); args = sampler.to_namespace()
         # ``run_hmc`` creates intermediate batch diagnostics before a
         # FitResult exists, so propagate the visualization setting through
@@ -1023,6 +1065,7 @@ class SingleBandModel:
             output = Path(save_path).expanduser()
             output.mkdir(parents=True, exist_ok=True)
             resuming = self._validate_hmc_run_directory(output, sampler)
+            self.save_initialization(output, overwrite=not resuming)
             if self.initialization_path is None and not resuming:
                 print(
                     "[hmc:init] No compatible joint SVI guide was supplied; "
@@ -1313,6 +1356,10 @@ class SingleBandModel:
                      save_path: str | Path | None = None):
         """Visualize the random initial model, creating it first if needed."""
         if self.initial_parameters is None: self.initialize()
+        if save_path is not None:
+            target = Path(save_path)
+            directory = target.parent if target.suffix else target
+            self.save_initialization(directory, overwrite=not (directory / "hmc_checkpoint.pkl").exists())
         return self.plot_fit(self.initial_parameters, scale=scale, residual_vis_max=residual_vis_max, save_path=save_path)
 
     def plot_initial_source(
@@ -1363,6 +1410,24 @@ class SingleBandModel:
         except Exception:
             pass
         return output
+
+    def plot_initial_source_ray_tracing(self, *, save_path: str | Path | None = None,
+                                       scale: PlotScale = "linear") -> Path:
+        """Inspect arc-mask rays on the initial source before starting inference."""
+        if self.initial_parameters is None:
+            self.initialize()
+        from ..visualizations import plot_source_plane_ray_tracing
+        target = Path(save_path).expanduser() if save_path is not None else Path(
+            tempfile.mkdtemp(prefix="herculens_initial_rays_")
+        )
+        directory, filename = ((target.parent, target.name) if target.suffix else
+                               (target, "initial_source_plane_ray_tracing.png"))
+        plot_source_plane_ray_tracing(
+            self.lens_image, self.prob_model.params2kwargs(self.initial_parameters), str(directory),
+            image_data=self.data.likelihood_image, source_arc_mask=self.data.source_arc_mask,
+            plot_scale=scale, output_filename=filename,
+        )
+        return directory / filename
 
     def _metrics(self, parameters: Mapping[str, Any], *, prediction=None) -> dict[str, Any]:
         """Evaluate a parameter snapshot, or an explicit posterior median image.
