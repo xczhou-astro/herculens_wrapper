@@ -232,8 +232,26 @@ halo = NFWEllipseHalo(prior={
 })
 ```
 
+也可使用 `q/phi` 声明形状，例如配合显式的对数均匀先验：
+
+```python
+halo = NFWEllipseHalo(prior={
+    "kappa_s": {"distribution": "log_uniform", "low": 0.01, "high": 5.0},
+    "R_s": {"distribution": "log_uniform", "low": 0.1, "high": 30.0},
+    "q": [0.3, 0.999],
+    "phi": [-90.0, 90.0],
+    "center_x": [0.0, 0.03, -0.1, 0.1],
+    "center_y": [0.0, 0.03, -0.1, 0.1],
+})
+```
+
+`q=b/a`；PA 的 API 参数名为 `phi`，单位为度，从模型 +x 轴逆时针计量，
+模 180 度等价。`q/phi` 和 `e1/e2` 两组写法二选一，不能混用。
+采样使用声明的参数，后端和保存的 `kwargs_lens` 使用 `e1/e2`；加载保存结果
+时会恢复声明的 `q/phi`，并选择其先验对应的角度分支。
+
 这里不要把 `e1=e2=0` 固定：MGE 椭圆 Gaussian backend 在严格圆极限没有
-数值 branch。若 halo 必须严格球对称，改用解析的 `MassProfile("NFW")`。
+数值 branch，也不要固定 `q=1`。若 halo 必须严格球对称，改用解析的 `MassProfile("NFW")`。
 `GNFWHaloMGE` 是另一个、具有不同 outer-transition 定义的 profile，不能通过
 固定其参数来替代这个标准 NFW。
 

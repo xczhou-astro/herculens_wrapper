@@ -52,7 +52,8 @@ class Parameter:
 class DerivedParameter(Parameter):
     """A linkable parameter derived by the backend, rather than sampled.
 
-    EPL/SIE expose native ``e1``/``e2`` as well as API-facing ``q``/``phi``.
+    Elliptical mass profiles expose native ``e1``/``e2`` as well as
+    API-facing ``q``/``phi``.
     When the native convention is declared, a reference to ``profile.phi``
     can still be linked by another profile without inserting an extra ``phi``
     parameter into the source profile.  The mass-link bank supplies that
@@ -89,8 +90,8 @@ class Profile:
 
     def __getattr__(self, name: str) -> Parameter:
         if name.startswith("_"): raise AttributeError(name)
-        # Do not register a conflicting public q/phi parameter when an EPL or
-        # SIE was declared natively with e1/e2.  The model builder derives
+        # Do not register a conflicting public q/phi parameter when a profile
+        # was declared natively with e1/e2. The model builder derives
         # these aliases exclusively for parameter links.
         if (
             name in {"q", "phi"}
@@ -463,7 +464,7 @@ def _initialize_fixed_profiles(profiles, initial_parameters, components, compone
 class MassProfile(Profile):
     """Lens-mass profile, or a component-agnostic multi-profile collection.
 
-    EPL and SIE accept either native ``e1``/``e2`` or the API-facing ``q`` and
+    EPL, SIE and NFW_ELLIPSE_KAPPA accept either native ``e1``/``e2`` or ``q`` and
     degree-valued ``phi``.  The latter are sampled directly and converted to
     native ellipticity immediately before evaluating the Herculens model.
     MPPL similarly exposes ``phi_m`` in degrees and converts it to radians for
@@ -705,8 +706,14 @@ class NFWEllipseHalo(MassProfile):
     R_s
         Angular NFW scale radius, in the lens-plane coordinate unit.
     e1, e2
-        Projected ellipticity components.  Do not fix both to zero: use the
-        analytic ``MassProfile('NFW')`` for the exactly spherical case.
+        Native projected ellipticity components, as an alternative to q/phi.
+        Do not declare both conventions together.
+    q, phi
+        Projected minor/major axis ratio and major-axis position angle in
+        degrees, counter-clockwise from +x (equivalent modulo 180 degrees).
+        The API converts these to native e1/e2 before model evaluation.
+        Do not fix q=1 or both e1=e2=0: use the analytic
+        ``MassProfile('NFW')`` for an exactly spherical halo.
     center_x, center_y
         Halo centre in lens-plane coordinates.
     """

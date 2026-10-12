@@ -729,6 +729,7 @@ def _sample_param_from_prior(site_name, key, param):
 _Q_PHI_MASS_PROFILES = frozenset({
     'EPL',
     'SIE',
+    'NFW_ELLIPSE_KAPPA',
     'EPL_MULTIPOLE_M1M3M4_ELL',
     'EPL_MULTIPOLE_M3M4_ELL',
 })
@@ -764,7 +765,7 @@ def _mass_e1_e2_to_q_phi_jax(e1, e2):
 def _linkable_mass_parameters(profile_type, values):
     """Return mass parameters augmented with both ellipticity conventions.
 
-    Herculens receives only native ``e1``/``e2`` for EPL/SIE.  Links, however,
+    Herculens receives only native ``e1``/``e2`` for these profiles. Links, however,
     are part of the public wrapper API and must be able to target either
     ``q``/``phi`` or ``e1``/``e2`` irrespective of the convention used to
     declare the upstream component.  This helper is intentionally used only
@@ -3128,6 +3129,9 @@ def validate_param_list(type_list, param_list):
                             q_lower, q_upper = q_specification[2], q_specification[3]
                         else:
                             q_lower = q_upper = None
+                    elif is_distribution_prior(q_specification):
+                        q_lower = q_specification.get("low")
+                        q_upper = q_specification.get("high")
                     else:
                         q_lower = q_upper = q_specification
                     if (
@@ -3138,6 +3142,15 @@ def validate_param_list(type_list, param_list):
                         raise ValueError(
                             f"{profile_type} mass component {index} requires 0 < q <= 1; "
                             f"got {q_specification!r}."
+                        )
+                    if (
+                        str(profile_type).upper() == "NFW_ELLIPSE_KAPPA"
+                        and not is_sampled_prior(q_specification)
+                        and float(q_specification) == 1.0
+                    ):
+                        raise ValueError(
+                            "NFW_ELLIPSE_KAPPA does not support fixed q=1; "
+                            "use MassProfile('NFW') for an exactly spherical halo."
                         )
         if profile_type == "INCLINED_EXPONENTIAL_DISK":
             if "n_gaussians" not in params:

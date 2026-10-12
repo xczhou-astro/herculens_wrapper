@@ -109,6 +109,7 @@ def _read_draws(archive, *, band, max_samples, seed):
 def _kwargs_draw(saved, definition, mass_types, draws, row):
     """Restore sampled sites, correlated parameters and dynamic stellar MGEs."""
     from ..models import (
+        _Q_PHI_MASS_PROFILES,
         _linkable_mass_parameters, _materialize_dynamic_stellar_mge,
         _materialize_mass_parameters, _normalize_link_spec, _resolve_link,
     )
@@ -197,7 +198,7 @@ def _kwargs_draw(saved, definition, mass_types, draws, row):
     for index in range(len(mass_types)):
         native = build("lens", index)
         # A component pre-built by a link returns the alias-enriched link bank.
-        if mass_types[index] in ("EPL", "SIE") or mass_types[index].startswith("EPL_MULTIPOLE_"):
+        if str(mass_types[index]).upper() in _Q_PHI_MASS_PROFILES:
             native = {key: value for key, value in native.items() if key not in ("q", "phi")}
         result.append(native)
     return result
