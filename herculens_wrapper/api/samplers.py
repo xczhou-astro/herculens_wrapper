@@ -766,6 +766,7 @@ class SamplerConfig:
         checkpoint_interval: int = 250,
         chain_method: str = "auto",
         chains_per_device: int = 1,
+        progress_log_interval: int = 50,
         progress_bar: bool = True,
         init_max_retries: int = 100,
         disable_gibbs: bool = False,
@@ -778,10 +779,15 @@ class SamplerConfig:
         diagnostics and output; it does not change sampling or checkpoints.
         ``chain_method='hybrid'`` runs ``chains_per_device`` vectorized chains
         on each of ``num_chains // chains_per_device`` local JAX devices.
+        In hybrid mode, ``progress_log_interval`` controls text updates in
+        iterations per phase (warmup/sampling); zero disables text progress.
         """
         hmc_batch_size = _validate_hmc_batch_size(hmc_batch_size)
         if isinstance(chains_per_device, bool):
             raise ValueError("chains_per_device must be a positive integer.")
+        if (isinstance(progress_log_interval, bool)
+                or not isinstance(progress_log_interval, int) or progress_log_interval < 0):
+            raise ValueError("progress_log_interval must be a non-negative integer.")
         positive_integers = {
             "num_warmup": num_warmup,
             "num_samples": num_samples,
@@ -809,6 +815,7 @@ class SamplerConfig:
             "checkpoint_interval_hmc_numpyro": checkpoint_interval,
             "chain_method_hmc_numpyro": chain_method,
             "chains_per_device_hmc_numpyro": chains_per_device,
+            "progress_log_interval_hmc_numpyro": progress_log_interval,
             "progress_bar_hmc_numpyro": progress_bar,
             "hmc_init_max_retries": init_max_retries,
             "disable_gibbs": disable_gibbs,
@@ -818,6 +825,7 @@ class SamplerConfig:
         defaults = {"sampler": self.name, "random_seed": self.random_seed, "algorithm_optax": "adabelief", "max_iterations_optax": 2000, "init_learning_rate_optax": 1e-2, "schedule_learning_rate_optax": True, "stop_at_loss_increase_optax": False, "progress_bar_optax": True, "max_iterations_svi": 10000, "init_learning_rate_svi": 1e-2, "init_scale_svi": 0.1, "loss_kind_svi": "trace_elbo", "num_particles_svi": 10, "num_warmup_hmc_numpyro": 1000, "num_samples_hmc_numpyro": 1000, "num_chains_hmc_numpyro": 1, "checkpoint_interval_hmc_numpyro": 250, "chain_method_hmc_numpyro": "auto", "progress_bar_hmc_numpyro": True, "hmc_init_max_retries": 100, "likelihood_scale": 1.0}
         defaults["hmc_batch_size"] = 32
         defaults["chains_per_device_hmc_numpyro"] = 1
+        defaults["progress_log_interval_hmc_numpyro"] = 50
         defaults.update(self.options)
         if self.name == "hmc":
             defaults["hmc_batch_size"] = _validate_hmc_batch_size(defaults["hmc_batch_size"])

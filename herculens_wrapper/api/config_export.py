@@ -162,6 +162,7 @@ def export_wrapper_config(
         "checkpoint_interval_hmc_numpyro": 250,
         "chain_method_hmc_numpyro": "auto",
         "chains_per_device_hmc_numpyro": 1,
+        "progress_log_interval_hmc_numpyro": 50,
         "progress_bar_hmc_numpyro": True,
         "hmc_init_max_retries": 100,
         "hmc_batch_size": 32,

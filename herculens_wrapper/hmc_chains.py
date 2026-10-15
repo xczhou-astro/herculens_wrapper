@@ -1,6 +1,9 @@
 """NumPyro chain transform: pmap across devices, vmap within each device."""
 from functools import wraps
 
+DEVICE_AXIS = "hmc_devices"
+LOCAL_CHAIN_AXIS = "hmc_local_chains"
+
 
 class HybridChainMap:
     """Keep a flat public chain axis for samples, diagnostics and checkpoints.
@@ -34,7 +37,10 @@ class HybridChainMap:
         import jax
         import jax.numpy as jnp
 
-        mapped = jax.pmap(jax.vmap(function), devices=self.devices, axis_name="hmc_devices")
+        mapped = jax.pmap(
+            jax.vmap(function, axis_name=LOCAL_CHAIN_AXIS),
+            devices=self.devices, axis_name=DEVICE_AXIS,
+        )
 
         @wraps(function)
         def apply(arguments):

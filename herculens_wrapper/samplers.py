@@ -1568,6 +1568,11 @@ def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches
 
 
 def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
+    from contextlib import nullcontext
+
+    log_interval = getattr(args, 'progress_log_interval_hmc_numpyro', 50)
+    if isinstance(log_interval, bool) or not isinstance(log_interval, (int, np.integer)) or log_interval < 0:
+        raise ValueError('progress_log_interval_hmc_numpyro must be a non-negative integer.')
     hmc_batch_size = getattr(args, 'hmc_batch_size', 32)
     if isinstance(hmc_batch_size, bool) or not isinstance(hmc_batch_size, (int, np.integer)) or hmc_batch_size < 1:
         raise ValueError('hmc_batch_size must be a positive integer.')
@@ -1981,74 +1986,92 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             print(f"[hmc] Running joint NUTS batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
         else:
             print(f"[hmc] Running Gibbs-within-HMC batch {i+1}/{total_batch_count} (drawing {size} samples, total {num_samples_total})...")
-        if last_state is None:
-            mcmc = infer.MCMC(
-                outer_kernel,
-                num_warmup=num_warmup,
-                num_samples=size,
-                num_chains=num_chains,
-                progress_bar=progress_bar,
-                chain_method=chain_method,
+        progress_context = nullcontext()
+        batch_kernel = outer_kernel
+        if requested_chain_method == 'hybrid' and log_interval:
+            from herculens_wrapper.hmc_progress import HMCTextProgress, ProgressLoggingKernel
+            progress_context = HMCTextProgress(
+                num_devices=chain_transform.num_devices,
+                warmup=num_warmup if last_state is None else 0,
+                batch_samples=size,
+                completed_samples=completed_samples + sum(batch_sizes[:batch_offset]),
+                total_samples=num_samples_total, interval=log_interval,
             )
-            init_params_unconst_chain = _build_hmc_chain_init_params(
-                prob_model,
-                init_params,
-                args,
-                num_chains,
-                init_params_path,
+            batch_kernel = ProgressLoggingKernel(
+                outer_kernel, progress_context, start_state=last_state, mapped=num_chains > 1,
             )
-            mcmc.run(
-                rng_key_,
-                init_params=init_params_unconst_chain,
-                extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
-            )
-        else:
-            # Re-instantiate MCMC for subsequent batches bypassing warmup
-            mcmc = infer.MCMC(
-                outer_kernel,
-                num_warmup=0,
-                num_samples=size,
-                num_chains=num_chains,
-                progress_bar=progress_bar,
-                chain_method=chain_method,
-            )
-            mcmc.post_warmup_state = last_state
-            rng_key_to_pass = last_state.rng_key
-            if not use_joint_nuts:
-                # Checkpoints written before the pmap-compatible Gibbs state
-                # stored one outer RNG key per inner kernel.  Collapse that
-                # legacy extra axis once; new checkpoints already expose one
-                # key per chain and pass through unchanged.
-                key_data = getattr(jax.random, 'key_data', lambda key: key)(
+        with progress_context:
+            if last_state is None:
+                mcmc = infer.MCMC(
+                    batch_kernel,
+                    num_warmup=num_warmup,
+                    num_samples=size,
+                    num_chains=num_chains,
+                    progress_bar=progress_bar,
+                    chain_method=chain_method,
+                )
+                init_params_unconst_chain = _build_hmc_chain_init_params(
+                    prob_model,
+                    init_params,
+                    args,
+                    num_chains,
+                    init_params_path,
+                )
+                mcmc.run(
+                    rng_key_,
+                    init_params=init_params_unconst_chain,
+                    extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
+                )
+            else:
+                # Re-instantiate MCMC for subsequent batches bypassing warmup
+                mcmc = infer.MCMC(
+                    batch_kernel,
+                    num_warmup=0,
+                    num_samples=size,
+                    num_chains=num_chains,
+                    progress_bar=progress_bar,
+                    chain_method=chain_method,
+                )
+                mcmc.post_warmup_state = last_state
+                rng_key_to_pass = last_state.rng_key
+                if not use_joint_nuts:
+                    # Checkpoints written before the pmap-compatible Gibbs state
+                    # stored one outer RNG key per inner kernel.  Collapse that
+                    # legacy extra axis once; new checkpoints already expose one
+                    # key per chain and pass through unchanged.
+                    key_data = getattr(jax.random, 'key_data', lambda key: key)(
+                        rng_key_to_pass,
+                    )
+                    key_data_shape = key_data.shape
+                    expected_shape = (
+                        (num_chains, 2) if num_chains > 1 else (2,)
+                    )
+                    if key_data_shape != expected_shape:
+                        prng_key_dtype = getattr(jax.dtypes, 'prng_key', None)
+                        if (
+                            prng_key_dtype is not None
+                            and jax.dtypes.issubdtype(
+                                rng_key_to_pass.dtype, prng_key_dtype,
+                            )
+                        ):
+                            rng_key_to_pass = rng_key_to_pass[..., 0]
+                        else:
+                            rng_key_to_pass = rng_key_to_pass[..., 0, :]
+                mcmc.run(
                     rng_key_to_pass,
+                    extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
                 )
-                key_data_shape = key_data.shape
-                expected_shape = (
-                    (num_chains, 2) if num_chains > 1 else (2,)
-                )
-                if key_data_shape != expected_shape:
-                    prng_key_dtype = getattr(jax.dtypes, 'prng_key', None)
-                    if (
-                        prng_key_dtype is not None
-                        and jax.dtypes.issubdtype(
-                            rng_key_to_pass.dtype, prng_key_dtype,
-                        )
-                    ):
-                        rng_key_to_pass = rng_key_to_pass[..., 0]
-                    else:
-                        rng_key_to_pass = rng_key_to_pass[..., 0, :]
-            mcmc.run(
-                rng_key_to_pass,
-                extra_fields=('diverging', 'accept_prob', 'num_steps', 'energy'),
-            )
             
-        # NumPyro constructs a new pmap transform for each MCMC.run call.  A
-        # device-resident state carries that transform's AbstractMesh and is
-        # rejected by a later batch whose new mesh has a different identity.
-        # Host materialization removes only the sharding metadata; all chain
-        # and adaptation values are preserved.  It also makes checkpoints
-        # portable across process restarts and equivalent MIG layouts.
-        last_state = jax.device_get(mcmc.last_state)
+            # NumPyro constructs a new pmap transform for each MCMC.run call.  A
+            # device-resident state carries that transform's AbstractMesh and is
+            # rejected by a later batch whose new mesh has a different identity.
+            # Host materialization removes only the sharding metadata; all chain
+            # and adaptation values are preserved.  It also makes checkpoints
+            # portable across process restarts and equivalent MIG layouts.
+            last_state = jax.device_get(mcmc.last_state)
+            if requested_chain_method == 'hybrid' and log_interval:
+                # Drain asynchronous callbacks before closing this batch's logger.
+                jax.effects_barrier()
         
         # Get samples from this batch
         batch_samples = mcmc.get_samples(group_by_chain=False)

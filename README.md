@@ -1048,6 +1048,7 @@ hmc = SamplerConfig.hmc(
     num_chains=4,
     chain_method="hybrid",
     chains_per_device=2,
+    progress_log_interval=50,
 )
 ```
 
@@ -1055,7 +1056,12 @@ hmc = SamplerConfig.hmc(
 `pmap(vmap(...))`，跨设备分配链，并在每张设备内向量化。NUTS 和
 Gibbs-within-HMC 均接入该模式，posterior 和 checkpoint 仍保存在同一个运行目录，
 对外保留四条独立链。总链数必须能被每设备链数整除，且可见 JAX device 数足够；
-不足时明确报错。混合模式关闭进度条，保留每批采样和 checkpoint 日志。
+不足时明确报错。混合模式关闭进度条，默认使用文字报告 warmup 和 sampling 进度，
+每个阶段每 50 次迭代更新一次，并在阶段结束时报告完成。文字进度取所有设备均已
+完成的迭代数，sampling 显示本次目标内的累计 draws/chain，续跑时接上已完成数量。
+编译、初始化或迭代较慢时，每 30 秒提示一次已用时间和最近进度；该等待提示不代表
+已经完成了新的迭代。`progress_log_interval=0` 可关闭文字进度。
+每批采样和 checkpoint 日志仍保留。
 每张 GPU 的显存需要容纳两条链，实际速度与显存用量需在服务器上验证。
 默认 `auto`、`parallel`、`vectorized` 的选择逻辑保持原样。
 
@@ -1069,6 +1075,8 @@ CUDA_VISIBLE_DEVICES=8,9 python -m pytest tests/test_hybrid_hmc.py -q -rs
 
 测试包括两设备上的链分配、NUTS / Gibbs 四链采样、checkpoint 序列化及恢复一致性、
 HDF5 样本和诊断数组形状。设备不足时 GPU 测试会跳过，请确认没有相关 skip。
+还包括文字回调的更新频率、跨设备进度汇总，以及开启日志前后样本和 RNG 状态
+的一致性检查，包括从 checkpoint 状态继续采样的情况。
 
 ### 恢复中断的 HMC
 
