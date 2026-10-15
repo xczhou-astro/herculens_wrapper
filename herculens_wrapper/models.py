@@ -384,6 +384,7 @@ class PowerSpectrum:
         noise_factor=0.001,
         progress_bar=True,
         param_name='source_grid',
+        return_best=False,
     ):
         image = jnp.asarray(np.asarray(image, dtype=np.float64), dtype=jnp.float64)
         noise_level = max(noise_factor * float(np.nanmax(np.asarray(image))), 1e-6)
@@ -393,7 +394,7 @@ class PowerSpectrum:
                 'Source grid',
                 param_name,
                 k_values,
-                k_zero=pixelated_prior.get('power_init_k_zero', None),
+                k_zero=pixelated_prior.get('power_init_k_zero', pixelated_prior.get('k_zero', None)),
                 n_value=pixelated_prior.get('n_value'),
                 n_low=safe_float(pixelated_prior.get('n_value_low'), 0.0001),
                 n_high=safe_float(pixelated_prior.get('n_value_high'), 100.0),
@@ -418,13 +419,20 @@ class PowerSpectrum:
             transition_steps=(100, 25),
         )
         svi = infer.SVI(power_init_model, guide, optax.adabelief(learning_rate=scheduler), infer.TraceMeanField_ELBO())
-        result = svi.run(
-            jax.random.PRNGKey(seed),
-            max_iterations,
-            image,
-            progress_bar=progress_bar,
-            stable_update=True,
-        )
+        if return_best:
+            from herculens_wrapper.svi_initialization import run_svi_best
+            result = run_svi_best(
+                svi, jax.random.PRNGKey(seed), max_iterations, image,
+                progress_bar=progress_bar,
+            )
+        else:
+            result = svi.run(
+                jax.random.PRNGKey(seed),
+                max_iterations,
+                image,
+                progress_bar=progress_bar,
+                stable_update=True,
+            )
         return guide.median(result.params)
 
     @staticmethod
@@ -439,6 +447,7 @@ class PowerSpectrum:
         progress_bar=True,
         param_name='source_grid',
         kwargs_lens=None,
+        return_best=False,
     ):
         if not init_params_path:
             return {}
@@ -454,6 +463,7 @@ class PowerSpectrum:
             seed=seed, max_iterations=max_iterations,
             learning_rate=learning_rate, progress_bar=progress_bar,
             param_name=param_name, kwargs_lens=kwargs_lens,
+            return_best=return_best,
         )
 
     @staticmethod
@@ -469,6 +479,7 @@ class PowerSpectrum:
         progress_bar=True,
         param_name='source_grid',
         kwargs_lens=None,
+        return_best=False,
     ):
         """Fit a pixel-grid Matérn start to already-loaded analytic source kwargs."""
         if not kwargs_source_analytic:
@@ -496,6 +507,7 @@ class PowerSpectrum:
             learning_rate=learning_rate,
             progress_bar=progress_bar,
             param_name=param_name,
+            return_best=return_best,
         )
 
     @staticmethod

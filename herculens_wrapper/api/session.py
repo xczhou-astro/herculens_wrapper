@@ -632,6 +632,80 @@ class SingleBandModel:
             )
         return initial
 
+    def _initialize_pixelated_source(
+        self, initial, *, seed, method, num_iterations, restore_components,
+    ):
+        """Fit only new pixelated-source sites, leaving the joint model intact."""
+        if self.initialization_path is None:
+            # A direct pixelated fit has no preceding model to transition
+            # from: keep the seeded init_to_median baseline for every site.
+            return initial
+        if method == "image" and num_iterations == 0:
+            return initial
+        type_list, param_list = self.definition.as_dicts()
+        source_types = type_list.get("source_light_type_list", [])
+        if "PIXELATED" not in source_types:
+            return initial
+        source_index = source_types.index("PIXELATED")
+        # Keep any additional analytic source components fixed as well.
+        source_sites = {
+            name for name in initial if name.endswith("_source_grid")
+            or name in {"source_pixels", "source_scales", "source_coarse"}
+        }
+        if not source_sites:
+            return initial  # Explicitly fixed pixelated source.
+        source_selected = restore_components is None or "source_light" in restore_components
+        saved_source = []
+        if self.initialization_path is not None and source_selected:
+            from ..models import load_kwargs_init_json
+            saved_source = load_kwargs_init_json(self.initialization_path).get("kwargs_source", [])
+        if (len(saved_source) > source_index
+                and "pixels" in saved_source[source_index]):
+            print("[pixelated-init] Reusing inherited pixelated source; skipping source initialization SVI.")
+            return initial
+        iterations = num_iterations or 2_000
+        if method == "source":
+            if not saved_source or not source_selected:
+                raise ValueError(
+                    "pixelated_init_match='source' requires an inherited analytic source; "
+                    "supply its result path and include source_light in components, "
+                    "or use pixelated_init_match='image'."
+                )
+            from ..models import PowerSpectrum
+            pixelated_prior = param_list["source_light_params_list"][source_index].get("pixelated_prior", {})
+            if pixelated_prior.get("prior_type", "matern") != "matern":
+                raise ValueError("Source matching currently requires the Matérn pixelated prior.")
+            ny, nx = self.lens_image.SourceModel.pixel_grid.num_pixel_axes
+            print(f"[pixelated-init: source] Fitting the inherited parametric source "
+                  f"on the current source grid ({iterations} SVI iterations)...")
+            inherited_kwargs = self.prob_model.params2kwargs(initial)
+            matched = PowerSpectrum.fit_power_spectrum_init_from_source_kwargs(
+                self.lens_image, saved_source, PowerSpectrum.K_grid((ny, nx)).k,
+                pixelated_prior, seed=seed + 7919, max_iterations=iterations,
+                kwargs_lens=inherited_kwargs.get("kwargs_lens"), return_best=True,
+            )
+        else:
+            from numpyro.handlers import condition
+            _, _, run_svi = _sampler_backend()
+            held_fixed = {name: value for name, value in initial.items() if name not in source_sites}
+            source_initial = {name: initial[name] for name in source_sites}
+            warmup_model = SimpleNamespace(model=condition(self.prob_model.model, data=held_fixed))
+            warmup = SamplerConfig.svi(max_iterations=iterations, random_seed=seed).to_namespace()
+            print(f"[pixelated-init: image] Fitting observed image with all "
+                  f"non-pixelated-source parameters held fixed ({iterations} SVI iterations)...")
+            matched, _ = run_svi(
+                warmup_model, self.data.likelihood_image, warmup, source_initial,
+                max_iterations=iterations, return_best=True,
+            )
+        missing = source_sites.difference(matched)
+        if missing:
+            raise RuntimeError(f"Pixelated-source initialization did not fit required sites: {sorted(missing)}.")
+        for name in source_sites:
+            initial[name] = matched[name]
+        print(f"[pixelated-init: {method}] Initialization complete; "
+              "the main fit retains its original sampled/fixed parameters.")
+        return initial
+
     def initialize(
         self,
         *,
@@ -663,10 +737,21 @@ class SingleBandModel:
         for a pixelated F150W fit warm-started from F277W.
         ``init_lens_mass_light_path`` restores both lens mass and lens light
         without inheriting a previous source or point-source decomposition.
-        For a pixelated source, ``pixelated_init_match='image'`` runs a short
-        SVI warmup with inherited lens mass/light held fixed; ``'source'``
-        fits Matérn hyperparameters to the inherited analytic source.
+        A direct pixelated fit without a previous result keeps its median
+        baseline and performs no initialization-matching SVI. When loading
+        a previous result, ``pixelated_init_match='image'`` with
+        ``num_iterations_warmup > 0`` fits the observed image with every other
+        latent fixed. ``'source'`` fits both the Matérn pixel latent and its
+        hyperparameters to the inherited analytic source (2000 iterations if
+        no count is supplied). Both paths support ``init_path`` and retain
+        the lowest finite observed SVI loss. A restored pixelated source is
+        reused without refitting. Original priors remain intact for the main fit.
         """
+        if pixelated_init_match not in {"image", "source"}:
+            raise ValueError("pixelated_init_match must be 'image' or 'source'.")
+        if (isinstance(num_iterations_warmup, bool) or not isinstance(num_iterations_warmup, int)
+                or num_iterations_warmup < 0):
+            raise ValueError("num_iterations_warmup must be a non-negative integer.")
         supplied_paths = [path for path in (
             init_path, init_params_path, init_lens_mass_path, init_lens_mass_light_path,
         ) if path is not None]
@@ -732,81 +817,6 @@ class SingleBandModel:
                 baseline_params=initial if uses_median_warm_start else None,
                 require_requested_components=not uses_median_warm_start,
             )
-            type_list, param_list = self.definition.as_dicts()
-            source_types = type_list.get("source_light_type_list", [])
-            pixelated_source_index = next((
-                index for index, profile_type in enumerate(source_types)
-                if profile_type == "PIXELATED"
-            ), None)
-            is_pixelated = pixelated_source_index is not None
-            if pixelated_init_match not in {"image", "source"}:
-                raise ValueError("pixelated_init_match must be 'image' or 'source'.")
-            if restore_components is not None and is_pixelated and pixelated_init_match == "source":
-                raise ValueError(
-                    "A component-only warm start has no analytic source to match; use "
-                    "pixelated_init_match='image'."
-                )
-            if is_pixelated and pixelated_init_match == "source" and not uses_median_warm_start:
-                from ..models import PowerSpectrum
-
-                iterations = num_iterations_warmup or 2_000
-                if not isinstance(iterations, int) or iterations <= 0:
-                    raise ValueError("num_iterations_warmup must be a positive integer for source matching.")
-                ny, nx = self.lens_image.SourceModel.pixel_grid.num_pixel_axes
-                pixelated_prior = param_list["source_light_params_list"][pixelated_source_index].get(
-                    "pixelated_prior", {}
-                )
-                print(
-                    f"[pixelated-init: source] Fitting Matérn parameters "
-                    f"({iterations} iterations) from the inherited analytic source..."
-                )
-                inherited_kwargs = self.prob_model.params2kwargs(initial)
-                power_values = PowerSpectrum.fit_power_spectrum_init_from_parametric_source(
-                    self.lens_image, str(requested_init_path),
-                    PowerSpectrum.K_grid((ny, nx)).k, pixelated_prior,
-                    seed=seed + 7919, max_iterations=iterations,
-                    kwargs_lens=inherited_kwargs.get("kwargs_lens"),
-                )
-                for name, value in power_values.items():
-                    if name in initial:
-                        initial[name] = value
-                print("[pixelated-init: source] Source-matched initialization complete.")
-            if (is_pixelated and pixelated_init_match == "image"
-                    and num_iterations_warmup > 0 and not uses_median_warm_start):
-                if not isinstance(num_iterations_warmup, int):
-                    raise TypeError("num_iterations_warmup must be an integer.")
-                create_lens_image, create_prob_model, _, _ = _model_backend()
-                _, _, run_svi = _sampler_backend()
-                initial_kwargs = self.prob_model.params2kwargs(initial)
-                warmup_model = create_prob_model(
-                    param_list, type_list, self.lens_image,
-                    self.data.likelihood_image, self.data.likelihood_noise,
-                    fix_lens_mass=bool(initial_kwargs.get("kwargs_lens")),
-                    kwargs_lens_fixed=initial_kwargs.get("kwargs_lens"),
-                    fix_lens_light=bool(initial_kwargs.get("kwargs_lens_light")),
-                    kwargs_lens_light_fixed=initial_kwargs.get("kwargs_lens_light"),
-                    exposure_time=self.data.exposure_time,
-                    background_rms=self.data.background_rms,
-                    background_rms_prior=self.data.background_rms_prior,
-                    init_params_path=None if restore_components is not None else str(requested_init_path),
-                    likelihood_mask=self.data.likelihood_mask,
-                    args=SimpleNamespace(likelihood_scale=self.likelihood_scale),
-                )
-                warmup = SamplerConfig.svi(
-                    max_iterations=num_iterations_warmup, random_seed=seed,
-                ).to_namespace()
-                print(
-                    f"[svi-warmup] Starting {num_iterations_warmup} iteration "
-                    "pixelated-source/point-source image-match warmup..."
-                )
-                warmup_params, _ = run_svi(
-                    warmup_model, self.data.likelihood_image, warmup, initial,
-                    max_iterations=num_iterations_warmup,
-                )
-                for name, value in warmup_params.items():
-                    if "source" in name or "pixels_wn" in name or name.startswith("ps_"):
-                        initial[name] = value
-                print("[svi-warmup] Pixelated-source and point-source image-match warmup complete.")
             pixelated_lens_indices = [
                 index for index, profile_type in enumerate(type_list.get("lens_light_type_list", []))
                 if profile_type == "PIXELATED"
@@ -847,6 +857,10 @@ class SingleBandModel:
                             initial[name] = value
                 print("[pixelated-init: lens-light] Lens-light-matched initialization complete.")
         initial = self._apply_declared_warm_starts(initial, seed=seed)
+        initial = self._initialize_pixelated_source(
+            initial, seed=seed, method=pixelated_init_match,
+            num_iterations=num_iterations_warmup, restore_components=restore_components,
+        )
         self.definition.update_values(initial); self.initial_parameters = initial
         if save_path is not None:
             self.save_initialization(save_path)

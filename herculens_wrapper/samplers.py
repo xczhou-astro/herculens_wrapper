@@ -1128,6 +1128,7 @@ def run_svi(
     init_scale=None,
     loss_kind=None,
     num_particles=None,
+    return_best=False,
 ):
     if max_iterations is None:
         max_iterations = int(getattr(args, 'max_iterations_svi', 10000))
@@ -1184,13 +1185,20 @@ def run_svi(
     svi = infer.SVI(prob_model.model, guide, optim, loss)
     
     print(f"[svi] Running NumPyro SVI (max_iterations={max_iterations}, loss={loss_kind}, num_particles={num_particles})...")
-    result = svi.run(
-        jax.random.PRNGKey(args.random_seed),
-        max_iterations,
-        progress_bar=True,
-        stable_update=True,
-        init_params=init_params,
-    )
+    if return_best:
+        from herculens_wrapper.svi_initialization import run_svi_best
+        result = run_svi_best(
+            svi, jax.random.PRNGKey(args.random_seed), max_iterations,
+            init_params=init_params,
+        )
+    else:
+        result = svi.run(
+            jax.random.PRNGKey(args.random_seed),
+            max_iterations,
+            progress_bar=True,
+            stable_update=True,
+            init_params=init_params,
+        )
     median = guide.median(result.params)
     # ``result.params`` also contains AutoGuide internals (``auto_loc``,
     # covariance factors, ...).  They are variational parameters, not model

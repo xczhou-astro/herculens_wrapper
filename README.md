@@ -943,6 +943,56 @@ result = model.run(
 )
 ```
 
+### Pixelated source 的初始化匹配（单波段）
+
+从已有 parametric 结果切换到 pixelated source 时，支持两种 SVI 初始化，
+`init_path` 与旧的 `init_params_path` 均可使用：
+
+- `image`：固定当前初值下的所有非 pixelated-source 参数（包括 lens mass、
+  lens light、额外解析 source、point source 和背景噪声参数），用 SVI 拟合
+  观测 image，只优化像素源潜变量及其先验超参数。
+- `source`：在当前 mass 定义的 source grid 上计算已有 parametric source
+  的亮度，用 SVI 让 Matérn pixelated source 逼近它，同时拟合 `pixels_wn`
+  和 Matérn 超参数。需要加载包含解析 source 的结果；不能只加载 mass。
+
+```python
+initial = model.initialize(
+    seed=42,
+    init_path="parametric_svi/run_0",
+    pixelated_init_match="source",  # 或 "image"
+    num_iterations_warmup=2000,
+    save_path="pixelated_svi/run_0",
+)
+```
+
+两种方法均保留初始化训练中有限 SVI loss 最低的已评估参数状态，
+而不是直接取最后一步。这里的“最佳”指观测到的 stochastic negative ELBO，
+不代表全局最优。正式 SVI 恢复原有自由/固定参数声明。
+已有 pixelated source 被完整加载时直接复用，不重复进行匹配；HMC 继续
+使用选定的 pixelated SVI 结果，不执行这一步初始化 SVI。
+
+没有上一阶段结果、直接开始 pixelated SVI 时，所有自由参数使用
+`init_to_median(num_samples=25)` 初始化，**不进行 image/source matching**。
+即使给出了 matching 选项，也不会额外执行初始化 SVI。
+
+`base_basic.py` 默认运行 `parametric_svi → pixelated_svi → pixelated_hmc`。
+单独运行 pixelated SVI 时，会自动检查 `output-root/parametric_svi` 并选择
+最佳 run；也可用 `--init-params-path parametric_svi/run_i` 指定。
+单独运行 HMC 时自动选择 `output-root/pixelated_svi` 的最佳 run，也可用
+`--hmc-init-path pixelated_svi/run_i` 或 `--init-params-path` 指定。
+
+有上一阶段初始化结果时，runner 默认使用 2000 次 `image` 匹配，
+可用 `--pixelated-init-match image|source` 和 `--pixelated-init-iterations`
+调整；已有 pixelated source 则直接复用。单次和多次 SVI run 遵循相同规则。
+API 的 `image` 模式仍需显式指定正数 `num_iterations_warmup` 才会执行匹配。
+`kwargs_init.json` 和初始 source 图保存的是最终实际使用的初始化结果。
+
+服务器测试（本地未运行，`tests/` 被 Git 忽略，需要单独同步）：
+
+```bash
+python -m pytest tests/test_pixelated_source_initialization.py -q
+```
+
 ### 初始模型图
 
 ```python
