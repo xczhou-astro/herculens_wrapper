@@ -784,7 +784,7 @@ class LightProfile(Profile):
         sigma_lims: tuple[float, float] | list[float],
         *,
         amp_prior: tuple[float, float] | list[float] = (0.0, 3.0),
-        ellipticity_prior: tuple[float, float, float, float] | list[float] = (0.0, 0.2, -0.5, 0.5),
+        ellipticity_prior: tuple[float, float] | tuple[float, float, float, float] | list[float] = (0.0, 0.2, -0.5, 0.5),
         center_prior: tuple[float, float, float, float] | list[float] = (0.0, 0.2, -0.5, 0.5),
     ) -> "ProfileCollection":
         """Create an MGE as ordered ``GAUSSIAN_ELLIPSE`` components.
@@ -795,9 +795,10 @@ class LightProfile(Profile):
         to the API, parameter-link system, and :class:`StellarMassMGE`.
 
         ``amp_prior`` follows the ordinary API amplitude convention
-        ``[log_loc, log_scale]`` (a LogNormal).  ``ellipticity_prior`` and
-        ``center_prior`` use ``[mean, std, lower, upper]`` (a
-        TruncatedNormal).
+        ``[log_loc, log_scale]`` (a LogNormal). ``ellipticity_prior`` accepts
+        ``[lower, upper]`` (a Uniform) or ``[mean, std, lower, upper]`` (a
+        TruncatedNormal), applied independently to each component's e1/e2.
+        ``center_prior`` uses ``[mean, std, lower, upper]`` (a TruncatedNormal).
         """
         if not isinstance(n_gauss, int) or isinstance(n_gauss, bool) or n_gauss < 1:
             raise ValueError("n_gauss must be a positive integer.")
@@ -814,8 +815,15 @@ class LightProfile(Profile):
             "ellipticity_prior": ellipticity_prior,
             "center_prior": center_prior,
         }.items():
+            if name == "ellipticity_prior" and len(prior) == 2:
+                lower, upper = map(float, prior)
+                if not np.isfinite([lower, upper]).all() or upper <= lower:
+                    raise ValueError("ellipticity_prior Uniform bounds must be finite with upper > lower.")
+                continue
             if len(prior) != 4 or float(prior[3]) <= float(prior[2]) or float(prior[1]) <= 0:
-                raise ValueError(f"{name} must be [mean, std, lower, upper] with std > 0 and upper > lower.")
+                uniform_option = "[lower, upper] or " if name == "ellipticity_prior" else ""
+                raise ValueError(f"{name} must be {uniform_option}[mean, std, lower, upper] "
+                                 "with std > 0 and upper > lower.")
 
         sigma_edges = np.geomspace(sigma_min, sigma_max, n_gauss + 1)
         profiles = []

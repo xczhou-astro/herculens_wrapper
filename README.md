@@ -127,6 +127,26 @@ result.output()
 
 参数使用四元列表 `[mean, sigma, lower, upper]` 表示采样 prior；标量表示固定参数。
 
+### Lens-light MGE
+
+`LightProfile.mge()` 的 `ellipticity_prior` 支持 `(lower, upper)` Uniform
+和 `(mean, std, lower, upper)` TruncatedNormal 两种形式，分别独立应用于
+每个 Gaussian 的 `e1`、`e2`，例如：
+
+```python
+lens_light = LightProfile.mge(
+    n_gauss=10,
+    sigma_lims=(args.pixel_scale * 0.5, 0.5 * args.pixel_scale * args.crop_size),
+    amp_prior=(2.0, 0.1),
+    ellipticity_prior=(-0.5, 0.5),
+    center_prior=(0.0, 0.1, -0.2, 0.2),
+)
+```
+
+它等价于逐个声明 10 个独立的 `GAUSSIAN_ELLIPSE`：宽度范围按对数等分，
+每个 `sigma` 在自己的区间内按 LogUniform 采样；`amp` 使用 LogNormal，
+中心使用指定的 TruncatedNormal。该便捷方法不会自动共享中心或椭率。
+
 ### 独立的批量质量 MGE
 
 `MassProfile.mge()` 返回一个 `MASS_MGE` profile，用数组批量计算 Gaussian
