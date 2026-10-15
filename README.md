@@ -987,6 +987,28 @@ initial = model.initialize(
 API 的 `image` 模式仍需显式指定正数 `num_iterations_warmup` 才会执行匹配。
 `kwargs_init.json` 和初始 source 图保存的是最终实际使用的初始化结果。
 
+runner 会打印实际导入的 API 文件路径、选中的结果目录、匹配方法和迭代数。
+`pixelated_initialization.json` 记录 `method`、`status`、`iterations`、`reference`
+和 `api_file`；完成匹配时 `status="completed"`。如果导入旧 API，或请求的匹配
+被静默跳过，runner/worker 会在正式 SVI 开始前报错。
+`source` 模式正常顺序应为 `[pixelated-init: source]`、初始化 SVI、
+`Selected best finite SVI loss`、`Initialization complete`，之后才是正式 SVI。
+单独看到 `Inherited kwargs` 和正式 10000 次 SVI，并不表示 source 匹配已经执行。
+
+服务器上可以先确认导入位置：
+
+```python
+import inspect
+import base_basic
+from herculens_wrapper.api import SingleBandModel
+print(base_basic.__file__)
+print(inspect.getfile(SingleBandModel))
+```
+
+同步 runner 时也要同步 wrapper 的 `api/session.py`、`models.py`、`samplers.py`
+和 `svi_initialization.py`。验证修复时使用新输出目录，并显式指定原来的
+parametric run，避免复用已完成的旧 pixelated run。
+
 服务器测试（本地未运行，`tests/` 被 Git 忽略，需要单独同步）：
 
 ```bash

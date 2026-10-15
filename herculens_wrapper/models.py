@@ -2345,9 +2345,9 @@ def get_init_params(
                         )
                     else:
                         print(
-                            "[Init] Prior run was parametric. Source light parameters "
-                            "(pixels_wn, n, rho, sigma) keep their new-model "
-                            "initial values."
+                            "[Init] Prior run was parametric. Pixelated source sites "
+                            "retain provisional initial values until the optional "
+                            "initialization-matching stage."
                         )
 
             if require_pixelated_svi:

@@ -83,11 +83,20 @@ def _svi_many_worker_impl(spec, run_id, device):
         pixelated_init_match=spec["pixelated_init_match"], num_iterations_warmup=spec["warmup"],
         save_path=run_dir,
     )
+    source_types = model.definition.as_dicts()[0].get("source_light_type_list", [])
+    if ("PIXELATED" in source_types and model.initialization_path is not None
+            and (spec["warmup"] > 0 or spec["pixelated_init_match"] == "source")):
+        report = model.pixelated_initialization or {}
+        if (report.get("method") != spec["pixelated_init_match"]
+                or report.get("status") not in {"completed", "reused_pixelated_source", "fixed_source"}):
+            raise RuntimeError(
+                f"Requested pixelated initialization was skipped or changed before SVI: {report}. "
+                f"Imported API: {Path(__file__).resolve()}."
+            )
     model.plot_initial_model(
         scale="linear", save_path=run_dir / "initial_guess_model.png",
         residual_vis_max=spec["residual_vis_max"],
     )
-    source_types = model.definition.as_dicts()[0].get("source_light_type_list", [])
     if any("PIXELATED" in str(profile_type).upper() for profile_type in source_types):
         model.plot_initial_source(scale="linear", save_path=run_dir / "initial_source_plane.png")
         model.plot_initial_source_ray_tracing(save_path=run_dir / "initial_source_plane_ray_tracing.png")
@@ -120,6 +129,7 @@ class SingleBandModel:
         self.initial_parameters: Mapping[str, Any] | None = None
         self.initialization_path: Path | None = None
         self.initialization_components: tuple[str, ...] | None = None
+        self.pixelated_initialization: dict[str, Any] | None = None
         self._initialization_uses_median = False
         # HMC is deliberately loaded separately from a point-estimate run:
         # the archive may be large, and posterior image products are only
@@ -636,15 +646,28 @@ class SingleBandModel:
         self, initial, *, seed, method, num_iterations, restore_components,
     ):
         """Fit only new pixelated-source sites, leaving the joint model intact."""
-        if self.initialization_path is None:
-            # A direct pixelated fit has no preceding model to transition
-            # from: keep the seeded init_to_median baseline for every site.
-            return initial
-        if method == "image" and num_iterations == 0:
-            return initial
         type_list, param_list = self.definition.as_dicts()
         source_types = type_list.get("source_light_type_list", [])
         if "PIXELATED" not in source_types:
+            self.pixelated_initialization = None
+            return initial
+        self.pixelated_initialization = {
+            "method": method, "requested_iterations": num_iterations,
+            "iterations": 0, "status": "pending",
+            "reference": None if self.initialization_path is None else str(self.initialization_path),
+            "api_file": str(Path(__file__).resolve()),
+        }
+        print(f"[pixelated-init] Requested method={method}; iterations={num_iterations}; "
+              f"reference={self.initialization_path}; API={Path(__file__).resolve()}", flush=True)
+        if self.initialization_path is None:
+            # A direct pixelated fit has no preceding model to transition
+            # from: keep the seeded init_to_median baseline for every site.
+            self.pixelated_initialization.update(status="skipped", reason="fresh_init_to_median")
+            print("[pixelated-init] No preceding result: using init_to_median without matching.", flush=True)
+            return initial
+        if method == "image" and num_iterations == 0:
+            self.pixelated_initialization.update(status="skipped", reason="zero_matching_iterations")
+            print("[pixelated-init] Image matching disabled: num_iterations_warmup=0.", flush=True)
             return initial
         source_index = source_types.index("PIXELATED")
         # Keep any additional analytic source components fixed as well.
@@ -653,6 +676,7 @@ class SingleBandModel:
             or name in {"source_pixels", "source_scales", "source_coarse"}
         }
         if not source_sites:
+            self.pixelated_initialization.update(status="fixed_source")
             return initial  # Explicitly fixed pixelated source.
         source_selected = restore_components is None or "source_light" in restore_components
         saved_source = []
@@ -661,6 +685,7 @@ class SingleBandModel:
             saved_source = load_kwargs_init_json(self.initialization_path).get("kwargs_source", [])
         if (len(saved_source) > source_index
                 and "pixels" in saved_source[source_index]):
+            self.pixelated_initialization.update(status="reused_pixelated_source")
             print("[pixelated-init] Reusing inherited pixelated source; skipping source initialization SVI.")
             return initial
         iterations = num_iterations or 2_000
@@ -702,6 +727,9 @@ class SingleBandModel:
             raise RuntimeError(f"Pixelated-source initialization did not fit required sites: {sorted(missing)}.")
         for name in source_sites:
             initial[name] = matched[name]
+        self.pixelated_initialization.update(
+            status="completed", iterations=iterations, fitted_sites=sorted(source_sites),
+        )
         print(f"[pixelated-init: {method}] Initialization complete; "
               "the main fit retains its original sampled/fixed parameters.")
         return initial
@@ -895,6 +923,11 @@ class SingleBandModel:
         temporary = destination.with_suffix(".json.tmp")
         temporary.write_text(json.dumps(saved, indent=4, default=json_serializer))
         temporary.replace(destination)
+        if self.pixelated_initialization is not None:
+            report = directory / "pixelated_initialization.json"
+            temporary_report = report.with_suffix(".json.tmp")
+            temporary_report.write_text(json.dumps(self.pixelated_initialization, indent=4))
+            temporary_report.replace(report)
         return destination
 
     def _hmc_manifest(self, sampler: SamplerConfig) -> dict[str, Any]:
