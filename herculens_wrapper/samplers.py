@@ -211,7 +211,7 @@ def evaluate_parameter_components(prob_model, params, *, rng_seed=0):
 def evaluate_mcmc_component_medians(
     prob_model,
     samples,
-    batch_size=1000,
+    batch_size=32,
     active_sites=None,
     kwargs_lens_from_params=None,
     lens_image_override=None,
@@ -221,6 +221,11 @@ def evaluate_mcmc_component_medians(
     """
     Evaluates model images for MCMC samples using vectorized JAX.
 
+    The default device batch is deliberately small: vectorizing MGE lenses
+    and supersampled image rendering over hundreds of draws can expand
+    intermediate arrays far beyond the size of the stored posterior. This
+    chunk size changes only execution, not which draws enter the median.
+
     By default this returns pixel-by-pixel medians.  ``return_samples=True``
     returns the per-draw component images.  ``sample_consumer`` receives
     each CPU component chunk as ``(start, end, values)`` and avoids retaining
@@ -229,6 +234,9 @@ def evaluate_mcmc_component_medians(
     import jax
     import jax.numpy as jnp
     import numpy as np
+
+    if isinstance(batch_size, bool) or not isinstance(batch_size, (int, np.integer)) or batch_size < 1:
+        raise ValueError("batch_size must be a positive integer.")
 
     lens_image = lens_image_override or getattr(prob_model, 'lens_image', None)
     if lens_image is None:
@@ -394,7 +402,7 @@ def evaluate_mcmc_component_medians(
     return result
 
 
-def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=1000):
+def evaluate_mcmc_median_model_image(prob_model, samples, batch_size=32):
     """
     Evaluates model images for all MCMC samples using fast vectorized JAX vmap
     and computes the pixel-by-pixel median across all samples.
@@ -1558,6 +1566,9 @@ def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches
 
 
 def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnostics_callback=None):
+    hmc_batch_size = getattr(args, 'hmc_batch_size', 32)
+    if isinstance(hmc_batch_size, bool) or not isinstance(hmc_batch_size, (int, np.integer)) or hmc_batch_size < 1:
+        raise ValueError('hmc_batch_size must be a positive integer.')
     def _concatenate_batches(all_samples, num_chains):
         samples = {}
         for k in all_samples[0].keys():
@@ -2104,6 +2115,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             try:
                 temp_comp_medians = _stream_hmc_component_medians_hdf5(
                     prob_model, samples_hdf5_path, temporary_components_path,
+                    sample_chunk_size=hmc_batch_size,
                 )
                 plot_params, diagnostic_samples, diagnostic_health = (
                     _load_hmc_plot_and_diagnostic_samples_hdf5(samples_hdf5_path)
@@ -2182,7 +2194,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
             # Joint multiband models have one LensImage per band and cache
             # their batch/result diagnostics through the API callback.
             raise RuntimeError('multiband component caching is handled per band by MultiBandModel')
-        component_medians = evaluate_mcmc_component_medians(prob_model, samples)
+        component_medians = evaluate_mcmc_component_medians(
+            prob_model, samples, batch_size=hmc_batch_size,
+        )
         sample_likelihood = component_medians.pop('_sample_likelihood_summary', None)
         derived['component_medians'] = component_medians
         derived['components'] = component_medians
@@ -2228,6 +2242,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         
     extra_fields = {
         'flat_samples': flat_samples,
+        'hmc_batch_size': int(hmc_batch_size),
         'hmc_sampler_health': hmc_extra_fields,
         'derived': derived,
     }

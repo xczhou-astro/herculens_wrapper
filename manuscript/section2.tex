@@ -1,0 +1,89 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=25mm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage[authoryear,round]{natbib}
+\usepackage[colorlinks=true,citecolor=blue,urlcolor=blue,linkcolor=blue]{hyperref}
+\newcommand{\herculens}{\textsc{Herculens}}
+\begin{document}
+\setcounter{section}{1}
+\section{Strong gravitational lensing and modelling framework}
+\label{sec:lensing_framework}
+
+\subsection{Strong gravitational lensing}
+\label{sec:lensing_basics}
+
+Strong gravitational lensing occurs when the gravitational field of a foreground mass distribution produces multiple images of a background source. For an extended source, these images can appear as distorted arcs or an approximately complete Einstein ring. Their positions and resolved surface-brightness structure constrain the projected total mass of the deflector, including both baryonic and dark matter \citep{Shajib2024}. In the thin-lens approximation, with a single lens plane and a single source plane, the mapping between the angular image position $\boldsymbol{\theta}$ and source position $\boldsymbol{\beta}$ is described by the lens equation,
+\begin{equation}
+    \boldsymbol{\beta}
+    = \boldsymbol{\theta}-\boldsymbol{\alpha}(\boldsymbol{\theta})
+    = \boldsymbol{\theta}-\boldsymbol{\nabla}_{\theta}\psi(\boldsymbol{\theta}),
+    \label{eq:lens_equation}
+\end{equation}
+where $\boldsymbol{\alpha}$ is the reduced deflection angle and $\psi$ is the scaled lensing potential. Multiple images correspond to distinct solutions for $\boldsymbol{\theta}$ at the same $\boldsymbol{\beta}$ \citep{Saha2024}.
+
+The lensing potential is related to the dimensionless convergence $\kappa$ through
+\begin{equation}
+    \nabla_{\theta}^{2}\psi(\boldsymbol{\theta})=2\kappa(\boldsymbol{\theta}),
+    \qquad
+    \kappa(\boldsymbol{\theta})
+    =\frac{\Sigma(D_{\rm l}\boldsymbol{\theta})}{\Sigma_{\rm crit}},
+    \qquad
+    \Sigma_{\rm crit}
+    =\frac{c^{2}}{4\pi G}\frac{D_{\rm s}}{D_{\rm l}D_{\rm ls}},
+    \label{eq:convergence}
+\end{equation}
+where $\Sigma$ is the projected mass density, $D_{\rm l}$ and $D_{\rm s}$ are the angular-diameter distances from the observer to the lens and source, and $D_{\rm ls}$ is the angular-diameter distance from the lens to the source. Here $c$ is the speed of light and $G$ is Newton's gravitational constant \citep{Saha2024}. The local distortion is described by the Jacobian $\mathbf{A}=\partial\boldsymbol{\beta}/\partial\boldsymbol{\theta}$, with signed magnification $\mu=(\det\mathbf{A})^{-1}$. Critical curves satisfy $\det\mathbf{A}=0$ in the image plane; their mappings into the source plane are the caustics \citep{Saha2024}.
+
+Gravitational lensing conserves surface brightness in geometric optics, neglecting absorption along the light path. The lensed source brightness therefore satisfies $I_{\rm src}^{\rm lens}(\boldsymbol{\theta})=S[\boldsymbol{\beta}(\boldsymbol{\theta})]$, where $S$ is the unlensed source brightness distribution \citep{Saha2024}. Modelling the resolved images thus requires both a lens mass model and a description of the source. The inferred mass distribution depends on these modelling assumptions and on intrinsic lensing degeneracies \citep{Shajib2024}.
+
+\subsection{Modelling with \herculens}
+\label{sec:herculens}
+
+We use \herculens\ \citep{Galan2022}, an open-source Python package for differentiable strong-lens modelling. Its modular framework supports analytical profiles and pixelated representations of the source brightness and lensing potential. The implementation is based on JAX, which provides automatic differentiation and just-in-time compilation on CPUs and GPUs. Gradients through the image-generation calculation enable gradient-based optimisation and posterior inference, including models with many parameters.\footnote{\url{https://github.com/Herculens/herculens}}
+
+The imaging analysis follows a forward-modelling approach. For model parameters $\boldsymbol{\eta}$, the source is mapped into the image plane using Eq.~\eqref{eq:lens_equation}, combined with the foreground lens light, convolved with the instrumental point-spread function (PSF), and integrated over the detector pixels. Schematically, the predicted image is
+\begin{equation}
+    \boldsymbol{m}(\boldsymbol{\eta})
+    =\mathcal{D}\!\left\{
+        P*\left[
+            S\!\left(\boldsymbol{\beta}(\boldsymbol{\theta});\boldsymbol{\eta}_{\rm src}\right)
+            +L\!\left(\boldsymbol{\theta};\boldsymbol{\eta}_{\rm light}\right)
+        \right]
+    \right\},
+    \label{eq:forward_model}
+\end{equation}
+where $L$ is the lens-galaxy surface brightness, $P$ is the PSF kernel, $*$ denotes convolution, and $\mathcal{D}$ represents pixel integration and sampling. The lens equation depends on the mass parameters $\boldsymbol{\eta}_{\rm mass}$, while $\boldsymbol{\eta}_{\rm src}$ and $\boldsymbol{\eta}_{\rm light}$ describe the source and lens light, respectively \citep{Galan2022}.
+
+In our implementation, the predicted image is compared with the data using a Gaussian likelihood with independent pixel errors,
+\begin{equation}
+    \ln\mathcal{L}(\boldsymbol{d}\mid\boldsymbol{\eta})
+    =-\frac{1}{2}\sum_{i\in\mathcal{M}}\left[
+        \frac{\bigl[d_i-m_i(\boldsymbol{\eta})\bigr]^2}
+             {\sigma_i^2(\boldsymbol{\eta})}
+        +\ln\!\bigl(2\pi\sigma_i^2(\boldsymbol{\eta})\bigr)
+    \right],
+    \label{eq:likelihood}
+\end{equation}
+where $\mathcal{M}$ is the set of fitted pixels, $d_i$ and $m_i$ are the observed and predicted pixel values, and $\sigma_i$ is the adopted noise standard deviation. The notation allows either a fixed noise map or model-dependent variances. Given a prior $p(\boldsymbol{\eta})$, the posterior is $p(\boldsymbol{\eta}\mid\boldsymbol{d})\propto\mathcal{L}(\boldsymbol{d}\mid\boldsymbol{\eta})p(\boldsymbol{\eta})$. Our wrapper connects the \herculens\ forward model to NumPyro for probabilistic inference. The adopted component models, priors, and inference configuration are specified in the subsequent modelling sections.
+
+\begin{thebibliography}{3}
+\bibitem[Galan et al.(2022)]{Galan2022}
+Galan, A., Vernardos, G., Peel, A., Courbin, F., \& Starck, J.-L. 2022,
+Using wavelets to capture deviations from smoothness in galaxy-scale strong lenses,
+Astronomy \& Astrophysics, 668, A155.
+\href{https://doi.org/10.1051/0004-6361/202244464}{doi:10.1051/0004-6361/202244464}.
+
+\bibitem[Saha et al.(2024)]{Saha2024}
+Saha, P., Sluse, D., Wagner, J., \& Williams, L. L. R. 2024,
+Essentials of Strong Gravitational Lensing,
+Space Science Reviews, 220, 12.
+\href{https://doi.org/10.1007/s11214-024-01041-w}{doi:10.1007/s11214-024-01041-w}.
+
+\bibitem[Shajib et al.(2024)]{Shajib2024}
+Shajib, A. J., Vernardos, G., Collett, T. E., Motta, V., Sluse, D.,
+Williams, L. L. R., Saha, P., Birrer, S., Spiniello, C., \& Treu, T. 2024,
+Strong Lensing by Galaxies,
+Space Science Reviews, 220, 87.
+\href{https://doi.org/10.1007/s11214-024-01105-x}{doi:10.1007/s11214-024-01105-x}.
+\end{thebibliography}
+\end{document}

@@ -18,10 +18,16 @@ _SVI_COMPLETION_FILES = (
     "kwargs_result.json",
     "metrics.json",
     "modeling_result.fits",
-    "parameter_shifts.txt",
     "svi_loss_history.json",
     "svi_guide_params.pkl",
 )
+
+
+def _validate_hmc_batch_size(value: int) -> int:
+    """Validate the device batch for posterior image rendering."""
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError("hmc_batch_size must be a positive integer.")
+    return int(value)
 
 
 def _pixelated_source_index(type_list, kwargs_source=None):
@@ -762,9 +768,15 @@ class SamplerConfig:
         progress_bar: bool = True,
         init_max_retries: int = 100,
         disable_gibbs: bool = False,
+        hmc_batch_size: int = 32,
         random_seed: int = 42,
     ) -> "SamplerConfig":
-        """Configure NumPyro NUTS/HMC sampling for an SVI-warm-started model."""
+        """Configure NumPyro NUTS/HMC sampling for an SVI-warm-started model.
+
+        ``hmc_batch_size`` limits posterior draws rendered together for
+        diagnostics and output; it does not change sampling or checkpoints.
+        """
+        hmc_batch_size = _validate_hmc_batch_size(hmc_batch_size)
         positive_integers = {
             "num_warmup": num_warmup,
             "num_samples": num_samples,
@@ -789,10 +801,15 @@ class SamplerConfig:
             "progress_bar_hmc_numpyro": progress_bar,
             "hmc_init_max_retries": init_max_retries,
             "disable_gibbs": disable_gibbs,
+            "hmc_batch_size": hmc_batch_size,
         })
     def to_namespace(self) -> SimpleNamespace:
         defaults = {"sampler": self.name, "random_seed": self.random_seed, "algorithm_optax": "adabelief", "max_iterations_optax": 2000, "init_learning_rate_optax": 1e-2, "schedule_learning_rate_optax": True, "stop_at_loss_increase_optax": False, "progress_bar_optax": True, "max_iterations_svi": 10000, "init_learning_rate_svi": 1e-2, "init_scale_svi": 0.1, "loss_kind_svi": "trace_elbo", "num_particles_svi": 10, "num_warmup_hmc_numpyro": 1000, "num_samples_hmc_numpyro": 1000, "num_chains_hmc_numpyro": 1, "checkpoint_interval_hmc_numpyro": 250, "chain_method_hmc_numpyro": "auto", "progress_bar_hmc_numpyro": True, "hmc_init_max_retries": 100, "likelihood_scale": 1.0}
-        defaults.update(self.options); return SimpleNamespace(**defaults)
+        defaults["hmc_batch_size"] = 32
+        defaults.update(self.options)
+        if self.name == "hmc":
+            defaults["hmc_batch_size"] = _validate_hmc_batch_size(defaults["hmc_batch_size"])
+        return SimpleNamespace(**defaults)
 
 @dataclass
 class FitResult:
@@ -832,14 +849,25 @@ class FitResult:
             raise RuntimeError("This FitResult is not attached to a SingleBandModel.")
         return self._model
 
-    def metrics(self) -> dict[str, Any]:
+    def _resolve_hmc_batch_size(self, override: int | None = None) -> int:
+        value = _validate_hmc_batch_size(
+            self.details.get("hmc_batch_size", 32) if override is None else override,
+        )
+        if override is not None:
+            self.details["hmc_batch_size"] = value
+        return value
+
+    def metrics(self, *, hmc_batch_size: int | None = None) -> dict[str, Any]:
         """Return image-median and, for HMC, maximum-likelihood sample metrics."""
+        batch_size = self._resolve_hmc_batch_size(hmc_batch_size)
         model = self._require_model()
         if self.samples is not None:
             components = self.derived.get("component_medians")
             if components is None or self.derived.get("sample_likelihood_summary") is None:
                 from ..samplers import evaluate_mcmc_component_medians
-                evaluated = evaluate_mcmc_component_medians(model.prob_model, self.samples)
+                evaluated = evaluate_mcmc_component_medians(
+                    model.prob_model, self.samples, batch_size=batch_size,
+                )
                 summary = evaluated.pop("_sample_likelihood_summary", None)
                 self.derived["component_medians"] = components = evaluated
                 if summary is not None:
@@ -1559,13 +1587,16 @@ class FitResult:
 
     @logged_result_output
     def output(self, save_path: str | Path | None = None, *, scale: str = "log", residual_vis_max: float = 0.0,
-               include_corner: bool = True) -> dict[str, Any]:
+               include_corner: bool = True, hmc_batch_size: int | None = None) -> dict[str, Any]:
         """Write the standard single-band pipeline products to one run directory.
 
         The filenames deliberately match the existing config-driven pipeline,
         excluding its configuration snapshots.  This makes API and legacy runs
         interchangeable for downstream inspection tools.
+        ``hmc_batch_size`` optionally overrides the posterior rendering
+        batch inherited from the sampler or :meth:`SingleBandModel.load_hmc`.
         """
+        batch_size = self._resolve_hmc_batch_size(hmc_batch_size)
         directory = Path(save_path).expanduser()
         if directory.suffix and not directory.is_dir():
             raise ValueError("output(save_path) expects a directory, not a filename.")
@@ -1593,7 +1624,9 @@ class FitResult:
         )
         if self.samples is not None and components is None:
             from ..samplers import evaluate_mcmc_component_medians
-            components = evaluate_mcmc_component_medians(model.prob_model, self.samples)
+            components = evaluate_mcmc_component_medians(
+                model.prob_model, self.samples, batch_size=batch_size,
+            )
             summary = components.pop("_sample_likelihood_summary", None)
             if summary is not None:
                 self.derived["sample_likelihood_summary"] = summary
@@ -1821,49 +1854,10 @@ class FitResult:
             "source_y_corners": {"BUNIT": "arcsec"},
         })
         files["modeling_result"] = directory / "modeling_result.fits"
-        _write_parameter_shifts(directory, kwargs_best, type_list)
-        files["parameter_shifts"] = directory / "parameter_shifts.txt"
         for filename in directory.iterdir():
             if filename.suffix == ".png":
                 files[filename.stem] = filename
         return {"directory": directory, "files": files, "skipped": skipped}
-
-
-def _write_parameter_shifts(directory: Path, kwargs: Mapping[str, Any], type_list: Mapping[str, list[str]]) -> None:
-    """Write the legacy parameter summary for a self-contained API run."""
-    categories = (
-        ("kwargs_lens", "lens_mass", "lens_mass_type_list"),
-        ("kwargs_lens_light", "lens_light", "lens_light_type_list"),
-        ("kwargs_source", "source_light", "source_light_type_list"),
-        ("kwargs_ps", "point_source", "point_source_type_list"),
-    )
-    lines: list[str] = []
-    for key, label, type_key in categories:
-        components = kwargs.get(key, [])
-        if not components:
-            continue
-        lines.append(f"{label}:")
-        types = type_list.get(type_key, [])
-        for index, component in enumerate(components):
-            name = types[index] if index < len(types) else "UNKNOWN"
-            lines.append(f"     {name}:")
-            suffix = f"_{index}" if len(components) > 1 else ""
-            for parameter, value in component.items():
-                # Pixelated profiles keep some optional hyperparameters as
-                # ``None`` (for example a fixed/unused Matérn n value).  They
-                # are valid entries in kwargs_result, but are not numerical
-                # parameter shifts and cannot be formatted as a float.
-                if value is None:
-                    continue
-                array = np.asarray(value)
-                if parameter == "pixels" or array.ndim != 0:
-                    continue
-                try:
-                    numeric_value = float(array)
-                except (TypeError, ValueError):
-                    continue
-                lines.append(f"            {parameter}{suffix}: null -> {numeric_value:.3f}")
-    (directory / "parameter_shifts.txt").write_text("\n".join(lines) + "\n")
 
 
 @dataclass

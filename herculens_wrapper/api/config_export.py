@@ -163,6 +163,7 @@ def export_wrapper_config(
         "chain_method_hmc_numpyro": "auto",
         "progress_bar_hmc_numpyro": True,
         "hmc_init_max_retries": 100,
+        "hmc_batch_size": 32,
         "ps_nsolutions": 5,
         "ps_niter": 10,
         "ps_scale_factor": 2,

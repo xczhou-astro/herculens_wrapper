@@ -17,7 +17,7 @@ from .collections import LensProfileCollection
 from .data import SingleBandData
 from ._logging import RunContext, format_configuration, logged_model_run, logged_result_output
 from .models import ModelDefinition, count_physical_parameters
-from .samplers import SamplerConfig
+from .samplers import SamplerConfig, _validate_hmc_batch_size
 
 
 _FILES = {
@@ -270,7 +270,9 @@ class MultiBandFitResult:
         if self.samples is not None:
             hmc_components = self.details.get("component_medians_by_band")
             if hmc_components is None or self.details.get("sample_likelihood_summary") is None:
-                hmc_components = self._model._evaluate_hmc_component_medians(self.samples)
+                hmc_components = self._model._evaluate_hmc_component_medians(
+                    self.samples, batch_size=self.details.get("hmc_batch_size", 32),
+                )
                 self.details["component_medians_by_band"] = hmc_components
                 self.details["sample_likelihood_summary"] = self._model._last_hmc_likelihood_summary
         kwargs_by_band = self.kwargs_by_band() if hmc_components is None else None
@@ -390,12 +392,16 @@ class MultiBandFitResult:
                     noise_map=output_noise, psf_data=self._model.observations[name].psf,
                     pixel_scale=self._model.observations[name].pixel_scale, save_path=str(directory),
                     sampler="hmc" if self.samples is not None else "svi",
-                    best_fit_model=best, chi2=chi2, reduced_chi2=None, extra=None,
+                    best_fit_model=best, chi2=chi2, reduced_chi2=None,
+                    extra={"hmc_batch_size": self.details.get("hmc_batch_size", 32)},
                     param_list=band["param_list"], residual_vis_max=residual_vis_max,
                     mcmc_samples=self.samples,
                     mcmc_component_medians=components,
                     fit_mask_bool=valid,
                     num_chains_hmc=int(self.details.get("num_chains_hmc_numpyro", 1)),
+                    mass_kwargs_from_params=lambda draw, name=name: (
+                        self._model.prob_model.params2kwargs_by_band(draw)[name]["kwargs_lens"]
+                    ),
                 )
             except Exception as error: skipped[f"{name}_plots"] = str(error)
             band_results.append({"name": name, "lens_image": band["lens_image"], "kwargs_result": kwargs_for_plots,
@@ -1170,11 +1176,15 @@ class MultiBandModel:
                 batch_diagnostics_callback=lambda draws, batch_index, health: self._save_hmc_batch_diagnostics(
                     draws, batch_index, health, output, int(args.num_chains_hmc_numpyro),
                     residual_vis_max=float(residual_vis_max),
+                    hmc_batch_size=args.hmc_batch_size,
                 ),
             )
             details["num_chains_hmc_numpyro"] = int(args.num_chains_hmc_numpyro)
+            details["hmc_batch_size"] = args.hmc_batch_size
             print("[hmc] Computing final posterior-median component images in chunks...")
-            details["component_medians_by_band"] = self._evaluate_hmc_component_medians(samples)
+            details["component_medians_by_band"] = self._evaluate_hmc_component_medians(
+                samples, batch_size=args.hmc_batch_size,
+            )
             details["sample_likelihood_summary"] = self._last_hmc_likelihood_summary
         initial_for_result = dict(initial)
         self.initial_parameters = parameters
@@ -1193,6 +1203,7 @@ class MultiBandModel:
         num_chains: int,
         *,
         residual_vis_max: float = 0.0,
+        hmc_batch_size: int = 32,
     ) -> None:
         """Save cumulative multiband diagnostics after one HMC batch."""
         from ..samplers import save_hmc_diagnostics
@@ -1206,7 +1217,9 @@ class MultiBandModel:
         )
         medians = {key: np.median(np.asarray(value), axis=0) for key, value in samples.items()}
         kwargs_by_band = self.prob_model.params2kwargs_by_band(medians)
-        components_by_band = self._evaluate_hmc_component_medians(samples)
+        components_by_band = self._evaluate_hmc_component_medians(
+            samples, batch_size=hmc_batch_size,
+        )
         first = np.asarray(next(iter(samples.values())))
         if first.shape[0] % num_chains:
             raise ValueError("HMC samples cannot be divided into the configured number of chains.")
@@ -1215,7 +1228,7 @@ class MultiBandModel:
             self._evaluate_hmc_component_medians({
                 key: np.asarray(value).reshape((num_chains, draws_per_chain) + np.asarray(value).shape[1:])[chain]
                 for key, value in samples.items()
-            })
+            }, batch_size=hmc_batch_size)
             for chain in range(num_chains)
         ]
         plot_rows = []
@@ -1247,7 +1260,7 @@ class MultiBandModel:
         )
 
     def _evaluate_hmc_component_medians(
-        self, samples: Mapping[str, Any], *, batch_size: int = 1_000,
+        self, samples: Mapping[str, Any], *, batch_size: int = 32,
     ) -> dict[str, dict[str, np.ndarray]]:
         """Forward every posterior draw in GPU-sized chunks, then take image medians.
 
@@ -1258,6 +1271,7 @@ class MultiBandModel:
         import jax
         import jax.numpy as jnp
 
+        batch_size = _validate_hmc_batch_size(batch_size)
         keys = list(samples)
         if not keys:
             raise ValueError("Cannot evaluate HMC components without posterior samples.")

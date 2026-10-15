@@ -1015,6 +1015,7 @@ hmc = SamplerConfig.hmc(
     chain_method="parallel",
     progress_bar=True,
     disable_gibbs=False,
+    hmc_batch_size=128,
     random_seed=42,
 )
 
@@ -1025,6 +1026,12 @@ result = model.run(
 )
 result.output()
 ```
+
+`hmc_batch_size`（默认 32，正整数）控制 HMC 后处理每批在 GPU 上计算的
+posterior draws 数，包括中间诊断图和最终逐像素中位数图像，单波段和多波段均适用。
+可按显存容量调整，例如 32、64、128 或 256；较大的批量可能提高吞吐量，
+也会增加显存需求。它不会改变 `num_samples`、`num_chains`、`checkpoint_interval`
+或参与中位数计算的样本集合。
 
 多 GPU/MIG HMC 使用 `chain_method="parallel"`，每条 chain 占用一个可见 JAX device。启动程序前设置可见设备：
 
@@ -1049,13 +1056,30 @@ result.output()
 ### 载入 HMC posterior
 
 ```python
-model.load_hmc("hmc")
+model.load_hmc("hmc", hmc_batch_size=128)
 result = model.get_results(random_seed=42)
+result.output()
 
-metrics = model.recompute_hmc_metrics("hmc", write=True)
+metrics = model.recompute_hmc_metrics("hmc", hmc_batch_size=128, write=True)
 ```
 
+若 HMC 已完成但在整理输出时显存不足，可以在相同的模型声明下使用上述
+`load_hmc()` / `get_results()` / `output()` 重新生成结果，已有 posterior 不会重新采样。
+`load_hmc(..., hmc_batch_size=...)` 的设置会传递到 `get_results()` 和结果输出。
+单波段结果也可以用 `result.output(hmc_batch_size=64)` 或
+`result.metrics(hmc_batch_size=64)` 覆盖后续计算的批量；已有缓存直接复用。
+
 ## 9. Result API
+
+HMC 的 `lens_mass_parameters.json` 会逐个联合后验样本计算质量参数、形状和
+多极项转换，以及总切向临界曲线面积定义的 effective Einstein radius。
+数值字段使用后验中位数，`uncertainties` 中保留约 68.27% 等尾区间的
+`median`、`lower`、`upper`、`error_minus` 和 `error_plus`；数组参数逐元素处理，
+固定参数的上下误差为零。角度按其物理周期展开后计算区间。
+`reference_model` 保留原来在传入 kwargs（通常是逐参数后验中位数）处的计算。
+如果部分样本没有图像范围内完整闭合的切向临界曲线，Einstein-radius 区间仅针对
+有效样本，并在 `einstein_radius.posterior` 中明确记录有效数、失败数和条件筛选。
+计算使用全部样本，设备批量由 `hmc_batch_size` 控制；SVI 保留原有点估计输出。
 
 ### 路径和标准输出
 
@@ -1167,6 +1191,13 @@ print(result.log_path)  # results/run_0/log.txt
 - `model_configuration.json`
 
 串行运行同时输出到终端和日志；并行 SVI 的每个 worker 独立写入 `run_i/log.txt`。
+
+日志自动记录 Python 启动命令（含解释器选项、脚本或 `-m` 模块及其参数）和
+当前工作目录，配置快照的 `execution` 字段保留结构化参数列表与解释器路径。
+并行 SVI worker 继承主进程的启动信息；每次运行或输出均在日志中追加当前操作的信息。
+命令根据进程参数重新组合，无法还原 shell alias、环境变量赋值或输出重定向。
+在 Jupyter/IPython 中会标记交互上下文，`command` 为 `null`，不会将 kernel
+启动命令当作建模命令。
 
 ## 11. 多波段 API
 

@@ -1,6 +1,8 @@
 import multiprocessing as mp
 import os
 import pickle
+import json
+import shlex
 from pathlib import Path
 import sys
 
@@ -21,6 +23,7 @@ from herculens_wrapper.api import (
 )
 from herculens_wrapper.api._logging import (
     RunContext,
+    execution_metadata,
     logged_model_run,
     logged_result_output,
 )
@@ -232,7 +235,9 @@ def test_modeling_result_fits_writes_source_lens_light_and_psf(
         }, _model=model,
     )
 
-    result.output(tmp_path, include_corner=False)
+    output = result.output(tmp_path, include_corner=False)
+    assert not (tmp_path / "parameter_shifts.txt").exists()
+    assert "parameter_shifts" not in output["files"]
     with fits.open(tmp_path / "modeling_result.fits") as hdus:
         assert np.array_equal(hdus[model_name].data, np.ones((3, 3)))
         assert np.array_equal(hdus["LENS_LIGHT"].data, np.full((3, 3), 2.0))
@@ -465,6 +470,96 @@ def test_model_binds_result_to_the_same_log(tmp_path):
     assert "sampler body" in text
     assert "result body" in text
     assert (tmp_path / "model_configuration.json").is_file()
+
+
+def test_completed_svi_run_does_not_require_parameter_shifts(tmp_path):
+    from herculens_wrapper.api.samplers import is_completed_svi_run
+
+    for filename in (
+        "kwargs_result.json", "metrics.json", "modeling_result.fits",
+        "svi_loss_history.json", "svi_guide_params.pkl",
+    ):
+        (tmp_path / filename).touch()
+    assert is_completed_svi_run(tmp_path)
+    # Old output directories remain accepted as well.
+    (tmp_path / "parameter_shifts.txt").touch()
+    assert is_completed_svi_run(tmp_path)
+    (tmp_path / "svi_guide_params.pkl").unlink()
+    assert not is_completed_svi_run(tmp_path)
+
+
+def test_invocation_records_interpreter_flags_module_and_quoted_arguments(tmp_path, monkeypatch):
+    command = ["/opt/my python/bin/python", "-u", "-m", "modelling.run",
+               "--data-dir", "a folder/图像.fits", "--label", "a'b $(literal)"]
+    monkeypatch.setattr(sys, "orig_argv", command)
+    monkeypatch.setattr(sys, "argv", ["/project/modelling/run.py", *command[4:]])
+    monkeypatch.chdir(tmp_path)
+    model = _Model()
+    result = model.run(_Sampler(), save_path=tmp_path)
+    result.output()
+    snapshot = json.loads((tmp_path / "model_configuration.json").read_text())
+    execution = snapshot["execution"]
+    assert execution["context"] == "script"
+    assert execution["command_source"] == "sys.orig_argv"
+    assert shlex.split(execution["command"]) == command
+    assert execution["process_argv"] == command
+    assert execution["argv"] == sys.argv
+    assert execution["working_directory"] == str(tmp_path)
+    assert execution["python_executable"] == sys.executable
+    text = result._run_context.log_path.read_text()
+    assert text.count(f"[api] Command: {shlex.join(command)}") == 2
+    assert f"[api] Working directory: {tmp_path}" in text
+
+
+def test_invocation_falls_back_to_script_arguments(monkeypatch):
+    monkeypatch.delattr(sys, "orig_argv", raising=False)
+    monkeypatch.setattr(sys, "argv", ["fit.py", "--band", "F277W"])
+    execution = execution_metadata()
+    assert execution["command_source"] == "sys.argv"
+    assert shlex.split(execution["command"]) == [sys.executable, "fit.py", "--band", "F277W"]
+
+
+def test_notebook_command_is_explicitly_unavailable(tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-m", "ipykernel_launcher", "-f", "kernel.json"])
+    monkeypatch.setattr(sys, "argv", ["/env/ipykernel_launcher.py", "-f", "kernel.json"])
+    result = _Model().run(_Sampler(), save_path=tmp_path)
+    execution = json.loads((tmp_path / "model_configuration.json").read_text())["execution"]
+    assert execution["context"] == "jupyter"
+    assert execution["command"] is None
+    text = result._run_context.log_path.read_text()
+    assert "Command: unavailable" in text
+    assert "ipykernel_launcher" not in text
+
+
+def test_repeated_runs_record_each_current_command(tmp_path, monkeypatch):
+    model = _Model()
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "first.py"])
+    model.run(_Sampler(), save_path=tmp_path)
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "second.py"])
+    model.run(_Sampler(), save_path=tmp_path)
+    text = (tmp_path / "log.txt").read_text()
+    assert "first.py" in text and "second.py" in text
+    execution = json.loads((tmp_path / "model_configuration.json").read_text())["execution"]
+    assert execution["process_argv"] == [sys.executable, "second.py"]
+
+
+def test_svi_worker_retains_parent_command_and_configuration(tmp_path, monkeypatch):
+    from herculens_wrapper.api import session
+    parent = execution_metadata()
+    parent["command"] = "python fit.py --stage pixelated_svi"
+    parent["process_argv"] = ["python", "fit.py", "--stage", "pixelated_svi"]
+    monkeypatch.setattr(sys, "orig_argv", [sys.executable, "-c", "multiprocessing bootstrap"])
+    def worker(*_args):
+        RunContext(tmp_path / "run_0").save_configuration({"worker": 0})
+    monkeypatch.setattr(session, "_svi_many_worker_impl", worker)
+    session._svi_many_worker({"directory": str(tmp_path), "execution": parent}, 0, None)
+    text = (tmp_path / "run_0" / "log.txt").read_text()
+    assert "Command: python fit.py --stage pixelated_svi" in text
+    assert "multiprocessing bootstrap" not in text
+    snapshot = json.loads((tmp_path / "run_0" / "model_configuration.json").read_text())
+    assert snapshot["execution"] == parent
+    # Context state must not leak into later operations in this process.
+    assert "multiprocessing bootstrap" in execution_metadata()["command"]
 
 
 def test_explicit_result_output_path_preserves_the_old_interface(tmp_path):
@@ -1158,14 +1253,15 @@ def test_hmc_chain_comparison_passes_fit_mask_to_shared_panels(monkeypatch, tmp_
         sampler_backend, "evaluate_mcmc_source_pixels_summary",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(
-        sampler_backend, "evaluate_mcmc_component_medians",
-        lambda *_args, **_kwargs: {
+    batches = []
+    def render(*_args, **kwargs):
+        batches.append(kwargs["batch_size"])
+        return {
             "total": np.ones((3, 3)),
             "lens_light": np.ones((3, 3)),
             "no_lens_light": np.ones((3, 3)),
-        },
-    )
+        }
+    monkeypatch.setattr(sampler_backend, "evaluate_mcmc_component_medians", render)
     mask = np.ones((3, 3), dtype=bool)
     mask[1, 1] = False
     prob_model = SimpleNamespace(
@@ -1176,8 +1272,10 @@ def test_hmc_chain_comparison_passes_fit_mask_to_shared_panels(monkeypatch, tmp_
         prob_model, {"amplitude": np.arange(4.0)}, 2, 0.1,
         np.ones((3, 3)), np.ones((3, 3)), str(tmp_path),
         fit_mask_bool=mask,
+        hmc_batch_size=7,
     )
     assert len(captured["rows"]) == 2
+    assert batches == [7, 7]
     assert all(np.array_equal(row["fit_mask_bool"], mask) for row in captured["rows"])
 
 

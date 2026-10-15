@@ -10,6 +10,7 @@ from functools import wraps
 import json
 import os
 from pathlib import Path
+import shlex
 import sys
 import traceback
 from typing import Any
@@ -20,6 +21,42 @@ import numpy as np
 _ACTIVE_LOG_PATH: ContextVar[str | None] = ContextVar(
     "herculens_wrapper_active_log_path", default=None,
 )
+_ACTIVE_EXECUTION: ContextVar[dict[str, Any] | None] = ContextVar(
+    "herculens_wrapper_active_execution", default=None,
+)
+
+
+def execution_metadata() -> dict[str, Any]:
+    """Describe the Python invocation, retaining a parent launch in workers.
+
+    The command is reconstructed from argument tokens; shell aliases,
+    environment assignments, redirections, and notebook cells are unavailable.
+    """
+    active = _ACTIVE_EXECUTION.get()
+    if active is not None:
+        return dict(active)
+    argv = list(sys.argv)
+    original = getattr(sys, "orig_argv", None)
+    process_argv = list(original) if original else [sys.executable, *argv]
+    context = "script"
+    ipython = sys.modules.get("IPython")
+    get_shell = getattr(ipython, "get_ipython", None)
+    shell = get_shell() if callable(get_shell) else None
+    if "ipykernel_launcher" in (argv[0] if argv else "") or (
+        shell is not None and type(shell).__name__ == "ZMQInteractiveShell"
+    ):
+        context = "jupyter"
+    elif shell is not None or not argv or argv[0] in {"", "-"}:
+        context = "interactive"
+    return {
+        "context": context,
+        "command": shlex.join(process_argv) if context == "script" else None,
+        "command_source": "sys.orig_argv" if original else "sys.argv",
+        "process_argv": process_argv,
+        "argv": argv,
+        "python_executable": sys.executable,
+        "working_directory": str(Path.cwd()),
+    }
 
 
 class _Tee:
@@ -104,6 +141,7 @@ class RunContext:
     log_name: str = "log.txt"
     console: bool = True
     run_id: int | str | None = None
+    execution: dict[str, Any] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "directory", Path(self.directory).expanduser())
@@ -115,7 +153,9 @@ class RunContext:
     def save_configuration(self, configuration: dict[str, Any]) -> Path:
         self.directory.mkdir(parents=True, exist_ok=True)
         output = self.directory / "model_configuration.json"
-        output.write_text(format_configuration(configuration) + "\n", encoding="utf-8")
+        snapshot = dict(configuration)
+        snapshot["execution"] = self.execution if self.execution is not None else execution_metadata()
+        output.write_text(format_configuration(snapshot) + "\n", encoding="utf-8")
         return output
 
     @contextmanager
@@ -128,9 +168,18 @@ class RunContext:
             return
 
         token = _ACTIVE_LOG_PATH.set(resolved)
+        execution = self.execution if self.execution is not None else execution_metadata()
+        execution_token = _ACTIVE_EXECUTION.set(execution)
         timestamp = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
         with self.log_path.open("a", encoding="utf-8", buffering=1) as stream:
             stream.write(f"\n--- {operation} started {timestamp} pid={os.getpid()} ---\n")
+            stream.write(f"[api] Execution context: {execution['context']}\n")
+            stream.write(f"[api] Working directory: {execution['working_directory']}\n")
+            command = execution['command']
+            stream.write(
+                f"[api] Command: {command}\n" if command is not None else
+                "[api] Command: unavailable for interactive/notebook cell execution\n"
+            )
             original_stdout, original_stderr = sys.stdout, sys.stderr
             saved_fds: tuple[int, int] | None = None
             status = "completed"
@@ -170,6 +219,7 @@ class RunContext:
                 finished = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
                 stream.write(f"--- {operation} {status} {finished} ---\n")
                 _ACTIVE_LOG_PATH.reset(token)
+                _ACTIVE_EXECUTION.reset(execution_token)
 
 
 def logged_model_run(method):

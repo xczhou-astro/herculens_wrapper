@@ -12,9 +12,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from .collections import LensProfileCollection
 from .data import SingleBandData
-from ._logging import RunContext, format_configuration, logged_model_run
+from ._logging import RunContext, execution_metadata, format_configuration, logged_model_run
 from .models import ModelDefinition, count_physical_parameters
-from .samplers import FitResult, SamplerConfig
+from .samplers import FitResult, SamplerConfig, _validate_hmc_batch_size
 from .visualization import PlotScale, _extent, _normalization
 
 def _model_backend():
@@ -48,7 +48,10 @@ def _checked_init_components(components: Sequence[str] | None) -> tuple[str, ...
 def _svi_many_worker(spec, run_id, device):
     """Log each SVI run; mirror sequential workers to the terminal."""
     run_dir = Path(spec["directory"]) / f"run_{run_id}"
-    context = RunContext(run_dir, console=device is None, run_id=run_id)
+    context = RunContext(
+        run_dir, console=device is None, run_id=run_id,
+        execution=spec.get("execution"),
+    )
     with context.capture(f"SVI worker run_{run_id} device={device}"):
         return _svi_many_worker_impl(spec, run_id, device)
 
@@ -282,7 +285,7 @@ class SingleBandModel:
         )
         return self.result
 
-    def load_hmc(self, save_path: str | Path) -> None:
+    def load_hmc(self, save_path: str | Path, *, hmc_batch_size: int = 32) -> None:
         """Load an on-disk HMC posterior into this explicitly declared model.
 
         ``save_path`` must be the directory containing ``hmc_samples.h5``.
@@ -290,10 +293,13 @@ class SingleBandModel:
         present, reads only the posterior samples and sampler-health fields,
         and does *not* evaluate model images.  Call :meth:`get_results` to
         form the posterior-median result and cache its derived products.
+        ``hmc_batch_size`` controls draws rendered together during that
+        evaluation and subsequent output (default: 32).
 
         The original ``SingleBandData`` and ``LensProfileCollection`` must
         still be declared by the caller, exactly as for :meth:`load`.
         """
+        hmc_batch_size = _validate_hmc_batch_size(hmc_batch_size)
         output = Path(save_path).expanduser()
         samples_path = output / "hmc_samples.h5"
         if not samples_path.is_file():
@@ -341,6 +347,7 @@ class SingleBandModel:
             "hmc_sampler_health": sampler_health,
             "num_chains_hmc_numpyro": num_chains,
             "num_samples_per_chain": next(iter(lengths)) // num_chains,
+            "hmc_batch_size": hmc_batch_size,
         }
         self.initial_parameters = None
         self.result = None
@@ -351,6 +358,7 @@ class SingleBandModel:
         *,
         random_seed: int = 42,
         write: bool = True,
+        hmc_batch_size: int | None = None,
     ) -> dict[str, float | int | None]:
         """Recompute median and maximum-likelihood metrics from an HMC archive.
 
@@ -361,7 +369,13 @@ class SingleBandModel:
         explicit median/max-log-likelihood metric schema.
         """
         if save_path is not None:
-            self.load_hmc(save_path)
+            self.load_hmc(
+                save_path, hmc_batch_size=32 if hmc_batch_size is None else hmc_batch_size,
+            )
+        elif hmc_batch_size is not None:
+            batch_size = _validate_hmc_batch_size(hmc_batch_size)
+            if self._loaded_hmc_details is not None:
+                self._loaded_hmc_details["hmc_batch_size"] = batch_size
         if self._loaded_hmc_samples is None:
             raise RuntimeError(
                 "Call load_hmc(save_path) first, or pass an HMC run directory."
@@ -373,7 +387,7 @@ class SingleBandModel:
         result = self.result
         if result is None or result.samples is None:
             result = self.get_results(random_seed=random_seed)
-        metrics = result.metrics()
+        metrics = result.metrics(hmc_batch_size=hmc_batch_size)
         if write:
             from ..samplers import save_metrics
             from ..utils import fit_dof_and_reduced_chi2
@@ -411,6 +425,7 @@ class SingleBandModel:
         parameters = tree_median({name: samples[name] for name in active_sites})
         components = evaluate_mcmc_component_medians(
             self.prob_model, samples, active_sites=active_sites,
+            batch_size=(self._loaded_hmc_details or {}).get("hmc_batch_size", 32),
         )
         sample_likelihood = components.pop("_sample_likelihood_summary", None)
         source_summary = evaluate_mcmc_source_pixels_summary(
@@ -1080,6 +1095,7 @@ class SingleBandModel:
             # posterior samples.  Retain the original chain count so result
             # visualizations can reconstruct one summary per chain.
             details["num_chains_hmc_numpyro"] = int(args.num_chains_hmc_numpyro)
+            details["hmc_batch_size"] = args.hmc_batch_size
         else: raise ValueError(f"Unknown sampler {sampler.name!r}.")
         from ..samplers import evaluate_parameter_components, kwargs_with_deterministics
         derived = dict(details.get("derived", {}))
@@ -1148,6 +1164,7 @@ class SingleBandModel:
         # children can therefore set CUDA_VISIBLE_DEVICES before JAX first
         # touches a GPU.
         spec = {
+            "execution": execution_metadata(),
             "model": {
                 "profiles": self.profiles.with_fixed(),
                 "observation": deepcopy(self.observation),

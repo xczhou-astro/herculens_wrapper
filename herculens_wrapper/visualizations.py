@@ -1404,6 +1404,7 @@ def plot_hmc_chain_comparison(
     lens_image_override=None,
     kwargs_lens_from_params=None,
     fit_mask_bool=None,
+    hmc_batch_size=32,
 ):
     """Plot one six-panel posterior-median reconstruction row per HMC chain."""
     from herculens_wrapper.samplers import (
@@ -1470,6 +1471,7 @@ def plot_hmc_chain_comparison(
         component_medians = evaluate_mcmc_component_medians(
             prob_model,
             chain_samples,
+            batch_size=hmc_batch_size,
             active_sites=chain_samples.keys(),
             kwargs_lens_from_params=kwargs_lens_from_params,
             lens_image_override=lens_image,
@@ -2223,7 +2225,7 @@ def _stellar_nfw_einstein_radius(lens_image, kwargs_lens, profile_types, *, supe
     return _effective_einstein_radius(lens_image, kwargs_lens, profile_types, supersampling=supersampling)
 
 
-def lens_mass_ellipticity_summary(lens_image, kwargs_result):
+def lens_mass_ellipticity_summary(lens_image, kwargs_result, *, include_einstein_radius=True):
     """Return API-facing, unit-explicit values for every lens-mass profile.
 
     Derived quantities use angular coordinates and dimensionless lensing
@@ -2253,7 +2255,7 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
                     original[name] = float(np.degrees(np.asarray(kwargs_mass[name])))
                     units[name] = 'deg'
         elif normalized_type in {'ELL_MPPL', 'EPL_M1M3M4'}:
-            for name in ('varphi_m', 'phi_ref'):
+            for name in ('varphi_m', 'phi_ref', 'delta_phi_m1', 'delta_phi_m3', 'delta_phi_m4'):
                 if name in kwargs_mass:
                     original[name] = float(np.degrees(np.asarray(kwargs_mass[name])))
                     units[name] = 'deg'
@@ -2415,21 +2417,40 @@ def lens_mass_ellipticity_summary(lens_image, kwargs_result):
         profiles.append(profile)
 
     summary = {'profiles': profiles}
-    summary['einstein_radius'] = _effective_einstein_radius(
-        lens_image, kwargs_result.get('kwargs_lens', []), profile_types,
-    )
+    if include_einstein_radius:
+        summary['einstein_radius'] = _effective_einstein_radius(
+            lens_image, kwargs_result.get('kwargs_lens', []), profile_types,
+        )
     return summary
 
 
-def save_lens_mass_ellipticity_summary(lens_image, kwargs_result, save_path):
+def save_lens_mass_ellipticity_summary(
+    lens_image, kwargs_result, save_path, *, mcmc_samples=None,
+    prob_model=None, kwargs_lens_from_params=None, batch_size=32,
+):
     """Save and print final mass parameters in human-readable form."""
     summary = lens_mass_ellipticity_summary(lens_image, kwargs_result)
+    if mcmc_samples is not None and summary['profiles']:
+        from .mass_summary import add_posterior_mass_intervals
+        if kwargs_lens_from_params is None:
+            if prob_model is None:
+                raise ValueError('HMC mass intervals require prob_model or kwargs_lens_from_params.')
+            kwargs_lens_from_params = lambda draw: prob_model.params2kwargs(draw)['kwargs_lens']
+        summary = add_posterior_mass_intervals(
+            lens_image, summary, mcmc_samples, kwargs_lens_from_params,
+            batch_size=batch_size,
+        )
     output_path = os.path.join(save_path, 'lens_mass_parameters.json')
     with open(output_path, 'w') as f:
         json.dump(summary, f, indent=4)
 
     einstein_radius = summary.get('einstein_radius')
     if einstein_radius is not None:
+        posterior = einstein_radius.get('posterior', {})
+        if posterior.get('failed_draws', 0):
+            print('[lens_mass_parameters] Critical-curve posterior: '
+                  f"{posterior['valid_draws']} valid, {posterior['failed_draws']} unavailable; "
+                  'radius intervals are conditional on a valid curve.')
         if einstein_radius['status'] == 'ok':
             print(f"[lens_mass_parameters] Total theta_E,eff="
                   f"{einstein_radius['theta_E_eff_arcsec']:.6g} arcsec")
@@ -3059,9 +3080,15 @@ def generate_run_plots(
     chain_kwargs_lens_from_params=None,
     chain_lens_image_override=None,
     fit_mask_bool=None,
+    mass_kwargs_from_params=None,
 ):
+    hmc_batch_size = (extra or {}).get('hmc_batch_size', 32)
     lens_mass_summary = save_lens_mass_ellipticity_summary(
         lens_image, kwargs_best, save_path,
+        mcmc_samples=mcmc_samples if sampler == 'hmc' else None,
+        prob_model=prob_model,
+        kwargs_lens_from_params=mass_kwargs_from_params or chain_kwargs_lens_from_params,
+        batch_size=hmc_batch_size,
     )
     mask = getattr(lens_image, 'source_arc_mask', None)
     if mask is not None:
@@ -3071,7 +3098,9 @@ def generate_run_plots(
         try:
             from herculens_wrapper.samplers import evaluate_mcmc_component_medians
             print("[plots] Evaluating pixel-by-pixel median model component images across MCMC samples...")
-            mcmc_component_medians = evaluate_mcmc_component_medians(prob_model, mcmc_samples)
+            mcmc_component_medians = evaluate_mcmc_component_medians(
+                prob_model, mcmc_samples, batch_size=hmc_batch_size,
+            )
         except Exception as e:
             print(f"[plots] Could not compute MCMC component medians: {e}")
 
@@ -3194,6 +3223,7 @@ def generate_run_plots(
             lens_image_override=chain_lens_image_override,
             kwargs_lens_from_params=chain_kwargs_lens_from_params,
             fit_mask_bool=fit_mask_bool,
+            hmc_batch_size=hmc_batch_size,
         ))
 
     _try('image_plane.png', lambda: plot_image_plane(
@@ -3255,7 +3285,8 @@ def generate_run_plots(
 
 
     _try('mass_profile_convergence.png', lambda: plot_mass_and_convergence(
-        lens_image, kwargs_best, pixel_scale, save_path, lens_mass_summary,
+        lens_image, kwargs_best, pixel_scale, save_path,
+        lens_mass_summary.get('reference_model', lens_mass_summary),
     ))
 
     _try('mass_light_overlay.png', lambda: plot_mass_light_overlay(
