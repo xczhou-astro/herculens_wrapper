@@ -1039,6 +1039,37 @@ posterior draws 数，包括中间诊断图和最终逐像素中位数图像，�
 CUDA_VISIBLE_DEVICES=0,1,2,3 python run.py
 ```
 
+两张 GPU 各运行两条链时，使用混合模式；`num_chains` 是总链数：
+
+```python
+hmc = SamplerConfig.hmc(
+    num_warmup=1000,
+    num_samples=3000,
+    num_chains=4,
+    chain_method="hybrid",
+    chains_per_device=2,
+)
+```
+
+启动时使用 `CUDA_VISIBLE_DEVICES=8,9 python run.py`。混合模式使用
+`pmap(vmap(...))`，跨设备分配链，并在每张设备内向量化。NUTS 和
+Gibbs-within-HMC 均接入该模式，posterior 和 checkpoint 仍保存在同一个运行目录，
+对外保留四条独立链。总链数必须能被每设备链数整除，且可见 JAX device 数足够；
+不足时明确报错。混合模式关闭进度条，保留每批采样和 checkpoint 日志。
+每张 GPU 的显存需要容纳两条链，实际速度与显存用量需在服务器上验证。
+默认 `auto`、`parallel`、`vectorized` 的选择逻辑保持原样。
+
+服务器验证文件为 `tests/test_hybrid_hmc.py`（本地未运行；`tests/` 被 Git 忽略，
+同步代码时请同时复制该文件）。在仓库根目录运行：
+
+```bash
+CUDA_VISIBLE_DEVICES=8,9 python -c 'import jax; print(jax.devices())'
+CUDA_VISIBLE_DEVICES=8,9 python -m pytest tests/test_hybrid_hmc.py -q -rs
+```
+
+测试包括两设备上的链分配、NUTS / Gibbs 四链采样、checkpoint 序列化及恢复一致性、
+HDF5 样本和诊断数组形状。设备不足时 GPU 测试会跳过，请确认没有相关 skip。
+
 ### 恢复中断的 HMC
 
 ```python

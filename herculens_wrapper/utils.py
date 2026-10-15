@@ -21,7 +21,7 @@ SAMPLER_CHOICES = frozenset({
 
 OPTIMIZATION_SAMPLERS = frozenset({'svi', 'optax'})
 MCMC_SAMPLERS = frozenset({'hmc'})
-HMC_NUMPYRO_CHAIN_METHODS = frozenset({'auto', 'parallel', 'vectorized', 'sequential'})
+HMC_NUMPYRO_CHAIN_METHODS = frozenset({'auto', 'parallel', 'vectorized', 'sequential', 'hybrid'})
 
 
 class Tee:
@@ -336,6 +336,9 @@ def log_jax_device_layout(args):
                 )
         elif chain_method == 'vectorized':
             print(f'  -> {n_chains} chains vectorized on {n_devices} device(s)')
+        elif chain_method == 'hybrid':
+            per_device = int(getattr(args, 'chains_per_device_hmc_numpyro', 1))
+            print(f'  -> {n_chains // per_device} devices x {per_device} vectorized chains per device')
         elif chain_method == 'sequential':
             print(f'  -> {n_chains} chains run sequentially')
 

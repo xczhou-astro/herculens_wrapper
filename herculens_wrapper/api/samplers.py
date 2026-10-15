@@ -765,6 +765,7 @@ class SamplerConfig:
         num_chains: int = 1,
         checkpoint_interval: int = 250,
         chain_method: str = "auto",
+        chains_per_device: int = 1,
         progress_bar: bool = True,
         init_max_retries: int = 100,
         disable_gibbs: bool = False,
@@ -775,21 +776,30 @@ class SamplerConfig:
 
         ``hmc_batch_size`` limits posterior draws rendered together for
         diagnostics and output; it does not change sampling or checkpoints.
+        ``chain_method='hybrid'`` runs ``chains_per_device`` vectorized chains
+        on each of ``num_chains // chains_per_device`` local JAX devices.
         """
         hmc_batch_size = _validate_hmc_batch_size(hmc_batch_size)
+        if isinstance(chains_per_device, bool):
+            raise ValueError("chains_per_device must be a positive integer.")
         positive_integers = {
             "num_warmup": num_warmup,
             "num_samples": num_samples,
             "num_chains": num_chains,
             "checkpoint_interval": checkpoint_interval,
+            "chains_per_device": chains_per_device,
         }
         for name, value in positive_integers.items():
             if not isinstance(value, int) or isinstance(value, bool) or value < 1:
                 raise ValueError(f"{name} must be a positive integer.")
         if not isinstance(init_max_retries, int) or isinstance(init_max_retries, bool) or init_max_retries < 0:
             raise ValueError("init_max_retries must be a non-negative integer.")
-        if chain_method not in {"auto", "parallel", "vectorized", "sequential"}:
-            raise ValueError("chain_method must be 'auto', 'parallel', 'vectorized', or 'sequential'.")
+        if chain_method not in {"auto", "parallel", "vectorized", "sequential", "hybrid"}:
+            raise ValueError("chain_method must be 'auto', 'parallel', 'vectorized', 'sequential', or 'hybrid'.")
+        if chains_per_device != 1 and chain_method != "hybrid":
+            raise ValueError("chains_per_device > 1 requires chain_method='hybrid'.")
+        if chain_method == "hybrid" and num_chains % chains_per_device:
+            raise ValueError("Hybrid num_chains must be divisible by chains_per_device.")
         if not isinstance(disable_gibbs, bool):
             raise TypeError("disable_gibbs must be a boolean.")
         return cls("hmc", random_seed=random_seed, options={
@@ -798,6 +808,7 @@ class SamplerConfig:
             "num_chains_hmc_numpyro": num_chains,
             "checkpoint_interval_hmc_numpyro": checkpoint_interval,
             "chain_method_hmc_numpyro": chain_method,
+            "chains_per_device_hmc_numpyro": chains_per_device,
             "progress_bar_hmc_numpyro": progress_bar,
             "hmc_init_max_retries": init_max_retries,
             "disable_gibbs": disable_gibbs,
@@ -806,6 +817,7 @@ class SamplerConfig:
     def to_namespace(self) -> SimpleNamespace:
         defaults = {"sampler": self.name, "random_seed": self.random_seed, "algorithm_optax": "adabelief", "max_iterations_optax": 2000, "init_learning_rate_optax": 1e-2, "schedule_learning_rate_optax": True, "stop_at_loss_increase_optax": False, "progress_bar_optax": True, "max_iterations_svi": 10000, "init_learning_rate_svi": 1e-2, "init_scale_svi": 0.1, "loss_kind_svi": "trace_elbo", "num_particles_svi": 10, "num_warmup_hmc_numpyro": 1000, "num_samples_hmc_numpyro": 1000, "num_chains_hmc_numpyro": 1, "checkpoint_interval_hmc_numpyro": 250, "chain_method_hmc_numpyro": "auto", "progress_bar_hmc_numpyro": True, "hmc_init_max_retries": 100, "likelihood_scale": 1.0}
         defaults["hmc_batch_size"] = 32
+        defaults["chains_per_device_hmc_numpyro"] = 1
         defaults.update(self.options)
         if self.name == "hmc":
             defaults["hmc_batch_size"] = _validate_hmc_batch_size(defaults["hmc_batch_size"])

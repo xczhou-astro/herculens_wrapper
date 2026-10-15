@@ -1549,7 +1549,7 @@ def _truncate_hmc_hdf5(path, rows):
 
 
 def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches,
-                          num_chains, checkpoint_interval):
+                          num_chains, checkpoint_interval, chain_layout=None):
     """Persist only the state and metadata required to resume NumPyro MCMC."""
     payload = {
         'format_version': 2,
@@ -1559,6 +1559,8 @@ def _write_hmc_checkpoint(path, last_state, completed_samples, completed_batches
         'num_chains': int(num_chains),
         'checkpoint_interval': int(checkpoint_interval),
     }
+    if chain_layout is not None:
+        payload['chain_layout'] = chain_layout
     temporary_path = f'{path}.tmp'
     with open(temporary_path, 'wb') as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1694,6 +1696,15 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     from herculens_wrapper.utils import resolve_chain_method_hmc_numpyro
     requested_num_chains = int(getattr(args, 'num_chains_hmc_numpyro', 1))
     requested_chain_method = resolve_chain_method_hmc_numpyro(args)
+    chain_transform = requested_chain_method
+    if requested_chain_method == 'hybrid':
+        from herculens_wrapper.hmc_chains import HybridChainMap
+        chain_transform = HybridChainMap(
+            requested_num_chains, int(getattr(args, 'chains_per_device_hmc_numpyro', 1)),
+        )
+        print(f'[hmc] Hybrid chain layout: {chain_transform.num_devices} devices x '
+              f'{chain_transform.chains_per_device} chains/device = {requested_num_chains} chains; '
+              f'devices={chain_transform.devices}. Progress bars are disabled for this mode.')
 
     # Gibbs needs two non-empty conditional blocks.  With a fixed lens mass
     # there is only the light/source block, for which ordinary joint NUTS is
@@ -1806,8 +1817,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     num_samples_total = int(getattr(args, 'num_samples_hmc_numpyro', 1000))
     checkpoint_interval = int(getattr(args, 'checkpoint_interval_hmc_numpyro', 250))
     num_chains = requested_num_chains
-    chain_method = requested_chain_method
+    chain_method = chain_transform
     progress_bar = bool(getattr(args, 'progress_bar_hmc_numpyro', True))
+    if requested_chain_method == 'hybrid':
+        progress_bar = False
     
     if checkpoint_interval <= 0 or checkpoint_interval > num_samples_total:
         checkpoint_interval = num_samples_total
@@ -2063,6 +2076,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 i + 1,
                 num_chains,
                 checkpoint_interval,
+                chain_layout={
+                    'method': requested_chain_method,
+                    'chains_per_device': int(getattr(args, 'chains_per_device_hmc_numpyro', 1)),
+                },
             )
             print(f"[hmc] Saved checkpoint to: {checkpoint_path}")
         except Exception as e:
