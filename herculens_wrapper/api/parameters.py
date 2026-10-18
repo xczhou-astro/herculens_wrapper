@@ -522,7 +522,7 @@ class MassProfile(Profile):
         shared_center: bool = True,
         shared_ellipticity: bool = True,
         center_prior: tuple[float, float, float, float] | list[float] | None = None,
-        ellipticity_prior: tuple[float, float, float, float] | list[float] | None = None,
+        ellipticity_prior: tuple[float, float] | tuple[float, float, float, float] | list[float] | None = None,
     ) -> "MassProfile":
         """One batched projected-mass MGE, independent of lens light.
 
@@ -533,6 +533,8 @@ class MassProfile(Profile):
         Widths are independently LogUniform in disjoint logarithmic bins.
         Geometry priors are ``[mean, std, lower, upper]`` TruncatedNormals,
         applied separately to both coordinates or both ellipticity components.
+        ``ellipticity_prior`` also accepts ``[lower, upper]`` for independent
+        Uniform priors on ``e1`` and ``e2``.
         Sharing samples one scalar per coordinate/component; otherwise each
         is a vector of ``n_gauss`` independent draws and an explicit prior is
         required. Shared geometry defaults to the light-MGE convention.
@@ -555,6 +557,17 @@ class MassProfile(Profile):
                     raise ValueError(f"{name} is required when its shared flag is False.")
                 prior = (0.0, 0.1, -0.2, 0.2) if name == "center_prior" else (0.0, 0.1, -0.5, 0.5)
             values = np.asarray(prior, dtype=float)
+            if name == "ellipticity_prior" and values.shape == (2,):
+                if not np.isfinite(values).all() or values[0] >= values[1]:
+                    raise ValueError("ellipticity_prior Uniform bounds must be finite with lower < upper.")
+                if np.sqrt(2)*max(abs(values[0]), abs(values[1])) >= 1:
+                    raise ValueError("ellipticity_prior must keep hypot(e1, e2) < 1.")
+                if shared:
+                    return values.tolist()
+                return {"distribution": "uniform", **{
+                    key: np.full(n_gauss, value).tolist()
+                    for key, value in zip(("low", "high"), values)
+                }}
             if values.shape != (4,) or not np.isfinite(values).all() or values[1] <= 0 or values[2] >= values[3]:
                 raise ValueError(f"{name} must be finite [mean, std, lower, upper] with std > 0 and lower < upper.")
             if name == "ellipticity_prior" and np.sqrt(2)*max(abs(values[2]), abs(values[3])) >= 1:

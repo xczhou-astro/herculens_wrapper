@@ -50,3 +50,7 @@ manual_mask
 
 presentations/
 .codex-ppt-build/
+
+notebooks/
+manuscript/
+utils/

@@ -175,8 +175,10 @@ profiles = LensProfileCollection(
 质量 Gaussian 的振幅是积分 convergence，坐标为 arcsec 时单位为 arcsec²；
 因此数值需按质量尺度设置，不能直接照搬 lens-light 的 flux 振幅。
 `sigma_lims` 被分为 N 个非重叠对数区间，各宽度在自己的区间内按 LogUniform 采样。
-中心和椭率使用 `[mean, std, lower, upper]` TruncatedNormal 先验，分别应用于
-`center_x/center_y` 和 `e1/e2`。
+中心和椭率支持 `[mean, std, lower, upper]` TruncatedNormal 先验，分别应用于
+`center_x/center_y` 和 `e1/e2`。`ellipticity_prior` 也支持 `(lower, upper)`
+Uniform 写法，例如 `ellipticity_prior=(-0.5, 0.5)` 表示 `e1`、`e2` 各自独立服从
+`Uniform(-0.5, 0.5)`，适用于共享和不共享椭率两种情况。
 
 两个共享开关独立：共享时每个坐标/椭率分量只采样一个标量；不共享时采样 N
 个独立值，并且必须显式提供相应的 `center_prior` 或 `ellipticity_prior`。
@@ -943,77 +945,25 @@ result = model.run(
 )
 ```
 
-### Pixelated source 的初始化匹配（单波段）
+### Pixelated SVI → HMC runners
 
-从已有 parametric 结果切换到 pixelated source 时，支持两种 SVI 初始化，
-`init_path` 与旧的 `init_params_path` 均可使用：
+`edgeon_source/base_basic.py` 与 `base_transfer.py` 默认只运行
+`pixelated_svi → pixelated_hmc`。可选择 `--stage pipeline`、
+`--stage pixelated_svi`、`--stage pixelated_hmc`；`pixelated_pipeline`
+保留为 `pipeline` 的兼容别名。
 
-- `image`：固定当前初值下的所有非 pixelated-source 参数（包括 lens mass、
-  lens light、额外解析 source、point source 和背景噪声参数），用 SVI 拟合
-  观测 image，只优化像素源潜变量及其先验超参数。
-- `source`：在当前 mass 定义的 source grid 上计算已有 parametric source
-  的亮度，用 SVI 让 Matérn pixelated source 逼近它，同时拟合 `pixels_wn`
-  和 Matérn 超参数。需要加载包含解析 source 的结果；不能只加载 mass。
+SVI 默认从 seeded `init_to_median(num_samples=25)` 初始化所有自由参数，
+不查找 parametric 结果，不执行 image/source 初始化匹配 SVI。
+显式 `--init-params-path` 仍可载入已有数值初值，`--components` 可限制成分。
+跨波段 mass 的 warm-start／fixed 模式保留，中心继续采样。
+HMC 自动选择当前波段最佳 pixelated SVI run，或用 `--hmc-init-path` 指定。
+多 GPU hybrid HMC、文字进度及 checkpoint 行为保持不变。
 
-```python
-initial = model.initialize(
-    seed=42,
-    init_path="parametric_svi/run_0",
-    pixelated_init_match="source",  # 或 "image"
-    num_iterations_warmup=2000,
-    save_path="pixelated_svi/run_0",
-)
-```
-
-两种方法均保留初始化训练中有限 SVI loss 最低的已评估参数状态，
-而不是直接取最后一步。这里的“最佳”指观测到的 stochastic negative ELBO，
-不代表全局最优。正式 SVI 恢复原有自由/固定参数声明。
-已有 pixelated source 被完整加载时直接复用，不重复进行匹配；HMC 继续
-使用选定的 pixelated SVI 结果，不执行这一步初始化 SVI。
-
-没有上一阶段结果、直接开始 pixelated SVI 时，所有自由参数使用
-`init_to_median(num_samples=25)` 初始化，**不进行 image/source matching**。
-即使给出了 matching 选项，也不会额外执行初始化 SVI。
-
-`base_basic.py` 默认运行 `parametric_svi → pixelated_svi → pixelated_hmc`。
-单独运行 pixelated SVI 时，会自动检查 `output-root/parametric_svi` 并选择
-最佳 run；也可用 `--init-params-path parametric_svi/run_i` 指定。
-单独运行 HMC 时自动选择 `output-root/pixelated_svi` 的最佳 run，也可用
-`--hmc-init-path pixelated_svi/run_i` 或 `--init-params-path` 指定。
-
-有上一阶段初始化结果时，runner 默认使用 2000 次 `image` 匹配，
-可用 `--pixelated-init-match image|source` 和 `--pixelated-init-iterations`
-调整；已有 pixelated source 则直接复用。单次和多次 SVI run 遵循相同规则。
-API 的 `image` 模式仍需显式指定正数 `num_iterations_warmup` 才会执行匹配。
-`kwargs_init.json` 和初始 source 图保存的是最终实际使用的初始化结果。
-
-runner 会打印实际导入的 API 文件路径、选中的结果目录、匹配方法和迭代数。
-`pixelated_initialization.json` 记录 `method`、`status`、`iterations`、`reference`
-和 `api_file`；完成匹配时 `status="completed"`。如果导入旧 API，或请求的匹配
-被静默跳过，runner/worker 会在正式 SVI 开始前报错。
-`source` 模式正常顺序应为 `[pixelated-init: source]`、初始化 SVI、
-`Selected best finite SVI loss`、`Initialization complete`，之后才是正式 SVI。
-单独看到 `Inherited kwargs` 和正式 10000 次 SVI，并不表示 source 匹配已经执行。
-
-服务器上可以先确认导入位置：
-
-```python
-import inspect
-import base_basic
-from herculens_wrapper.api import SingleBandModel
-print(base_basic.__file__)
-print(inspect.getfile(SingleBandModel))
-```
-
-同步 runner 时也要同步 wrapper 的 `api/session.py`、`models.py`、`samplers.py`
-和 `svi_initialization.py`。验证修复时使用新输出目录，并显式指定原来的
-parametric run，避免复用已完成的旧 pixelated run。
-
-服务器测试（本地未运行，`tests/` 被 Git 忽略，需要单独同步）：
-
-```bash
-python -m pytest tests/test_pixelated_source_initialization.py -q
-```
+旧版 runner 已保存在 `edgeon_source/legacy_scripts/`，包含 parametric 阶段
+以及 `--pixelated-init-match`、`--pixelated-init-iterations` 等旧选项。
+需要旧流程时，建模脚本改用 `legacy_scripts.base_basic` 或
+`legacy_scripts.base_transfer`。对应的 wrapper API 初始化方法继续保留，
+供 legacy runner 和直接 API 调用使用。详见该目录的 README。
 
 ### 初始模型图
 
