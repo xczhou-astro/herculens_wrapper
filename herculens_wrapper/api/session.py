@@ -1390,6 +1390,10 @@ class SingleBandModel:
         if self.data.likelihood_mask is not None:
             valid &= np.asarray(self.data.likelihood_mask, dtype=bool)
         chi2 = float(np.sum(np.square(residual[valid])))
+        n_data = int(np.sum(valid))
+        n_physical = count_physical_parameters(parameters)
+        dof = max(n_data - n_physical, 1)
+        reduced_chi2 = float(chi2 / dof)
         fig, axes = plt.subplots(1, 3, figsize=(13, 4), constrained_layout=True)
         extent = _extent(self.data.image.shape, self.data.pixel_scale)
         for axis, image, title, cmap in zip(axes, (self.data.likelihood_image, model, residual), ("Data", "Model", "Normalized residual"), ("twilight", "twilight", "coolwarm")):
@@ -1410,7 +1414,7 @@ class SingleBandModel:
             axis.set_ylim(extent[2], extent[3])
             label = "Standardized residual" if title == "Normalized residual" else "Pixel flux"
             if scale == "log" and title != "Normalized residual": label += " (log scale)"
-            plot_title = f"{title} ($\\chi^2$ = {chi2:.2f})" if title == "Normalized residual" else title
+            plot_title = f"{title} (reduced $\\chi^2$ = {reduced_chi2:.2f})" if title == "Normalized residual" else title
             axis.set(title=plot_title, xlabel="arcsec", ylabel="arcsec"); fig.colorbar(rendered, ax=axis, shrink=0.85, label=label)
         if save_path is not None:
             output = Path(save_path); output.parent.mkdir(parents=True, exist_ok=True)
@@ -1512,7 +1516,7 @@ class SingleBandModel:
         chi2, n_data = image_metrics["chi2"], image_metrics["n_data_pixels"]
         n_free = int(sum(np.asarray(value).size for value in parameters.values()))
         n_physical = count_physical_parameters(parameters)
-        dof = max(n_data - n_free, 1)
+        dof = max(n_data - n_physical, 1)
 
         # NumPyro evaluates the exact model likelihood, priors, and any
         # registered factor penalties.  Observed sample sites are likelihoods.

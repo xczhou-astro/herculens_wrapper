@@ -1493,14 +1493,17 @@ def build_and_run_multiband(config_path=None):
             chi2 = float(np.sum(standardized_residual[band['fit_mask_bool']] ** 2))
             total_chi2 += chi2
             total_data_pixels += int(np.sum(band['fit_mask_bool']))
+            band_dof = max(int(np.sum(band['fit_mask_bool'])) - num_params_physical, 1)
+            band_reduced_chi2 = float(chi2 / band_dof)
             comparison[f'run_{run_index}']['bands'][band['name']] = {
                 'chi2': chi2,
+                'reduced_chi2': band_reduced_chi2,
             }
             generate_run_plots(
                 lens_image=band['lens_image'], kwargs_best=kwargs_best,
                 image_data=band['image_data'], noise_map=band['noise_map'], psf_data=band['psf_data'],
                 pixel_scale=band['pixel_scale'], save_path=band['save_path'], sampler=sampler,
-                best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=None,
+                best_fit_model=best_fit_model, chi2=chi2, reduced_chi2=band_reduced_chi2,
                 extra=None,
                 mcmc_samples=band_samples, flat_samples=None, prob_model=band['prob_model'],
                 init_params=None, point_source_type_list=band['type_list']['point_source_type_list'],
@@ -1529,6 +1532,7 @@ def build_and_run_multiband(config_path=None):
                 'image_data': band['image_data'],
                 'noise_map': band['noise_map'],
                 'pixel_scale': band['pixel_scale'],
+                'reduced_chi2': band_reduced_chi2,
                 'model_lens_light': (
                     component_medians.get('lens_light') if component_medians else None
                 ),
@@ -1572,7 +1576,7 @@ def build_and_run_multiband(config_path=None):
             else:
                 num_params_free -= ny * nx
         num_params_free = max(int(num_params_free), 0)
-        dof = max(total_data_pixels - num_params_free, 1)
+        dof = max(total_data_pixels - num_params_physical, 1)
         metrics = {
             'BIC': float(num_params_free * np.log(total_data_pixels) - 2 * total_log_likelihood),
             'CHI2': float(total_chi2),

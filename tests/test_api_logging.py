@@ -1230,7 +1230,7 @@ def test_comparison_panels_hide_likelihood_excluded_pixels(monkeypatch, tmp_path
             axis = next(axis for axis in figure.axes if axis.get_title() == title)
             assert np.ma.getmaskarray(axis.images[0].get_array())[1, 1]
         residual_axis = next(
-            axis for axis in figure.axes if axis.get_title().startswith("Residual (chi^2")
+            axis for axis in figure.axes if axis.get_title().startswith("Residual (reduced")
         )
         assert np.ma.getmaskarray(residual_axis.images[0].get_array())[1, 1]
         assert "0.00" in residual_axis.get_title()

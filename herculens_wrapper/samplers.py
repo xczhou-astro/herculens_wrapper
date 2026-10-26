@@ -1083,7 +1083,7 @@ def save_metrics(
         num_params_free = num_params
     if num_params_physical is None:
         num_params_physical = num_params_free
-    reduced_chi2, n_pix, n_fit_free, dof = fit_dof_and_reduced_chi2(chi2, image_data, num_params_free, mask_bool=mask_bool)
+    reduced_chi2, n_pix, n_fit_free, dof = fit_dof_and_reduced_chi2(chi2, image_data, num_params_physical, mask_bool=mask_bool)
     bic_physical = num_params_physical * np.log(n_pix) - 2 * log_likelihood
     metrics = {
         'BIC_PHYSICAL_MEDIAN': float(bic_physical),

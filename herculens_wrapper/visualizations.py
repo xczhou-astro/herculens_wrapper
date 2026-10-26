@@ -408,6 +408,7 @@ def plot_image_plane(
     model_lens_light_override=None,
     model_composite_override=None,
     model_point_sources_override=None,
+    reduced_chi2=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -447,6 +448,9 @@ def plot_image_plane(
         model_composite = lens_image.model(**kwargs_result, source_add=True, point_source_add=True)
     residuals = (model_composite - image_data) / noise_map
     chi2 = float(np.nansum(residuals ** 2))
+    if reduced_chi2 is None:
+        n_pixels = int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(residuals)))
+        reduced_chi2 = float(chi2 / max(n_pixels, 1))
 
 
     fig, ax = plt.subplots(2, 3, figsize=(18, 10))
@@ -490,7 +494,7 @@ def plot_image_plane(
     _mark_point_sources(ax[1, 2], point_positions, 'image')
     if mask is not None:
         ax[1, 2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-    ax[1, 2].set_title(f'Residuals (model - data) / noise ($\\chi^2$ = {chi2:.2f})')
+    ax[1, 2].set_title(fr'Residuals (model - data) / noise (reduced $\chi^2$ = {reduced_chi2:.2f})')
     plt.colorbar(im5, ax=ax[1, 2], label='Standardized residual')
 
     for a in ax.ravel():
@@ -896,6 +900,7 @@ def plot_composite_2x3_panel(
     source_arc_mask=None,
     model_no_lens_light_override=None,
     fit_mask_bool=None,
+    reduced_chi2=None,
 ):
     ny, nx = image_data.shape
     extent_img = _image_extent(ny, nx, pixel_scale)
@@ -943,6 +948,14 @@ def plot_composite_2x3_panel(
 
     residuals = _hide_excluded_pixels((model_composite - image_data) / noise_map, fit_mask_bool)
     chi2 = float(np.nansum(residuals ** 2))
+    if reduced_chi2 is None:
+        if fit_mask_bool is not None:
+            n_pixels = int(np.sum(fit_mask_bool))
+        elif mask is not None:
+            n_pixels = int(np.sum(mask))
+        else:
+            n_pixels = int(np.sum(np.isfinite(residuals)))
+        reduced_chi2 = float(chi2 / max(n_pixels, 1))
     subtracted = _hide_excluded_pixels(image_data - model_lens_light, fit_mask_bool)
     displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
 
@@ -1096,7 +1109,7 @@ def plot_composite_2x3_panel(
     _mark_point_sources(axes[0, 2], point_positions, 'image')
     if mask is not None:
         axes[0, 2].contour(np.asarray(mask), levels=[0.5], colors='lime', extent=extent_img, linewidths=1.0)
-    axes[0, 2].set_title(f'Residual (chi^2 = {chi2:.2f})')
+    axes[0, 2].set_title(fr'Residual (reduced $\chi^2$ = {reduced_chi2:.2f})')
     plt.colorbar(im2, ax=axes[0, 2], label='(model - data) / noise')
 
     # Panel (1, 0): Data - Lens Light (Linear scale, no colorbar)
@@ -1216,6 +1229,12 @@ def plot_multiband_composite(
             (model_total - image_data) / noise_map, fit_mask_bool,
         )
         chi2 = float(np.nansum(residual ** 2))
+        band_red_chi2 = band.get('reduced_chi2')
+        if band_red_chi2 is None:
+            n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
+                int(np.sum(image_mask)) if image_mask is not None else int(np.sum(np.isfinite(residual)))
+            )
+            band_red_chi2 = float(chi2 / max(n_pix, 1))
         data_minus_lens = _hide_excluded_pixels(
             image_data - model_lens_light, fit_mask_bool,
         )
@@ -1373,7 +1392,7 @@ def plot_multiband_composite(
 
         for column, axis in enumerate(axes[row]):
             if column == 2:
-                axis.set_title(f'Residual (chi^2 = {chi2:.2f})')
+                axis.set_title(fr'Residual (reduced $\chi^2$ = {band_red_chi2:.2f})')
             elif row == 0:
                 axis.set_title(
                     'Lensed Source + Point Sources'
@@ -1563,6 +1582,7 @@ def plot_lens_light_subtracted_image(
     plot_scale='linear', residual_vis_max=0.0,
     model_lens_light_override=None,
     fit_mask_bool=None,
+    reduced_chi2=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -1584,6 +1604,13 @@ def plot_lens_light_subtracted_image(
     subtracted = _hide_excluded_pixels(image_data - model_lens_light, fit_mask_bool)
     displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
     chi2_subtracted = float(np.nansum((subtracted / noise_map) ** 2)) if noise_map is not None else None
+    if reduced_chi2 is None and chi2_subtracted is not None:
+        n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
+            int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(subtracted)))
+        )
+        reduced_chi2_sub = float(chi2_subtracted / max(n_pix, 1))
+    else:
+        reduced_chi2_sub = reduced_chi2
 
     fig, ax = plt.subplots(1, 3, figsize=(18, 5))
 
@@ -1648,7 +1675,7 @@ def plot_lens_light_subtracted_image(
         im2 = ax[2].imshow(res_data, origin='lower', cmap='bwr', extent=extent, vmin=-vmax_res, vmax=vmax_res)
         if mask is not None:
             ax[2].contour(mask, levels=[0.5], colors='lime', extent=extent, linewidths=1.0)
-        ax[2].set_title(f'Data - Lens light (S/N; $\\chi^2$ = {chi2_subtracted:.2f})')
+        ax[2].set_title(fr'Data - Lens light (S/N; reduced $\chi^2$ = {reduced_chi2_sub:.2f})')
         plt.colorbar(im2, ax=ax[2], label='Signal-to-noise')
     else:
         vmax_res = (
@@ -1688,6 +1715,7 @@ def plot_ring_model_comparison(
     model_no_lens_light_override=None,
     model_lens_light_override=None,
     fit_mask_bool=None,
+    reduced_chi2=None,
 ):
     ny, nx = image_data.shape
     extent = _image_extent(ny, nx, pixel_scale)
@@ -1725,12 +1753,17 @@ def plot_ring_model_comparison(
     )
     image_minus_lens = _hide_excluded_pixels(image_minus_lens, fit_mask_bool)
     chi2 = float(np.nansum(residual ** 2))
+    if reduced_chi2 is None:
+        n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
+            int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(residual)))
+        )
+        reduced_chi2 = float(chi2 / max(n_pix, 1))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
     panels = [
         (model_no_lens_light, 'Model without lens light', 'twilight'),
         (image_minus_lens, 'Image - lens light', 'twilight'),
-        (residual, f'Residuals ($\\chi^2$ = {chi2:.2f})', 'bwr'),
+        (residual, fr'Residuals (reduced $\chi^2$ = {reduced_chi2:.2f})', 'bwr'),
     ]
 
     for idx, (panel, title, cmap) in enumerate(panels):
@@ -2015,7 +2048,7 @@ def display_init(
         titles=[
             'Initial guess model',
             'Image data',
-            f'Residuals (chi^2 = {init_chi2:.2f})',
+            fr'Residuals (reduced $\chi^2$ = {init_reduced:.2f})',
         ],
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'initial_guess_model.png'),
@@ -3160,7 +3193,25 @@ def generate_run_plots(
     # sum, so compute that same value here rather than accepting a separately
     # supplied (normally masked, parameter-median) metric.
     if best_fit_model is not None and image_data is not None and noise_map is not None:
-        chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+        if fit_mask_bool is not None:
+            mask_arr = np.asarray(fit_mask_bool, dtype=bool)
+            calc_res = (best_fit_model[mask_arr] - image_data[mask_arr]) / noise_map[mask_arr]
+            n_pix = int(np.sum(mask_arr))
+        else:
+            calc_res = (best_fit_model - image_data) / noise_map
+            n_pix = int(image_data.size)
+        calc_chi2 = float(np.sum(calc_res ** 2))
+        if chi2 is None:
+            chi2 = calc_chi2
+        if reduced_chi2 is None:
+            n_params = 0
+            if prob_model is not None and hasattr(prob_model, 'count_sampled_parameters'):
+                try:
+                    n_params = prob_model.count_sampled_parameters()
+                except Exception:
+                    pass
+            dof = max(n_pix - n_params, 1)
+            reduced_chi2 = float(chi2 / dof)
 
     def _try(name, fn):
         try:
@@ -3174,7 +3225,7 @@ def generate_run_plots(
         titles=[
             'Best fit model',
             'Image data',
-            f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+            fr'Residuals (reduced $\chi^2$ = {reduced_chi2:.2f})' if reduced_chi2 is not None else 'Residuals',
         ],
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'best_fit_model_linear.png'),
@@ -3189,7 +3240,7 @@ def generate_run_plots(
         titles=[
             'Best fit model',
             'Image data',
-            f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+            fr'Residuals (reduced $\chi^2$ = {reduced_chi2:.2f})' if reduced_chi2 is not None else 'Residuals',
         ],
         pixel_scale=pixel_scale,
         savefilename=os.path.join(save_path, 'best_fit_model_log.png'),
@@ -3208,6 +3259,7 @@ def generate_run_plots(
         model_composite_override=comp_total,
         model_no_lens_light_override=comp_no_lens,
         fit_mask_bool=fit_mask_bool,
+        reduced_chi2=reduced_chi2,
     ))
 
     if sampler == 'hmc' and mcmc_samples is not None and prob_model is not None:
@@ -3233,6 +3285,7 @@ def generate_run_plots(
         model_lens_light_override=comp_lens_light,
         model_composite_override=comp_total,
         model_point_sources_override=comp_ps,
+        reduced_chi2=reduced_chi2,
     ))
 
     _try('source_plane_linear.png', lambda: plot_source_plane(
@@ -3388,17 +3441,25 @@ def recreate_best_fit_plots_for_run(run_dir):
             
     # Try to load metrics.json for chi2
     chi2 = None
+    reduced_chi2 = None
     metrics_json_path = os.path.join(run_dir, 'metrics.json')
     if os.path.exists(metrics_json_path):
         try:
             with open(metrics_json_path, 'r') as f:
                 metrics_dict = json.load(f)
-                chi2 = metrics_dict.get('CHI2', None)
+                chi2 = metrics_dict.get('CHI2', metrics_dict.get('chi2_median', None))
+                reduced_chi2 = metrics_dict.get(
+                    'REDUCED_CHI2', metrics_dict.get('REDUCED_CHI2_MEDIAN', metrics_dict.get('reduced_chi2_median', None))
+                )
         except Exception:
             pass
             
     if chi2 is None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
+    if reduced_chi2 is None and chi2 is not None:
+        n_data = int(np.sum(source_arc_mask)) if source_arc_mask is not None else int(image_data.size)
+        dof = max(n_data, 1)
+        reduced_chi2 = float(chi2 / dof)
         
     # Recreate the two plots
     try:
@@ -3407,7 +3468,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             titles=[
                 'Best fit model',
                 'Image data',
-                f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+                fr'Residuals (reduced $\chi^2$ = {reduced_chi2:.2f})' if reduced_chi2 is not None else 'Residuals',
             ],
             pixel_scale=pixel_scale,
             savefilename=os.path.join(run_dir, 'best_fit_model_linear.png'),
@@ -3425,7 +3486,7 @@ def recreate_best_fit_plots_for_run(run_dir):
             titles=[
                 'Best fit model',
                 'Image data',
-                f'Residuals (chi^2 = {chi2:.2f})' if chi2 is not None else 'Residuals',
+                fr'Residuals (reduced $\chi^2$ = {reduced_chi2:.2f})' if reduced_chi2 is not None else 'Residuals',
             ],
             pixel_scale=pixel_scale,
             savefilename=os.path.join(run_dir, 'best_fit_model_log.png'),

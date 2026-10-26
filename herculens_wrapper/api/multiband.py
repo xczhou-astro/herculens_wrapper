@@ -292,7 +292,7 @@ class MultiBandFitResult:
             log_likelihood += band_metrics["log_likelihood"]
         n_parameters = int(sum(np.asarray(value).size for value in self.parameters.values()))
         n_physical = count_physical_parameters(self.parameters)
-        dof = max(total_pixels - n_parameters, 1)
+        dof = max(total_pixels - n_physical, 1)
         bic_physical = n_physical * np.log(total_pixels) - 2 * log_likelihood
         metrics = {"chi2_median": total_chi2, "n_data_pixels": total_pixels, "n_free_parameters": n_parameters,
                 "n_physical_parameters": n_physical,
@@ -386,13 +386,15 @@ class MultiBandFitResult:
                     skipped[f"{name}_rtu_source_fits"] = str(error)
             with (directory / "kwargs_lens_shared.json").open("w") as stream:
                 json.dump({"kwargs_lens": shared_lens}, stream, indent=2, default=json_serializer)
+            band_dof = max(n_pixels - n_physical, 1)
+            band_reduced_chi2 = float(chi2 / band_dof)
             try:
                 generate_run_plots(
                     lens_image=band["lens_image"], kwargs_best=kwargs_for_plots, image_data=band["image_data"],
                     noise_map=output_noise, psf_data=self._model.observations[name].psf,
                     pixel_scale=self._model.observations[name].pixel_scale, save_path=str(directory),
                     sampler="hmc" if self.samples is not None else "svi",
-                    best_fit_model=best, chi2=chi2, reduced_chi2=None,
+                    best_fit_model=best, chi2=chi2, reduced_chi2=band_reduced_chi2,
                     extra={"hmc_batch_size": self.details.get("hmc_batch_size", 32)},
                     param_list=band["param_list"], residual_vis_max=residual_vis_max,
                     mcmc_samples=self.samples,
@@ -408,6 +410,7 @@ class MultiBandFitResult:
                                  "image_data": band["image_data"], "noise_map": output_noise,
                                  "fit_mask_bool": valid,
                                  "pixel_scale": self._model.observations[name].pixel_scale,
+                                 "reduced_chi2": band_reduced_chi2,
                                  "model_total": components["total"] if components is not None else None,
                                  "model_lensed_source": components["no_lens_light"] if components is not None else None,
                                  "model_lens_light": components["lens_light"] if components is not None else None})

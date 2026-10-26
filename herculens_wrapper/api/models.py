@@ -42,12 +42,16 @@ _STELLAR_LENS_LIGHT_INDICES = "_stellar_lens_light_indices"
 
 
 def is_pixelated_latent_site(name: str) -> bool:
-    """Whether a NumPyro site is a pixel reconstruction nuisance variable."""
+    """Whether a NumPyro site is a pixel reconstruction nuisance variable, grid helper, or deterministic image."""
     site = str(name).rsplit("/", 1)[-1]
+    if site in {"model_image", "image_model", "prediction"}:
+        return True
+    if "Source grid" in site or "Lens light grid" in site:
+        return True
     return (
         # Pixel coefficients are nuisance degrees of freedom irrespective of
         # their grid name (source, lens light, or a future pixel component).
-        "pixels_wn_" in site
+        "pixels_wn" in site
         or site.endswith("source_pixels")
         or any(token in site for token in (
             "n_source_grid", "rho_source_grid", "sigma_source_grid",
@@ -55,7 +59,8 @@ def is_pixelated_latent_site(name: str) -> bool:
             "source_scales", "source_coarse", "source_pixels",
         ))
         or any(token in site for token in (
-            "n_lens_light_grid_", "rho_lens_light_grid_", "sigma_lens_light_grid_",
+            "n_lens_light_grid", "rho_lens_light_grid", "sigma_lens_light_grid",
+            "pixels_wn_lens_light",
         ))
     )
 

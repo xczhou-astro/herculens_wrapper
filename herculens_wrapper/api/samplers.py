@@ -1411,11 +1411,13 @@ class FitResult:
         """Create the wrapper's 2×3 image-plane component diagnostic."""
         from ..visualizations import plot_image_plane
         model = self._require_model()
+        reduced_chi2 = self.metrics().get("reduced_chi2_median")
         return self._legacy_plot_result(
             lambda directory, filename: plot_image_plane(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
                 model.data.likelihood_image, model.data.likelihood_noise, str(directory),
                 residual_vis_max=residual_vis_max, output_filename=filename,
+                reduced_chi2=reduced_chi2,
             ), save_path, "image_plane.png",
         )
 
@@ -1423,6 +1425,7 @@ class FitResult:
         """Create the wrapper's 2×3 composite/source-plane diagnostic."""
         from ..visualizations import plot_composite_2x3_panel
         model = self._require_model()
+        reduced_chi2 = self.metrics().get("reduced_chi2_median")
         return self._legacy_plot_result(
             lambda directory, filename: plot_composite_2x3_panel(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
@@ -1430,6 +1433,7 @@ class FitResult:
                 residual_vis_max=residual_vis_max, output_filename=filename,
                 source_arc_mask=model.data.source_arc_mask,
                 fit_mask_bool=model.data.likelihood_mask,
+                reduced_chi2=reduced_chi2,
             ), save_path, "composite.png",
         )
 
@@ -1452,12 +1456,14 @@ class FitResult:
         """Compare the lens-light-subtracted ring image with its model."""
         from ..visualizations import plot_ring_model_comparison
         model = self._require_model()
+        reduced_chi2 = self.metrics().get("reduced_chi2_median")
         return self._legacy_plot_result(
             lambda directory, filename: plot_ring_model_comparison(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
                 model.data.likelihood_image, model.data.likelihood_noise, str(directory),
                 plot_scale=scale, residual_vis_max=residual_vis_max, output_filename=filename,
                 fit_mask_bool=model.data.likelihood_mask,
+                reduced_chi2=reduced_chi2,
             ), save_path, "ring_model_comparison.png",
         )
 
@@ -1496,6 +1502,7 @@ class FitResult:
             model.data.likelihood_image, model.data.likelihood_noise, str(directory),
             plot_scale=scale, residual_vis_max=residual_vis_max,
             fit_mask_bool=model.data.likelihood_mask,
+            reduced_chi2=self.metrics().get("reduced_chi2_median"),
         )
         generated = directory / f"lens_light_subtracted_image{suffix}.png"
         if generated != output:
