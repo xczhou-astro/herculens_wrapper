@@ -1231,10 +1231,18 @@ def plot_multiband_composite(
         chi2 = float(np.nansum(residual ** 2))
         band_red_chi2 = band.get('reduced_chi2')
         if band_red_chi2 is None:
-            n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
-                int(np.sum(image_mask)) if image_mask is not None else int(np.sum(np.isfinite(residual)))
-            )
-            band_red_chi2 = float(chi2 / max(n_pix, 1))
+            band_dof = band.get('dof') or band.get('degrees_of_freedom') or band.get('chi2_dof')
+            if band_dof is not None:
+                band_red_chi2 = float(chi2 / max(int(band_dof), 1))
+            else:
+                n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
+                    int(np.sum(image_mask)) if image_mask is not None else int(np.sum(np.isfinite(residual)))
+                )
+                band_num_params = band.get('num_params') or band.get('n_physical_parameters') or band.get('n_free_parameters')
+                if band_num_params is not None:
+                    band_red_chi2 = float(chi2 / max(n_pix - int(band_num_params), 1))
+                else:
+                    band_red_chi2 = float(chi2 / max(n_pix, 1))
         data_minus_lens = _hide_excluded_pixels(
             image_data - model_lens_light, fit_mask_bool,
         )

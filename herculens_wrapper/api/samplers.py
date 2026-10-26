@@ -1943,7 +1943,7 @@ class SingleBandResultsCombination:
                 "seed": result.random_seed,
                 "metrics": summary_metrics,
             }
-            bands.append({
+            band_entry = {
                 "name": f"Run {index}",
                 "lens_image": model.lens_image,
                 "kwargs_result": result._kwargs_result(),
@@ -1951,7 +1951,21 @@ class SingleBandResultsCombination:
                 "noise_map": model.data.likelihood_noise,
                 "fit_mask_bool": model.data.likelihood_mask,
                 "pixel_scale": model.data.pixel_scale,
-            })
+                "reduced_chi2": summary_metrics["REDUCED_CHI2_MEDIAN"],
+                "dof": result_metrics["degrees_of_freedom"],
+                "chi2": summary_metrics["CHI2_MEDIAN"],
+            }
+            if result.samples is not None and "component_medians" in result.derived:
+                comp = result.derived["component_medians"]
+                band_entry["model_total"] = comp.get("total")
+                band_entry["model_lens_light"] = comp.get("lens_light")
+                band_entry["model_lensed_source"] = comp.get("no_lens_light")
+            elif "components" in result.derived:
+                comp = result.derived["components"]
+                band_entry["model_total"] = comp.get("total")
+                band_entry["model_lens_light"] = comp.get("lens_light")
+                band_entry["model_lensed_source"] = comp.get("no_lens_light")
+            bands.append(band_entry)
         json_path = directory / "comparison.json"
         with json_path.open("w") as stream:
             json.dump(comparison, stream, indent=4, default=_json_default)

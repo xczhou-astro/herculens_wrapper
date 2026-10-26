@@ -1479,6 +1479,11 @@ class MultiBandResultsCombination:
             kwargs_by_band = result.kwargs_by_band()
             for band in model.bands:
                 name = band["name"]
+                band_metrics = metrics.get("bands", {}).get(name, {})
+                band_pixels = band_metrics.get("n_data_pixels", int(np.sum(band["fit_mask_bool"])))
+                band_dof = max(band_pixels - metrics.get("n_physical_parameters", 0), 1)
+                band_chi2 = band_metrics.get("chi2")
+                band_reduced_chi2 = float(band_chi2 / band_dof) if band_chi2 is not None else None
                 plot_rows_by_band.setdefault(name, []).append({
                     "name": run_id,
                     "lens_image": band["lens_image"],
@@ -1487,6 +1492,9 @@ class MultiBandResultsCombination:
                     "noise_map": band["noise_map"],
                     "fit_mask_bool": band["fit_mask_bool"],
                     "pixel_scale": model.observations[name].pixel_scale,
+                    "reduced_chi2": band_reduced_chi2,
+                    "dof": band_dof,
+                    "chi2": band_chi2,
                 })
 
         comparison_path = directory / "comparison.json"

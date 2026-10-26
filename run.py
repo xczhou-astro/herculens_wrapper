@@ -888,6 +888,11 @@ def build_and_run(config_path=None):
                     'image_data': image_data,
                     'noise_map': noise_map,
                     'pixel_scale': run_args.pixel_scale,
+                    'fit_mask_bool': mask_bool,
+                    'reduced_chi2': reduced_chi2,
+                    'dof': metrics.get('CHI2_DOF'),
+                    'chi2': chi2,
+                    'model_total': best_fit_model,
                 }
             print(f'Run {n} complete. Outputs in {run_save_path}')
             run_successful = True
