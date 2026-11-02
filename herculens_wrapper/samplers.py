@@ -1290,6 +1290,93 @@ def _hdf5_group_arrays(group):
     }
 
 
+def _infer_hmc_hdf5_batch_draws(path, handle, total_rows):
+    """Return ``(num_chains, batch_draws_per_chain)`` for an HMC HDF5 archive."""
+    num_chains = max(int(handle.attrs.get('num_chains', 1)), 1)
+    total_rows = int(total_rows)
+    if num_chains <= 1 or total_rows <= 0 or total_rows % num_chains != 0:
+        draws = total_rows // num_chains if total_rows > 0 else 0
+        return num_chains, ([draws] if draws > 0 else [])
+
+    total_draws_per_chain = total_rows // num_chains
+    saved_batches = handle.attrs.get('batch_draws_per_chain')
+    if saved_batches is not None:
+        batch_draws = [int(x) for x in np.asarray(saved_batches).reshape(-1) if int(x) > 0]
+        if sum(batch_draws) == total_draws_per_chain:
+            return num_chains, batch_draws
+
+    checkpoint_interval = None
+    run_dir = os.path.dirname(os.path.abspath(str(path)))
+    for filename, extractor in (
+        ('hmc_manifest.json', lambda d: d.get('checkpoint_interval')),
+        (
+            'model_configuration.json',
+            lambda d: (
+                d.get('sampler', {}).get('options', {}).get('checkpoint_interval')
+                or d.get('sampler', {}).get('options', {}).get('checkpoint_interval_hmc_numpyro')
+            ),
+        ),
+        (
+            'config.json',
+            lambda d: d.get('checkpoint_interval_hmc_numpyro') or d.get('checkpoint_interval'),
+        ),
+    ):
+        candidate = os.path.join(run_dir, filename)
+        if os.path.isfile(candidate):
+            try:
+                with open(candidate, 'r') as stream:
+                    value = extractor(json.load(stream))
+                if value is not None and int(value) > 0:
+                    checkpoint_interval = int(value)
+                    break
+            except Exception:
+                pass
+
+    if checkpoint_interval is None:
+        ckpt_candidate = os.path.join(run_dir, 'hmc_checkpoint.pkl')
+        if os.path.isfile(ckpt_candidate):
+            try:
+                with open(ckpt_candidate, 'rb') as stream:
+                    ckpt = pickle.load(stream)
+                value = ckpt.get('checkpoint_interval')
+                if value is not None and int(value) > 0:
+                    checkpoint_interval = int(value)
+            except Exception:
+                pass
+
+    if checkpoint_interval is not None and 0 < checkpoint_interval < total_draws_per_chain:
+        batch_draws = []
+        remaining = total_draws_per_chain
+        while remaining > 0:
+            step = min(checkpoint_interval, remaining)
+            batch_draws.append(step)
+            remaining -= step
+        return num_chains, batch_draws
+
+    return num_chains, [total_draws_per_chain]
+
+
+def _reorder_hmc_batches_to_chains(array, num_chains, batch_draws_per_chain):
+    """Reorder batch-appended ``(batch, chain, draw, ...)`` into ``(chain, draw, ...)``."""
+    array = np.asarray(array)
+    if num_chains <= 1 or len(batch_draws_per_chain) <= 1:
+        return array
+    total_draws_per_chain = sum(batch_draws_per_chain)
+    if array.shape[0] != num_chains * total_draws_per_chain:
+        return array
+    if len(set(batch_draws_per_chain)) == 1:
+        num_batches = len(batch_draws_per_chain)
+        batch_draws = batch_draws_per_chain[0]
+        reshaped = array.reshape((num_batches, num_chains, batch_draws) + array.shape[1:])
+        return np.ascontiguousarray(np.swapaxes(reshaped, 0, 1).reshape(array.shape))
+    split_indices = np.cumsum([draws * num_chains for draws in batch_draws_per_chain[:-1]])
+    batches = [
+        batch.reshape((num_chains, draws) + array.shape[1:])
+        for batch, draws in zip(np.split(array, split_indices, axis=0), batch_draws_per_chain)
+    ]
+    return np.ascontiguousarray(np.concatenate(batches, axis=1).reshape(array.shape))
+
+
 def _convert_hmc_pixel_latents_hdf5_to_float32(path):
     """Shrink existing float64 pixel-latent datasets without touching sampler state."""
     with h5py.File(path, 'r') as source:
@@ -1342,18 +1429,24 @@ def _append_hmc_samples_hdf5(path, samples, extra_fields, num_chains):
     """Append one flattened MCMC batch to the single on-disk posterior store."""
     if not samples:
         return
+    num_chains = int(num_chains)
     batch_size = int(np.asarray(next(iter(samples.values()))).shape[0])
     if batch_size % num_chains:
         raise ValueError('HMC batch sample count is incompatible with num_chains.')
 
     with h5py.File(path, 'a') as handle:
         saved_chains = handle.attrs.get('num_chains')
-        if saved_chains is not None and int(saved_chains) != int(num_chains):
+        if saved_chains is not None and int(saved_chains) != num_chains:
             raise ValueError(
                 f'HDF5 samples use num_chains={saved_chains}, but the current '
                 f'configuration requests {num_chains}.'
             )
-        handle.attrs['num_chains'] = int(num_chains)
+        existing_rows = 0
+        if 'samples' in handle and handle['samples']:
+            existing_rows = int(next(iter(handle['samples'].values())).shape[0])
+        _, prior_batch_draws = _infer_hmc_hdf5_batch_draws(path, handle, existing_rows)
+
+        handle.attrs['num_chains'] = num_chains
         handle.attrs['format_version'] = 1
 
         for group_name, values in (('samples', samples), ('sampler_health', extra_fields)):
@@ -1391,6 +1484,9 @@ def _append_hmc_samples_hdf5(path, samples, extra_fields, num_chains):
                     old_rows = dataset.shape[0]
                     dataset.resize(old_rows + batch_size, axis=0)
                     dataset[old_rows:] = array
+        handle.attrs['batch_draws_per_chain'] = np.asarray(
+            prior_batch_draws + [batch_size // num_chains], dtype=np.int64
+        )
         handle.flush()
 
 
@@ -1404,6 +1500,17 @@ def _load_hmc_samples_hdf5(path):
             _hdf5_group_arrays(handle['sampler_health'])
             if 'sampler_health' in handle else {}
         )
+        total_rows = int(next(iter(samples.values())).shape[0]) if samples else 0
+        num_chains, batch_draws = _infer_hmc_hdf5_batch_draws(path, handle, total_rows)
+    if num_chains > 1 and len(batch_draws) > 1:
+        samples = {
+            name: _reorder_hmc_batches_to_chains(value, num_chains, batch_draws)
+            for name, value in samples.items()
+        }
+        extra_fields = {
+            name: _reorder_hmc_batches_to_chains(value, num_chains, batch_draws)
+            for name, value in extra_fields.items()
+        }
     return samples, extra_fields
 
 
@@ -1423,6 +1530,8 @@ def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
         group = handle.get('samples')
         if group is None or not group:
             raise ValueError(f'HMC samples file {path!r} does not contain posterior draws.')
+        total_rows = int(next(iter(group.values())).shape[0])
+        num_chains, batch_draws = _infer_hmc_hdf5_batch_draws(path, handle, total_rows)
         samples = {
             unquote(name): np.asarray(dataset[0])
             for name, dataset in group.items()
@@ -1436,7 +1545,7 @@ def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
             trailing_size = int(np.prod(dataset.shape[1:])) if dataset.ndim > 1 else 1
             if _is_pixel_wn_site(site) or trailing_size > 32:
                 continue
-            values = np.asarray(dataset)
+            values = _reorder_hmc_batches_to_chains(np.asarray(dataset), num_chains, batch_draws)
             median = np.median(values, axis=0)
             samples[site] = median
             # Do not reduce these values: ``save_hmc_diagnostics`` reshapes
@@ -1448,6 +1557,11 @@ def _load_hmc_plot_and_diagnostic_samples_hdf5(path):
             _hdf5_group_arrays(handle['sampler_health'])
             if 'sampler_health' in handle else {}
         )
+        if num_chains > 1 and len(batch_draws) > 1:
+            health = {
+                name: _reorder_hmc_batches_to_chains(value, num_chains, batch_draws)
+                for name, value in health.items()
+            }
     return samples, low_dimensional, health
 
 
@@ -1546,6 +1660,7 @@ def _hmc_hdf5_sample_rows(path):
 
 def _truncate_hmc_hdf5(path, rows):
     """Discard an uncheckpointed HDF5 tail left by an interrupted batch write."""
+    rows = int(rows)
     with h5py.File(path, 'r+') as handle:
         for group_name in ('samples', 'sampler_health'):
             if group_name not in handle:
@@ -1553,6 +1668,21 @@ def _truncate_hmc_hdf5(path, rows):
             for dataset in handle[group_name].values():
                 if dataset.shape[0] > rows:
                     dataset.resize(rows, axis=0)
+        if 'batch_draws_per_chain' in handle.attrs:
+            num_chains = max(int(handle.attrs.get('num_chains', 1)), 1)
+            target_draws = max(rows // num_chains, 0)
+            trimmed = []
+            remaining = target_draws
+            for draws in np.asarray(handle.attrs['batch_draws_per_chain']).reshape(-1):
+                draws = int(draws)
+                if draws <= 0 or remaining <= 0:
+                    break
+                step = min(draws, remaining)
+                trimmed.append(step)
+                remaining -= step
+            if remaining > 0:
+                trimmed.append(remaining)
+            handle.attrs['batch_draws_per_chain'] = np.asarray(trimmed, dtype=np.int64)
         handle.flush()
 
 
@@ -1751,15 +1881,10 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         for idx, params_group in sorted(lens_light_by_idx.items()):
             dense_mass_blocks.append(tuple(params_group))
             
-        # Group lens mass parameters by component index
-        lens_mass_by_idx = defaultdict(list)
-        for k in vars_mass:
-            try:
-                lens_mass_by_idx[component_group(k)].append(k)
-            except ValueError:
-                pass
-        for idx, params_group in sorted(lens_mass_by_idx.items()):
-            dense_mass_blocks.append(tuple(params_group))
+        # All lens mass parameters form a single joint dense mass block to capture
+        # strong degeneracies between components (e.g. SIE ellipticity and external shear)
+        if vars_mass:
+            dense_mass_blocks.append(tuple(sorted(vars_mass)))
             
         outer_kernel = infer.NUTS(
             prob_model.model,
@@ -1797,15 +1922,11 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
         )
         
         # Kernel 2: NUTS for lens mass
+        # Place all lens mass parameters in a single joint dense mass block so NUTS
+        # can adapt to cross-component degeneracies (e.g. e1 vs gamma1, e2 vs gamma2)
         dense_mass_blocks_2 = []
-        lens_mass_by_idx = defaultdict(list)
-        for k in vars_mass:
-            try:
-                lens_mass_by_idx[component_group(k)].append(k)
-            except ValueError:
-                pass
-        for idx, params_group in sorted(lens_mass_by_idx.items()):
-            dense_mass_blocks_2.append(tuple(params_group))
+        if vars_mass:
+            dense_mass_blocks_2.append(tuple(sorted(vars_mass)))
             
         kernel_2 = infer.NUTS(
             prob_model.model,

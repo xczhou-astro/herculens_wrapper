@@ -1387,3 +1387,71 @@ def test_batch_point_source_rejects_invalid_declarations():
         PointSourceProfile(["SOURCE_POSITION"], prior=[None])
     with pytest.raises(TypeError, match="Use prior"):
         PointSourceProfile(["SOURCE_POSITION"], ra=0.0)
+
+
+def test_hmc_hdf5_multi_batch_chain_ordering(tmp_path):
+    """Appending multiple MCMC batches preserves per-chain continuity when loaded."""
+    import h5py
+    from herculens_wrapper.samplers import (
+        _append_hmc_samples_hdf5,
+        _load_hmc_plot_and_diagnostic_samples_hdf5,
+        _load_hmc_samples_hdf5,
+    )
+
+    num_chains = 4
+    posterior_path = tmp_path / "hmc_samples.h5"
+    batch_sizes = [3, 3, 2]
+    offset = 0
+    for batch_draws in batch_sizes:
+        # Each batch from mcmc.get_samples(group_by_chain=False) has shape
+        # (num_chains, batch_draws) flattened.
+        batch_matrix = np.array([
+            [chain * 1000 + offset + draw for draw in range(batch_draws)]
+            for chain in range(num_chains)
+        ], dtype=np.float64)
+        _append_hmc_samples_hdf5(
+            posterior_path,
+            {"lens_theta_E_0": batch_matrix.reshape(-1)},
+            {"diverging": batch_matrix.reshape(-1).astype(np.int64)},
+            num_chains=num_chains,
+        )
+        offset += batch_draws
+
+    total_draws_per_chain = sum(batch_sizes)
+    expected = np.array([
+        [chain * 1000 + draw for draw in range(total_draws_per_chain)]
+        for chain in range(num_chains)
+    ], dtype=np.float64)
+
+    samples, health = _load_hmc_samples_hdf5(posterior_path)
+    np.testing.assert_array_equal(
+        samples["lens_theta_E_0"].reshape(num_chains, total_draws_per_chain),
+        expected,
+    )
+    np.testing.assert_array_equal(
+        health["diverging"].reshape(num_chains, total_draws_per_chain),
+        expected.astype(np.int64),
+    )
+
+    _, low_dim, diag_health = _load_hmc_plot_and_diagnostic_samples_hdf5(posterior_path)
+    np.testing.assert_array_equal(
+        low_dim["lens_theta_E_0"].reshape(num_chains, total_draws_per_chain),
+        expected,
+    )
+    np.testing.assert_array_equal(
+        diag_health["diverging"].reshape(num_chains, total_draws_per_chain),
+        expected.astype(np.int64),
+    )
+
+    # Simulate a legacy archive without batch_draws_per_chain attribute, using hmc_manifest.json
+    with h5py.File(posterior_path, "r+") as handle:
+        del handle.attrs["batch_draws_per_chain"]
+    (tmp_path / "hmc_manifest.json").write_text(json.dumps({
+        "num_chains": num_chains,
+        "checkpoint_interval": 3,
+    }))
+    legacy_samples, _ = _load_hmc_samples_hdf5(posterior_path)
+    np.testing.assert_array_equal(
+        legacy_samples["lens_theta_E_0"].reshape(num_chains, total_draws_per_chain),
+        expected,
+    )

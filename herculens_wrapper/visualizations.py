@@ -950,9 +950,7 @@ def plot_composite_2x3_panel(
     chi2 = float(np.nansum(residuals ** 2))
     if reduced_chi2 is None:
         if fit_mask_bool is not None:
-            n_pixels = int(np.sum(fit_mask_bool))
-        elif mask is not None:
-            n_pixels = int(np.sum(mask))
+            n_pixels = int(np.sum(fit_mask_bool & np.isfinite(residuals)))
         else:
             n_pixels = int(np.sum(np.isfinite(residuals)))
         reduced_chi2 = float(chi2 / max(n_pixels, 1))
