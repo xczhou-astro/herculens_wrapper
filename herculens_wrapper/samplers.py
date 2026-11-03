@@ -2291,6 +2291,30 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                 )
                 temp_kwargs = prob_model.params2kwargs(plot_params)
                 if img_data is not None and l_image is not None:
+                    if hasattr(prob_model, 'noise_model') and prob_model.noise_model is not None and temp_comp_medians is not None:
+                        try:
+                            bkg_rms = float(plot_params['background_rms']) if (plot_params and 'background_rms' in plot_params) else None
+                            ns_var = prob_model.noise_model.C_D_model(temp_comp_medians['total'], background_rms=bkg_rms)
+                            ns_map = np.sqrt(np.asarray(ns_var))
+                        except Exception:
+                            pass
+
+                    batch_reduced_chi2 = None
+                    if ns_map is not None and img_data is not None and temp_comp_medians is not None:
+                        try:
+                            fit_mask = getattr(prob_model, 'likelihood_mask', None)
+                            valid = np.isfinite(img_data) & np.isfinite(ns_map) & (ns_map > 0)
+                            if fit_mask is not None:
+                                valid &= np.asarray(fit_mask, dtype=bool)
+                            res = (np.asarray(temp_comp_medians['total'])[valid] - np.asarray(img_data)[valid]) / np.asarray(ns_map)[valid]
+                            chi2 = float(np.sum(res ** 2))
+                            from herculens_wrapper.api.models import count_physical_parameters
+                            n_phys = count_physical_parameters(plot_params) if plot_params else 0
+                            dof = max(int(np.sum(valid)) - n_phys, 1)
+                            batch_reduced_chi2 = float(chi2 / dof)
+                        except Exception:
+                            pass
+
                     plot_composite_2x3_panel(
                         l_image, temp_kwargs, p_scale, img_data, ns_map, diag_dir,
                         residual_vis_max=getattr(args, 'residual_vis_max', 0.0),
@@ -2301,6 +2325,7 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                         model_no_lens_light_override=temp_comp_medians['no_lens_light'],
                         source_plane_override=temp_comp_medians.get('source_plane'),
                         fit_mask_bool=getattr(prob_model, 'likelihood_mask', None),
+                        reduced_chi2=batch_reduced_chi2,
                     )
                     print(f"[hmc] Saved compact composite diagnostic for batch {i + 1}.")
                 save_hmc_diagnostics(

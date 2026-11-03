@@ -1407,15 +1407,26 @@ class FitResult:
             json.dump(self.parameters, stream, indent=2, default=_json_default)
         return output
 
+    def _effective_noise_map(self) -> np.ndarray:
+        model = self._require_model()
+        if not model.data.uses_poisson_noise:
+            return model.data.likelihood_noise
+        components = self.derived.get("component_medians", {})
+        model_image = components.get("total")
+        if model_image is None:
+            model_image = model.model_image(self.parameters)
+        return model.noise_from_model(model_image, self.parameters)
+
     def plot_image_plane(self, *, save_path: str | Path | None = None, residual_vis_max: float = 0.0) -> Path:
         """Create the wrapper's 2×3 image-plane component diagnostic."""
         from ..visualizations import plot_image_plane
         model = self._require_model()
         reduced_chi2 = self.metrics().get("reduced_chi2_median")
+        noise_map = self._effective_noise_map()
         return self._legacy_plot_result(
             lambda directory, filename: plot_image_plane(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
-                model.data.likelihood_image, model.data.likelihood_noise, str(directory),
+                model.data.likelihood_image, noise_map, str(directory),
                 residual_vis_max=residual_vis_max, output_filename=filename,
                 reduced_chi2=reduced_chi2,
             ), save_path, "image_plane.png",
@@ -1426,10 +1437,11 @@ class FitResult:
         from ..visualizations import plot_composite_2x3_panel
         model = self._require_model()
         reduced_chi2 = self.metrics().get("reduced_chi2_median")
+        noise_map = self._effective_noise_map()
         return self._legacy_plot_result(
             lambda directory, filename: plot_composite_2x3_panel(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
-                model.data.likelihood_image, model.data.likelihood_noise, str(directory),
+                model.data.likelihood_image, noise_map, str(directory),
                 residual_vis_max=residual_vis_max, output_filename=filename,
                 source_arc_mask=model.data.source_arc_mask,
                 fit_mask_bool=model.data.likelihood_mask,
@@ -1457,10 +1469,11 @@ class FitResult:
         from ..visualizations import plot_ring_model_comparison
         model = self._require_model()
         reduced_chi2 = self.metrics().get("reduced_chi2_median")
+        noise_map = self._effective_noise_map()
         return self._legacy_plot_result(
             lambda directory, filename: plot_ring_model_comparison(
                 model.lens_image, self._kwargs_result(), model.data.pixel_scale,
-                model.data.likelihood_image, model.data.likelihood_noise, str(directory),
+                model.data.likelihood_image, noise_map, str(directory),
                 plot_scale=scale, residual_vis_max=residual_vis_max, output_filename=filename,
                 fit_mask_bool=model.data.likelihood_mask,
                 reduced_chi2=reduced_chi2,
