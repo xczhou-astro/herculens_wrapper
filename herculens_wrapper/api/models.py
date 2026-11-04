@@ -51,7 +51,7 @@ def is_pixelated_latent_site(name: str) -> bool:
     return (
         # Pixel coefficients are nuisance degrees of freedom irrespective of
         # their grid name (source, lens light, or a future pixel component).
-        "pixels_wn" in site
+        "pixels" in site
         or site.endswith("source_pixels")
         or any(token in site for token in (
             "n_source_grid", "rho_source_grid", "sigma_source_grid",

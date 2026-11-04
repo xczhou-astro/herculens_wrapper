@@ -2310,7 +2310,9 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
                             chi2 = float(np.sum(res ** 2))
                             from herculens_wrapper.api.models import count_physical_parameters
                             n_phys = count_physical_parameters(plot_params) if plot_params else 0
-                            dof = max(int(np.sum(valid)) - n_phys, 1)
+                            dof = int(np.sum(valid)) - n_phys
+                            if dof <= 0:
+                                dof = max(int(np.sum(valid)), 1)
                             batch_reduced_chi2 = float(chi2 / dof)
                         except Exception:
                             pass
