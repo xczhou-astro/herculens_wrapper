@@ -9,6 +9,7 @@ jax>=0.4.20
 jaxlib>=0.4.20
 herculens>=0.3.0
 jax-lensing-profiles @ git+https://github.com/Herculens/Jax-Lensing-Profiles.git
+jaxinterp2d @ git+https://github.com/adam-coogan/jaxinterp2d.git
 numpyro>=0.13.0
 optax>=0.1.7
 

@@ -104,6 +104,7 @@ import astropy
 import jax
 import herculens
 import jax_lensing_profiles
+import jaxinterp2d
 import numpyro
 import optax
 import h5py
@@ -112,11 +113,13 @@ import corner
 import arviz
 
 jlp_ver = getattr(jax_lensing_profiles, "__version__", "installed")
+jinterp_ver = getattr(jaxinterp2d, "__version__", "installed")
 print("✓ All core packages imported successfully!")
 print(f"  - JAX version:           {jax.__version__} (backend: {jax.default_backend()})")
 print(f"  - JAX devices:           {jax.devices()}")
 print(f"  - Herculens version:     {herculens.__version__}")
 print(f"  - Jax-Lensing-Profiles:  {jlp_ver}")
+print(f"  - jaxinterp2d:           {jinterp_ver}")
 print(f"  - NumPyro version:       {numpyro.__version__}")
 print(f"  - Optax version:         {optax.__version__}")
 print(f"  - Astropy version:       {astropy.__version__}")
