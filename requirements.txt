@@ -1,0 +1,33 @@
+# ==============================================================================
+# Requirements for herculens_wrapper (Core Modeling & Offline Analysis)
+# NOTE: Web GUI / browser tools (Flask-based point_source_gui,
+#       source_point_lens_explorer, manual_mask) are intentionally excluded.
+# ==============================================================================
+
+# --- Core JAX & Differentiable Lensing ---
+jax>=0.4.20
+jaxlib>=0.4.20
+herculens>=0.3.0
+jax-lensing-profiles @ git+https://github.com/Herculens/Jax-Lensing-Profiles.git
+numpyro>=0.13.0
+optax>=0.1.7
+
+# --- Scientific Computing & Astronomy ---
+numpy>=1.24.0
+scipy>=1.10.0
+astropy>=6.0.0
+scikit-learn>=1.2.0
+scikit-image>=0.20.0
+
+# --- Data Storage, Diagnostics & Visualization ---
+h5py>=3.8.0
+matplotlib>=3.7.0
+corner>=2.2.0
+arviz>=0.17.0
+tqdm>=4.65.0
+
+# --- Helper & Utility Tools (used by scripts in utils/) ---
+helens>=0.0.1
+pandas>=2.0.0
+photutils>=1.8.0
+
