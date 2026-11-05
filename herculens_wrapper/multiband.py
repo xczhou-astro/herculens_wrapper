@@ -174,7 +174,7 @@ def create_multiband_prob_model(
                         for key, value in mass_model.items()
                         if is_band_specific(index, key)
                         and _normalize_link_spec(value) is None
-                        and isinstance(value, (list, tuple))
+                        and (isinstance(value, (list, tuple)) or is_sampled_prior(value))
                     )
             for index, light_model in enumerate(param_list.get('lens_light_params_list', [])):
                 if isinstance(light_model, dict):

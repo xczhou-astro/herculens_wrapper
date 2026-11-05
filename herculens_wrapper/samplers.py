@@ -1793,13 +1793,13 @@ def run_hmc(prob_model, args, init_params, init_params_path=None, batch_diagnost
     vars_lens_light_hmc = [
         k for k in init_params if local_site_name(k).startswith('lens_light_')
     ]
-    # Shared mass sites are unscoped. Multi-band astrometric centres are
-    # band-scoped but still belong in the mass Gibbs block.
+    # Shared mass sites are unscoped. Multi-band astrometric centres and
+    # band-specific mass parameters are band-scoped but still belong in the mass Gibbs block.
     vars_mass = [
         k for k in init_params
         if (
-            ('/' not in k and k.startswith('lens_') and not k.startswith('lens_light_'))
-            or local_site_name(k).startswith(('lens_center_x_', 'lens_center_y_'))
+            local_site_name(k).startswith('lens_')
+            and not local_site_name(k).startswith('lens_light_')
         )
     ]
     vars_other = [k for k in init_params.keys() if k not in vars_pixel + vars_power + vars_lens_light_hmc + vars_mass]

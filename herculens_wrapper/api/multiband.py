@@ -347,7 +347,10 @@ class MultiBandFitResult:
         """Write wrapper-style per-band diagnostics and joint SVI products."""
         from ..utils import json_serializer, kwargs_best_to_json_pixelated_npy, save_rtu_source_fits
         from ..visualizations import generate_run_plots, plot_corner_traced_params, plot_loss_curve, plot_multiband_composite
-        root = Path(save_path).expanduser(); root.mkdir(parents=True, exist_ok=True)
+        target_path = self.run_directory if save_path is None else save_path
+        if target_path is None:
+            raise ValueError("save_path is required before this result has a run directory.")
+        root = Path(target_path).expanduser(); root.mkdir(parents=True, exist_ok=True)
         kwargs_by_band, metrics, files, skipped = self.kwargs_by_band(), self.metrics(), {}, {}
         shared_lens = self._shared_lens_kwargs(kwargs_by_band)
         hmc_components = self.details.get("component_medians_by_band", {})
@@ -386,7 +389,9 @@ class MultiBandFitResult:
                     skipped[f"{name}_rtu_source_fits"] = str(error)
             with (directory / "kwargs_lens_shared.json").open("w") as stream:
                 json.dump({"kwargs_lens": shared_lens}, stream, indent=2, default=json_serializer)
-            band_dof = max(n_pixels - n_physical, 1)
+            band_pixels = metrics.get("bands", {}).get(name, {}).get("n_data_pixels", int(np.sum(valid)))
+            n_physical = metrics.get("n_physical_parameters", 0)
+            band_dof = max(band_pixels - n_physical, 1)
             band_reduced_chi2 = float(chi2 / band_dof)
             try:
                 generate_run_plots(
@@ -643,15 +648,17 @@ class MultiBandModel:
         *,
         seed: int = 42,
         run_id: int | str | None = None,
-        init_params_path: str | Path | None = None,
+        init_params_path: str | Path | Mapping[str, str | Path] | None = None,
         init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
+        shared_mass_from: str | None = None,
     ) -> Mapping[str, Any]:
         """Create a start point, optionally inheriting a prior fit.
 
-        A prior ``parametric_svi`` directory (or a specific ``run_i`` within
-        it) supplies shared lens mass, band-specific centres, and lens light.
+        A prior ``parametric_svi`` or ``pixelated_svi`` directory (or a dict of
+        single-band directories) supplies shared lens mass, band-specific
+        centres, lens light, and source parameters.
         For a pixelated source, ``pixelated_init_match='image'`` then runs a
         short source-only SVI warmup with those inherited components fixed.
         """
@@ -669,6 +676,7 @@ class MultiBandModel:
         info = initialize_model(jax.random.PRNGKey(seed), self.prob_model.model, init_strategy=infer.init_to_median(num_samples=25), validate_grad=False)
         self.initial_parameters = {name: site["value"] for name, site in info.model_trace.items() if site["type"] == "sample" and not site["is_observed"]}
         self.initialization_path = None
+        self.initialization_paths_by_band = {}
         mass_only_warm_start = init_lens_mass_path is not None
         if mass_only_warm_start:
             from ..models import load_kwargs_init_json
@@ -686,23 +694,45 @@ class MultiBandModel:
         if init_params_path is not None:
             from ..utils import resolve_init_run_dir
 
-            self.initialization_path = Path(resolve_init_run_dir(init_params_path)).expanduser()
-            result_path = self.initialization_path / "kwargs_result.json"
-            if not result_path.is_file():
-                raise FileNotFoundError(
-                    f"{self.initialization_path}: expected kwargs_result.json from a parametric multiband run."
-                )
-            with result_path.open() as stream:
-                inherited = json.load(stream)
-            kwargs_by_band = inherited.get("kwargs_by_band")
-            if not isinstance(kwargs_by_band, Mapping):
-                raise ValueError(
-                    f"{result_path} does not contain kwargs_by_band; it is not a multiband API result."
-                )
-            missing = set(self.observations.band_names) - set(kwargs_by_band)
-            if missing:
-                raise ValueError(f"{result_path}: missing inherited band(s) {sorted(missing)}.")
-            self._apply_inherited_parametric_kwargs(kwargs_by_band)
+            if isinstance(init_params_path, Mapping):
+                missing = set(self.observations.band_names) - set(init_params_path)
+                if missing:
+                    raise ValueError(f"init_params_path mapping is missing band(s): {sorted(missing)}")
+                kwargs_by_band = {}
+                for band_name in self.observations.band_names:
+                    band_target = Path(resolve_init_run_dir(init_params_path[band_name])).expanduser()
+                    self.initialization_paths_by_band[band_name] = band_target
+                    result_path = band_target / "kwargs_result.json"
+                    if not result_path.is_file():
+                        raise FileNotFoundError(f"{band_target}: expected kwargs_result.json")
+                    with result_path.open() as stream:
+                        band_inherited = json.load(stream)
+                    if isinstance(band_inherited.get("kwargs_by_band"), Mapping):
+                        kwargs_by_band[band_name] = band_inherited["kwargs_by_band"][band_name]
+                    else:
+                        kwargs_by_band[band_name] = band_inherited
+                ref_band = shared_mass_from if (shared_mass_from and shared_mass_from in self.initialization_paths_by_band) else self.observations.band_names[0]
+                self.initialization_path = self.initialization_paths_by_band[ref_band]
+            else:
+                self.initialization_path = Path(resolve_init_run_dir(init_params_path)).expanduser()
+                result_path = self.initialization_path / "kwargs_result.json"
+                if not result_path.is_file():
+                    raise FileNotFoundError(
+                        f"{self.initialization_path}: expected kwargs_result.json from a parametric multiband run."
+                    )
+                with result_path.open() as stream:
+                    inherited = json.load(stream)
+                kwargs_by_band = inherited.get("kwargs_by_band")
+                if not isinstance(kwargs_by_band, Mapping):
+                    raise ValueError(
+                        f"{result_path} does not contain kwargs_by_band; it is not a multiband API result."
+                    )
+                missing = set(self.observations.band_names) - set(kwargs_by_band)
+                if missing:
+                    raise ValueError(f"{result_path}: missing inherited band(s) {sorted(missing)}.")
+                for band_name in self.observations.band_names:
+                    self.initialization_paths_by_band[band_name] = self.initialization_path
+            self._apply_inherited_parametric_kwargs(kwargs_by_band, shared_mass_from=shared_mass_from)
             source_kind = "pixelated SVI" if any(
                 (source_values := values.get("kwargs_source", []))
                 and any(
@@ -956,7 +986,11 @@ class MultiBandModel:
             print("[pixelated-init: lens-light] Multiband lens-light-matched initialization complete.")
         self.initial_parameters = initial
 
-    def _apply_inherited_parametric_kwargs(self, kwargs_by_band: Mapping[str, Any]) -> None:
+    def _apply_inherited_parametric_kwargs(
+        self,
+        kwargs_by_band: Mapping[str, Any],
+        shared_mass_from: str | None = None,
+    ) -> None:
         """Map saved physical kwargs onto the joint NumPyro site names."""
         import jax.numpy as jnp
         from ..models import _mass_e1_e2_to_q_phi, _mass_phi_m_rad_to_deg
@@ -964,6 +998,7 @@ class MultiBandModel:
         initial = dict(self.initial_parameters)
         for band in self.bands:
             name, prefix, inherited = band["name"], f"{band['site_prefix']}/", kwargs_by_band[band["name"]]
+            band_init_path = getattr(self, "initialization_paths_by_band", {}).get(name, self.initialization_path)
             for index, definition in enumerate(band["param_list"]["lens_mass_params_list"]):
                 values = inherited.get("kwargs_lens", [])
                 if index >= len(values):
@@ -972,9 +1007,12 @@ class MultiBandModel:
                 for key, specification in definition.items():
                     if not is_sampled_prior(specification):
                         continue
+                    is_band_spec = (index, key) in self.prob_model.band_specific_lens_mass_parameters
+                    if not is_band_spec and shared_mass_from is not None and name != shared_mass_from:
+                        continue
                     site = (
                         f"{prefix}lens_{key}_{index}"
-                        if (index, key) in self.prob_model.band_specific_lens_mass_parameters
+                        if is_band_spec
                         else f"lens_{key}_{index}"
                     )
                     if (
@@ -1005,7 +1043,7 @@ class MultiBandModel:
                     continue
                 for key, specification in definition.items():
                     site = f"{prefix}lens_light_{key}_{index}"
-                    if isinstance(specification, (list, tuple)) and key in values[index] and site in initial:
+                    if (isinstance(specification, (list, tuple)) or is_sampled_prior(specification)) and key in values[index] and site in initial:
                         initial[site] = jnp.asarray(values[index][key])
             source = inherited.get("kwargs_source", [])
             source_types = band["type_list"].get("source_light_type_list", [])
@@ -1038,13 +1076,28 @@ class MultiBandModel:
                 pixels_wn = source_values.get("pixels_wn")
                 site = f"{prefix}pixels_wn_source_grid"
                 if isinstance(pixels_wn, Mapping) and pixels_wn.get("file") and site in initial:
-                    pixel_path = self.initialization_path / pixels_wn["file"]
-                    if not pixel_path.is_file():
-                        pixel_path = self.initialization_path / name / pixels_wn["file"]
-                    if not pixel_path.is_file():
-                        raise FileNotFoundError(f"Missing saved pixelated source coefficients: {pixel_path}")
+                    pixel_file = pixels_wn["file"]
+                    pixel_path = None
+                    search_dirs = []
+                    if band_init_path is not None:
+                        search_dirs.extend([band_init_path, band_init_path / name])
+                    if self.initialization_path is not None:
+                        search_dirs.extend([self.initialization_path, self.initialization_path / name])
+                    for s_dir in search_dirs:
+                        cand = Path(s_dir) / pixel_file
+                        if cand.is_file():
+                            pixel_path = cand
+                            break
+                    if pixel_path is None or not pixel_path.is_file():
+                        raise FileNotFoundError(f"Missing saved pixelated source coefficients: {pixel_file}")
                     from ..utils import load_array_file
                     initial[site] = jnp.asarray(load_array_file(pixel_path))
+            if "likelihood_parameters" in inherited:
+                lp = inherited["likelihood_parameters"]
+                if isinstance(lp, Mapping) and "background_rms" in lp:
+                    rms_site = f"{prefix}background_rms"
+                    if rms_site in initial and lp["background_rms"] is not None:
+                        initial[rms_site] = jnp.asarray(lp["background_rms"])
         self.initial_parameters = initial
 
     def _warmup_pixelated_source(
@@ -1086,10 +1139,11 @@ class MultiBandModel:
     def run(
         self, sampler: SamplerConfig, *, init_params: Mapping[str, Any] | None = None,
         save_path: str | Path | None = None, residual_vis_max: float = 0.0,
-        init_params_path: str | Path | None = None,
+        init_params_path: str | Path | Mapping[str, str | Path] | None = None,
         init_lens_mass_path: str | Path | None = None,
         pixelated_init_match: str = "image",
         num_iterations_warmup: int = 0,
+        shared_mass_from: str | None = None,
         n_runs: int = 1,
     ) -> MultiBandFitResult:
         if sampler.name not in {"svi", "hmc"}:
@@ -1116,6 +1170,7 @@ class MultiBandModel:
                     init_lens_mass_path=init_lens_mass_path,
                     pixelated_init_match=pixelated_init_match,
                     num_iterations_warmup=num_iterations_warmup,
+                    shared_mass_from=shared_mass_from,
                 )
                 run_sampler = SamplerConfig("svi", random_seed=seed, options=dict(sampler.options))
                 result = self.run(
@@ -1141,6 +1196,7 @@ class MultiBandModel:
                 init_lens_mass_path=init_lens_mass_path,
                 pixelated_init_match=pixelated_init_match,
                 num_iterations_warmup=num_iterations_warmup,
+                shared_mass_from=shared_mass_from,
             ))
         elif self.initial_parameters is not None:
             initial = dict(self.initial_parameters)
@@ -1149,6 +1205,7 @@ class MultiBandModel:
                 seed=sampler.random_seed,
                 pixelated_init_match=pixelated_init_match,
                 num_iterations_warmup=num_iterations_warmup,
+                shared_mass_from=shared_mass_from,
             ))
         if save_path is not None:
             try:
