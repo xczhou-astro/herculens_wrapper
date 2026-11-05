@@ -1537,7 +1537,9 @@ class MultiBandResultsCombination:
             for band in model.bands:
                 name = band["name"]
                 band_metrics = metrics.get("bands", {}).get(name, {})
-                band_pixels = band_metrics.get("n_data_pixels", int(np.sum(band["fit_mask_bool"])))
+                mask = band.get("fit_mask_bool")
+                default_pixels = int(np.sum(mask)) if mask is not None else int(np.asarray(band["image_data"]).size)
+                band_pixels = band_metrics.get("n_data_pixels", default_pixels)
                 band_dof = max(band_pixels - metrics.get("n_physical_parameters", 0), 1)
                 band_chi2 = band_metrics.get("chi2")
                 band_reduced_chi2 = float(band_chi2 / band_dof) if band_chi2 is not None else None
