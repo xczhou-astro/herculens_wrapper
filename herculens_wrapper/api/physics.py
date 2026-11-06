@@ -209,6 +209,7 @@ def enclosed_mass_from_kwargs(
         "STELLAR_MGE": "stellar",
         "GNFW_MGE": "dark_matter",
         "NFW_ELLIPSE_KAPPA": "dark_matter",
+        "NFW": "dark_matter",
     }
     components: dict[str, dict[str, float | str]] = {}
     for index, profile_type in enumerate(mass_types):

@@ -742,6 +742,35 @@ class NFWEllipseHalo(MassProfile):
     ) -> None:
         super().__init__("NFW_ELLIPSE_KAPPA", prior=prior, value=value)
 
+
+class NFWHalo(MassProfile):
+    """Standard spherical NFW halo using JAX-Lensing-Profiles.
+
+    Parameters
+    ----------
+    kappa_s
+        Dimensionless NFW convergence normalization.
+    R_s
+        Angular NFW scale radius, in the lens-plane coordinate unit.
+    center_x, center_y
+        Halo centre in lens-plane coordinates.
+    """
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+    ) -> None:
+        super().__init__("NFW", prior=prior, value=value)
+
+
+# Alias NFW to NFWHalo for convenience
+NFW = NFWHalo
+
 class LightProfile(Profile):
     """Light profile, or a component-agnostic multi-profile collection."""
 

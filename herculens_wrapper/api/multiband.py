@@ -16,7 +16,7 @@ from ..priors import is_sampled_prior
 from .collections import LensProfileCollection
 from .data import SingleBandData
 from ._logging import RunContext, format_configuration, logged_model_run, logged_result_output
-from .models import ModelDefinition, count_physical_parameters
+from .models import ModelDefinition, count_physical_parameters, is_pixelated_latent_site
 from .samplers import SamplerConfig, _validate_hmc_batch_size
 
 
@@ -390,7 +390,7 @@ class MultiBandFitResult:
             with (directory / "kwargs_lens_shared.json").open("w") as stream:
                 json.dump({"kwargs_lens": shared_lens}, stream, indent=2, default=json_serializer)
             band_pixels = metrics.get("bands", {}).get(name, {}).get("n_data_pixels", int(np.sum(valid)))
-            n_physical = metrics.get("n_physical_parameters", 0)
+            n_physical = self._model._count_band_physical_parameters(band["site_prefix"], self.parameters)
             band_dof = max(band_pixels - n_physical, 1)
             band_reduced_chi2 = float(chi2 / band_dof)
             try:
@@ -416,6 +416,8 @@ class MultiBandFitResult:
                                  "fit_mask_bool": valid,
                                  "pixel_scale": self._model.observations[name].pixel_scale,
                                  "reduced_chi2": band_reduced_chi2,
+                                 "dof": band_dof,
+                                 "chi2": chi2,
                                  "model_total": components["total"] if components is not None else None,
                                  "model_lensed_source": components["no_lens_light"] if components is not None else None,
                                  "model_lens_light": components["lens_light"] if components is not None else None})
@@ -1254,6 +1256,20 @@ class MultiBandModel:
         )
         return self.result
 
+    def _count_band_physical_parameters(self, site_prefix: str, parameters: Mapping[str, Any]) -> int:
+        band_specific = 0
+        shared = 0
+        for name, value in parameters.items():
+            if is_pixelated_latent_site(name):
+                continue
+            if "/" in name:
+                if name.startswith(f"{site_prefix}/"):
+                    band_specific += int(np.asarray(value).size)
+            else:
+                shared += int(np.asarray(value).size)
+        num_bands = max(len(self.bands), 1)
+        return band_specific + int(round(shared / num_bands))
+
     def _save_hmc_batch_diagnostics(
         self,
         samples: Mapping[str, Any],
@@ -1300,14 +1316,36 @@ class MultiBandModel:
                 pixelated_index = _pixelated_source_kwargs_index(kwargs["kwargs_source"])
                 if pixelated_index is not None:
                     kwargs["kwargs_source"][pixelated_index]["pixels"] = source
+            model_total = components_by_band[name]["total"]
+            observation = self.observations[name]
+            rms_site = f"{band['site_prefix']}/background_rms"
+            background_rms = (
+                float(np.asarray(medians[rms_site]).reshape(-1)[0])
+                if observation.samples_background_rms and rms_site in medians
+                else None
+            )
+            output_noise = observation.noise_from_model(model_total, background_rms=background_rms)
+            residual = (model_total - band["image_data"]) / output_noise
+            valid = np.isfinite(residual)
+            if band.get("fit_mask_bool") is not None:
+                valid &= np.asarray(band["fit_mask_bool"], dtype=bool)
+            chi2 = float(np.sum(residual[valid] ** 2))
+            band_pixels = int(np.sum(valid))
+            n_physical = self._count_band_physical_parameters(band["site_prefix"], medians)
+            band_dof = max(band_pixels - n_physical, 1)
+            band_reduced_chi2 = float(chi2 / band_dof)
             plot_rows.append({
                 "name": name, "lens_image": band["lens_image"],
                 "kwargs_result": kwargs,
-                "image_data": band["image_data"], "noise_map": band["noise_map"],
-                "pixel_scale": self.observations[name].pixel_scale,
-                "model_total": components_by_band[name]["total"],
+                "image_data": band["image_data"], "noise_map": output_noise,
+                "fit_mask_bool": band.get("fit_mask_bool"),
+                "pixel_scale": observation.pixel_scale,
+                "model_total": model_total,
                 "model_lensed_source": components_by_band[name]["no_lens_light"],
                 "model_lens_light": components_by_band[name]["lens_light"],
+                "chi2": chi2,
+                "dof": band_dof,
+                "reduced_chi2": band_reduced_chi2,
             })
             self._plot_hmc_chain_comparison(
                 samples, band, directory, chain_components,
@@ -1477,15 +1515,36 @@ class MultiBandModel:
                 pixelated_index = _pixelated_source_kwargs_index(kwargs["kwargs_source"])
                 if pixelated_index is not None:
                     kwargs["kwargs_source"][pixelated_index]["pixels"] = components["source_plane"]
+            model_total = components["total"]
+            observation = self.observations[band["name"]]
+            rms_site = f"{band['site_prefix']}/background_rms"
+            background_rms = (
+                float(np.asarray(chain_parameters[rms_site]).reshape(-1)[0])
+                if observation.samples_background_rms and rms_site in chain_parameters
+                else None
+            )
+            output_noise = observation.noise_from_model(model_total, background_rms=background_rms)
+            residual = (model_total - band["image_data"]) / output_noise
+            valid = np.isfinite(residual)
+            if band.get("fit_mask_bool") is not None:
+                valid &= np.asarray(band["fit_mask_bool"], dtype=bool)
+            chi2 = float(np.sum(residual[valid] ** 2))
+            band_pixels = int(np.sum(valid))
+            n_physical = self._count_band_physical_parameters(band["site_prefix"], chain_parameters)
+            band_dof = max(band_pixels - n_physical, 1)
+            band_reduced_chi2 = float(chi2 / band_dof)
             chain_rows.append({
                 "name": f"chain {chain}", "lens_image": band["lens_image"],
                 "kwargs_result": kwargs, "image_data": band["image_data"],
-                "noise_map": band["noise_map"],
-                "fit_mask_bool": band["fit_mask_bool"],
-                "pixel_scale": self.observations[band["name"]].pixel_scale,
-                "model_total": components["total"],
+                "noise_map": output_noise,
+                "fit_mask_bool": band.get("fit_mask_bool"),
+                "pixel_scale": observation.pixel_scale,
+                "model_total": model_total,
                 "model_lensed_source": components["no_lens_light"],
                 "model_lens_light": components["lens_light"],
+                "chi2": chi2,
+                "dof": band_dof,
+                "reduced_chi2": band_reduced_chi2,
             })
         plot_multiband_composite(
             chain_rows, str(directory), residual_vis_max=residual_vis_max,

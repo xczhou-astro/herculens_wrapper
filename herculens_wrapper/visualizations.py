@@ -449,7 +449,7 @@ def plot_image_plane(
     residuals = (model_composite - image_data) / noise_map
     chi2 = float(np.nansum(residuals ** 2))
     if reduced_chi2 is None:
-        n_pixels = int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(residuals)))
+        n_pixels = int(np.sum(np.isfinite(residuals)))
         reduced_chi2 = float(chi2 / max(n_pixels, 1))
 
 
@@ -1233,9 +1233,10 @@ def plot_multiband_composite(
             if band_dof is not None:
                 band_red_chi2 = float(chi2 / max(int(band_dof), 1))
             else:
-                n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
-                    int(np.sum(image_mask)) if image_mask is not None else int(np.sum(np.isfinite(residual)))
-                )
+                if fit_mask_bool is not None:
+                    n_pix = int(np.sum(np.asarray(fit_mask_bool, dtype=bool) & np.isfinite(residual)))
+                else:
+                    n_pix = int(np.sum(np.isfinite(residual)))
                 band_num_params = band.get('num_params') or band.get('n_physical_parameters') or band.get('n_free_parameters')
                 if band_num_params is not None:
                     band_red_chi2 = float(chi2 / max(n_pix - int(band_num_params), 1))
@@ -1611,9 +1612,10 @@ def plot_lens_light_subtracted_image(
     displayed_data = _hide_excluded_pixels(image_data, fit_mask_bool)
     chi2_subtracted = float(np.nansum((subtracted / noise_map) ** 2)) if noise_map is not None else None
     if reduced_chi2 is None and chi2_subtracted is not None:
-        n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
-            int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(subtracted)))
-        )
+        if fit_mask_bool is not None:
+            n_pix = int(np.sum(np.asarray(fit_mask_bool, dtype=bool) & np.isfinite(subtracted)))
+        else:
+            n_pix = int(np.sum(np.isfinite(subtracted)))
         reduced_chi2_sub = float(chi2_subtracted / max(n_pix, 1))
     else:
         reduced_chi2_sub = reduced_chi2
@@ -1760,9 +1762,10 @@ def plot_ring_model_comparison(
     image_minus_lens = _hide_excluded_pixels(image_minus_lens, fit_mask_bool)
     chi2 = float(np.nansum(residual ** 2))
     if reduced_chi2 is None:
-        n_pix = int(np.sum(fit_mask_bool)) if fit_mask_bool is not None else (
-            int(np.sum(mask)) if mask is not None else int(np.sum(np.isfinite(residual)))
-        )
+        if fit_mask_bool is not None:
+            n_pix = int(np.sum(np.asarray(fit_mask_bool, dtype=bool) & np.isfinite(residual)))
+        else:
+            n_pix = int(np.sum(np.isfinite(residual)))
         reduced_chi2 = float(chi2 / max(n_pix, 1))
 
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
@@ -3463,8 +3466,7 @@ def recreate_best_fit_plots_for_run(run_dir):
     if chi2 is None:
         chi2 = float(np.sum(((best_fit_model - image_data) / noise_map) ** 2))
     if reduced_chi2 is None and chi2 is not None:
-        n_data = int(np.sum(source_arc_mask)) if source_arc_mask is not None else int(image_data.size)
-        dof = max(n_data, 1)
+        dof = max(int(image_data.size), 1)
         reduced_chi2 = float(chi2 / dof)
         
     # Recreate the two plots

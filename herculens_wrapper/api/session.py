@@ -1355,6 +1355,7 @@ class SingleBandModel:
             "STELLAR_MGE": "stellar",
             "GNFW_MGE": "dark_matter",
             "NFW_ELLIPSE_KAPPA": "dark_matter",
+            "NFW": "dark_matter",
         }
         for index, profile_type in enumerate(component_types):
             label = labels.get(profile_type)

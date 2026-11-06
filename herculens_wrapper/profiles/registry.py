@@ -1,7 +1,7 @@
 """Register wrapper-local profile names with the installed Herculens package."""
 
 from .multipole import ELLMPPLOffset, EPLM1M3M4, EPLM3M4, MPPL, MPPLOffset
-from .composite import GNFWMGE, InclinedExponentialDiskMGE, MassMGE, NFWEllipseKappa, StellarMGE
+from .composite import GNFWMGE, InclinedExponentialDiskMGE, MassMGE, NFWEllipseKappa, NFWSpherical, StellarMGE
 
 
 def register_mass_profiles():
@@ -36,17 +36,16 @@ def register_mass_profiles():
         "STELLAR_MGE": StellarMGE,
         "GNFW_MGE": GNFWMGE,
         "NFW_ELLIPSE_KAPPA": NFWEllipseKappa,
+        "NFW": NFWSpherical,
         "INCLINED_EXPONENTIAL_DISK": InclinedExponentialDiskMGE,
     }.items():
         existing = profile_mapping.STRING_MAPPING.get(name)
-        # Importing jax_lensing_profiles registers its native elliptical NFW
-        # under this same name. It is the backend of our adapter, so allow
+        # Importing jax_lensing_profiles registers its native NFW / elliptical NFW
+        # under these same names. It is the backend of our adapter, so allow
         # this specific replacement regardless of which package loads first.
         native_nfw_backend = (
-            name == "NFW_ELLIPSE_KAPPA"
-            and getattr(existing, "__module__", None)
-            == "jax_lensing_profiles.MassModel.Profiles.NFW_ellipse_kappa"
-            and getattr(existing, "__name__", None) == "NFWEllipseKappa"
+            name in {"NFW_ELLIPSE_KAPPA", "NFW"}
+            and getattr(existing, "__module__", "").startswith("jax_lensing_profiles.MassModel.Profiles")
         )
         if existing is not None and existing is not profile and not native_nfw_backend:
             raise RuntimeError(f"Herculens already registered a different profile as {name!r}.")

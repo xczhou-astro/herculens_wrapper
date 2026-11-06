@@ -211,6 +211,47 @@ class NFWEllipseKappa:
         )
 
 
+def _nfw_spherical_backend():
+    """Load the standard spherical NFW implementation only when it is requested."""
+    try:
+        from jax_lensing_profiles.MassModel.Profiles.NFW import NFW as _NFW
+    except ImportError as error:  # pragma: no cover - environment-dependent
+        raise ImportError(
+            "NFW requires the 'jax-lensing-profiles' package."
+        ) from error
+    return _NFW
+
+
+class NFWSpherical:
+    """Standard spherical/circular NFW profile from JAX-Lensing-Profiles."""
+
+    param_names = ["kappa_s", "R_s", "center_x", "center_y"]
+    lower_limit_default = {name: -1e6 for name in param_names}
+    upper_limit_default = {name: 1e6 for name in param_names}
+    fixed_default = {name: False for name in param_names}
+
+    def __init__(self) -> None:
+        self._nfw = _nfw_spherical_backend()()
+
+    def function(self, x, y, kappa_s, R_s, center_x=0.0, center_y=0.0):
+        return self._nfw.function(
+            x, y, kappa_s=kappa_s, R_s=R_s,
+            center_x=center_x, center_y=center_y,
+        )
+
+    def derivatives(self, x, y, kappa_s, R_s, center_x=0.0, center_y=0.0):
+        return self._nfw.derivatives(
+            x, y, kappa_s=kappa_s, R_s=R_s,
+            center_x=center_x, center_y=center_y,
+        )
+
+    def hessian(self, x, y, kappa_s, R_s, center_x=0.0, center_y=0.0):
+        return self._nfw.hessian(
+            x, y, kappa_s=kappa_s, R_s=R_s,
+            center_x=center_x, center_y=center_y,
+        )
+
+
 class InclinedExponentialDiskMGE:
     """Projected exponential disk represented by a fixed-size MGE basis.
 
