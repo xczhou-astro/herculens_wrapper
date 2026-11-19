@@ -1961,7 +1961,7 @@ class SingleBandResultsCombination:
                 "lens_image": model.lens_image,
                 "kwargs_result": result._kwargs_result(),
                 "image_data": model.data.likelihood_image,
-                "noise_map": model.data.likelihood_noise,
+                "noise_map": result._effective_noise_map(),
                 "fit_mask_bool": model.data.likelihood_mask,
                 "pixel_scale": model.data.pixel_scale,
                 "reduced_chi2": summary_metrics["REDUCED_CHI2_MEDIAN"],
@@ -1978,6 +1978,8 @@ class SingleBandResultsCombination:
                 band_entry["model_total"] = comp.get("total")
                 band_entry["model_lens_light"] = comp.get("lens_light")
                 band_entry["model_lensed_source"] = comp.get("no_lens_light")
+            else:
+                band_entry["model_total"] = model.model_image(result.parameters)
             bands.append(band_entry)
         json_path = directory / "comparison.json"
         with json_path.open("w") as stream:
