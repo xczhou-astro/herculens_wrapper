@@ -3085,6 +3085,69 @@ class MPLensImageExtension(MPLensImage):
             x_grid_img, y_grid_img, kwargs_lens_light, k=k,
         )
 
+    @property
+    def source_arc_mask(self):
+        if hasattr(self, "source_arc_masks") and self.source_arc_masks is not None:
+            return self.source_arc_masks[-1]
+        return None
+
+    @property
+    def _source_arc_mask_outline_flat(self):
+        if hasattr(self, "_source_arc_masks_flat_bool") and self._source_arc_masks_flat_bool is not None:
+            return self._source_arc_masks_flat_bool[-1]
+        return None
+
+    def get_source_coordinates(
+        self,
+        *args,
+        force=False,
+        npix_src=100,
+        source_grid_scale=1.0,
+        k_lens=None,
+        **kwargs,
+    ):
+        if len(args) == 2:
+            eta_flat = args[0]
+            kwargs_lens = args[1]
+        elif len(args) == 1:
+            eta_flat = self.eta_flat
+            kwargs_lens = args[0]
+        else:
+            eta_flat = kwargs.get("eta_flat", self.eta_flat)
+            kwargs_lens = kwargs.get("kwargs_lens", kwargs.get("kwargs_mass"))
+
+        if isinstance(source_grid_scale, (list, tuple)):
+            scale = float(source_grid_scale[-1])
+        else:
+            scale = float(source_grid_scale)
+
+        km, _ = self._regroup_kwargs(kwargs_lens=kwargs_lens)
+        ra_grid_img, dec_grid_img = self.ImageNumerics.coordinates_evaluate
+        ra_grid_planes, dec_grid_planes = self.MPMassModel.ray_shooting(
+            ra_grid_img,
+            dec_grid_img,
+            eta_flat,
+            km,
+            k=k_lens,
+        )
+        x_adapt, y_adapt, extent_adapt = self.adapt_source_coordinates(
+            ra_grid_planes,
+            dec_grid_planes,
+            force=force,
+            npix_src=npix_src,
+            source_grid_scale=scale,
+        )
+        x_src = x_adapt[-1] if x_adapt is not None and len(x_adapt) > 0 else None
+        y_src = y_adapt[-1] if y_adapt is not None and len(y_adapt) > 0 else None
+        extent_src = extent_adapt[-1] if extent_adapt is not None and len(extent_adapt) > 0 else None
+
+        if x_src is None or y_src is None or extent_src is None:
+            if self.SourceModel is not None and getattr(self.SourceModel, "pixel_grid", None) is not None:
+                x_src, y_src = self.SourceModel.pixel_grid.pixel_coordinates
+                extent_src = self.SourceModel.pixel_grid.extent
+
+        return x_src, y_src, extent_src
+
 
 
 def get_best_pixel_size(lens_image, herc_dict, source_grid_scale, return_full=False):
@@ -3203,7 +3266,59 @@ def create_lens_image(
         eta_flat = mass_model.build_eta_matrix(cosmology, redshifts)
         mass_model.eta_flat = eta_flat
 
-        light_model = FixedMPLightModel(mp_light_model_list)
+        light_model_instances = []
+        n_planes = len(mp_light_model_list)
+        for idx_plane, plane_types in enumerate(mp_light_model_list):
+            if plane_types is None or len(plane_types) == 0:
+                light_model_instances.append(None)
+            elif idx_plane == n_planes - 1:
+                src_types = plane_types
+                pixelated_source_index = _single_pixelated_index(src_types, 'source-light')
+                if pixelated_source_index is not None:
+                    kwargs_pixelated = param_list['source_light_params_list'][pixelated_source_index]
+                    source_kwargs_pixelated = kwargs_pixelated.get('pixel_grid', kwargs_pixelated)
+                    pixel_adaptive_grid = source_kwargs_pixelated.get('pixel_adaptive_grid', False)
+                    pixel_grid_shape = int(source_kwargs_pixelated.get('pixel_grid_shape', 100))
+                    pixel_interpol = source_kwargs_pixelated.get('pixel_interpol', 'fast_bilinear')
+                    if pixel_adaptive_grid:
+                        sm = LightModel(
+                            src_types,
+                            pixel_adaptive_grid=True,
+                            pixel_interpol=pixel_interpol,
+                            kwargs_pixelated={'num_pixels': pixel_grid_shape}
+                        )
+                    else:
+                        native_grid_settings = {
+                            'num_pixels': pixel_grid_shape,
+                            'pixel_scale_factor': source_kwargs_pixelated.get('pixel_scale_factor', 0.5),
+                            'grid_center': source_kwargs_pixelated.get('grid_center'),
+                            'grid_shape': source_kwargs_pixelated.get('grid_shape'),
+                        }
+                        native_grid_settings = {k: v for k, v in native_grid_settings.items() if v is not None}
+                        sm = LightModel(
+                            src_types,
+                            pixel_interpol=pixel_interpol,
+                            kwargs_pixelated=native_grid_settings,
+                        )
+                else:
+                    sm = LightModel(src_types)
+                light_model_instances.append(sm)
+            else:
+                lens_types = plane_types
+                pixelated_lens_index = _single_pixelated_index(lens_types, 'lens-light')
+                if pixelated_lens_index is not None:
+                    pixelated_lens_params = param_list['lens_light_params_list'][pixelated_lens_index]
+                    lens_grid_settings = dict(pixelated_lens_params.get('pixel_grid', {}))
+                    from herculens.LightModel.Profiles.pixelated import Pixelated
+                    interpolation = lens_grid_settings.pop('pixel_interpol', 'fast_bilinear')
+                    l_profiles = list(lens_types)
+                    l_profiles[pixelated_lens_index] = Pixelated(interpolation_type=interpolation)
+                    lm = LightModel(l_profiles, kwargs_pixelated=lens_grid_settings)
+                else:
+                    lm = LightModel(lens_types)
+                light_model_instances.append(lm)
+
+        light_model = FixedMPLightModel(light_model_instances)
 
         n_mass = len(mp_mass_model_list)
         if isinstance(source_arc_mask, (list, tuple)):

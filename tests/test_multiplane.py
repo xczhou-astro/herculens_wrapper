@@ -6,7 +6,7 @@ import pytest
 
 from herculens_wrapper.api import (
     SingleBandData, SingleBandModel, LensProfileCollection,
-    EPL, Shear, NFWHalo, SIS, Sersic, MassProfile, LightProfile,
+    EPL, Shear, NFWHalo, SIS, Sersic, PixelatedSource, MassProfile, LightProfile,
     SamplerConfig,
 )
 
@@ -180,3 +180,34 @@ def test_user_scenario_two_nfws_and_fit():
     assert fit_res is not None
     assert len(fit_res.loss_history) == 10
     assert np.all(np.isfinite(fit_res.loss_history))
+
+
+def test_multiplane_pixelated_source_and_plot():
+    """Verify multi-plane model with PixelatedSource, get_source_coordinates, and plot_initial_source."""
+    data = _make_mock_data(npix=36, pix_scale=0.08)
+    profiles = LensProfileCollection(
+        lens_mass=[
+            EPL(theta_E=1.1, gamma=2.0, e1=0.05, e2=0.0, center_x=0.0, center_y=0.0, redshift=1.53),
+            NFWHalo(kappa_s=0.1, R_s=12.0, center_x=15.0, center_y=0.0, redshift=1.69),
+            Shear(gamma1=0.03, gamma2=0.0, redshift=1.53),
+        ],
+        source_light=[
+            PixelatedSource(pixel_grid={"pixel_grid_shape": 30, "pixel_adaptive_grid": True}),
+        ],
+    )
+    model = SingleBandModel(observation=data, profiles=profiles, z_lens=1.53, z_source=2.5)
+    init = model.initialize(seed=42)
+    assert init is not None
+    assert model.lens_image.SourceModel.has_pixels
+
+    # Test get_source_coordinates on multi-plane lens_image
+    kwargs = model.prob_model.params2kwargs(init)
+    x_src, y_src, extent = model.lens_image.get_source_coordinates(kwargs["kwargs_lens"])
+    assert x_src is not None and y_src is not None and extent is not None
+    assert len(x_src) == 30
+    assert len(y_src) == 30
+    assert len(extent) == 4
+
+    # Test plot_initial_source
+    fig_path = model.plot_initial_source()
+    assert fig_path.is_file()

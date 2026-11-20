@@ -788,8 +788,16 @@ def plot_source_plane(
     caustics = []
     if plot_caustics:
         try:
+            caustic_kwargs = {}
+            kwargs_lens_caustics = kwargs_result.get('kwargs_lens')
+            if hasattr(lens_image, 'eta_flat'):
+                caustic_kwargs['eta_flat'] = lens_image.eta_flat
+                caustic_kwargs['k_plane'] = -1
+                if hasattr(lens_image, '_regroup_kwargs'):
+                    km, _ = lens_image._regroup_kwargs(kwargs_lens=kwargs_lens_caustics)
+                    kwargs_lens_caustics = km
             _, caustics = model_util.critical_lines_caustics(
-                lens_image, kwargs_result['kwargs_lens'], supersampling=5,
+                lens_image, kwargs_lens_caustics, supersampling=5, **caustic_kwargs,
             )
             caustics = _filter_caustics(caustics)
         except Exception as e:
