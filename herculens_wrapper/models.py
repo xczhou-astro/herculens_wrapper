@@ -37,8 +37,11 @@ from herculens.Inference.ProbModel.numpyro import NumpyroModel
 from herculens.Instrument.noise import Noise
 from herculens.Instrument.psf import PSF
 from herculens.LensImage.lens_image import LensImage
+from herculens.LensImage.lens_image_multiplane import MPLensImage
 from herculens.LightModel.light_model import LightModel
+from herculens.LightModel.light_model_multiplane import MPLightModel
 from herculens.MassModel.mass_model import MassModel
+from herculens.MassModel.mass_model_multiplane import MPMassModel
 from herculens.PointSourceModel.point_source_model import PointSourceModel
 
 from herculens_wrapper.profiles import register_mass_profiles
@@ -2867,6 +2870,222 @@ class LensImageExtension(LensImage):
         )
 
 
+class FixedMPLightModel(MPLightModel):
+    def surface_brightness(self, x, y, kwargs_list, pixels_x_coord=None, pixels_y_coord=None, k=None):
+        k = self.k_expand(k)
+        flux = []
+        for j in range(self.number_light_planes):
+            if self.has_light[j]:
+                px = pixels_x_coord[j] if pixels_x_coord is not None else None
+                py = pixels_y_coord[j] if pixels_y_coord is not None else None
+                kw = kwargs_list[j] if kwargs_list is not None else None
+                flux.append(
+                    self.light_models[j].surface_brightness(
+                        x[j], y[j], kw,
+                        k=k[j],
+                        pixels_x_coord=px,
+                        pixels_y_coord=py,
+                    )
+                )
+            else:
+                flux.append(jnp.zeros_like(x[j]))
+        return jnp.stack(flux)
+
+
+class MPMassModelExtension(MPMassModel):
+    def __init__(self, *args, eta_flat=None, plane_mass_indices=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.eta_flat = eta_flat
+        self.plane_mass_indices = tuple(tuple(idxs) for idxs in (plane_mass_indices or []))
+
+    def ray_shooting(self, x, y, eta_flat=None, kwargs=None, N=None, k=None):
+        if eta_flat is None:
+            eta_flat = self.eta_flat
+        if kwargs is not None and len(kwargs) > 0 and isinstance(kwargs[0], dict) and self.plane_mass_indices:
+            kwargs = [[kwargs[i] for i in idxs] for idxs in self.plane_mass_indices]
+        orig_shape = x.shape
+        if x.ndim > 1:
+            x_flat = x.ravel()
+            y_flat = y.ravel()
+            xs, ys = super().ray_shooting(x_flat, y_flat, eta_flat, kwargs, N=N, k=k)
+            return xs.reshape((xs.shape[0],) + orig_shape), ys.reshape((ys.shape[0],) + orig_shape)
+        return super().ray_shooting(x, y, eta_flat, kwargs, N=N, k=k)
+
+    def kappa(self, x, y, kwargs=None, eta_flat=None, k=None, **other_kwargs):
+        if eta_flat is None:
+            eta_flat = self.eta_flat
+        if kwargs is not None and len(kwargs) > 0 and isinstance(kwargs[0], dict) and self.plane_mass_indices:
+            kwargs = [[kwargs[i] for i in idxs] for idxs in self.plane_mass_indices]
+        orig_shape = x.shape
+        if x.ndim > 1:
+            x_flat = x.ravel()
+            y_flat = y.ravel()
+            kappas = super().kappa(x_flat, y_flat, eta_flat, kwargs, **other_kwargs)
+            return kappas.reshape((kappas.shape[0],) + orig_shape)
+        return super().kappa(x, y, eta_flat, kwargs, **other_kwargs)
+
+
+class MPLensImageExtension(MPLensImage):
+    def __init__(
+        self,
+        grid_class,
+        psf_class,
+        noise_class,
+        mass_model_class,
+        light_model_class,
+        eta_flat=None,
+        plane_mass_indices=None,
+        plane_lens_light_indices=None,
+        plane_source_light_indices=None,
+        source_arc_masks=None,
+        source_grid_scale=None,
+        conjugate_points=None,
+        kwargs_numerics=None,
+        point_source_model_class=None,
+        kwargs_solver_point_source=None,
+        primary_lens_plane_index=0,
+    ):
+        super().__init__(
+            grid_class=grid_class,
+            psf_class=psf_class,
+            noise_class=noise_class,
+            mass_model_class=mass_model_class,
+            light_model_class=light_model_class,
+            source_arc_masks=source_arc_masks,
+            source_grid_scale=source_grid_scale,
+            conjugate_points=conjugate_points,
+            kwargs_numerics=kwargs_numerics,
+            point_source_model_class=point_source_model_class,
+            kwargs_solver_point_source=kwargs_solver_point_source,
+        )
+        self.eta_flat = eta_flat
+        self.plane_mass_indices = tuple(tuple(idxs) for idxs in (plane_mass_indices or []))
+        self.plane_lens_light_indices = tuple(tuple(idxs) for idxs in (plane_lens_light_indices or []))
+        self.plane_source_light_indices = tuple(plane_source_light_indices or [])
+        self._primary_lens_plane_index = primary_lens_plane_index
+        self._src_adaptive_grid = self.MPLightModel.pixel_is_adaptive
+        self._rtu_grid_source = False
+
+    @property
+    def MassModel(self):
+        return self.MPMassModel
+
+    @property
+    def LensLightModel(self):
+        if self._primary_lens_plane_index < len(self.MPLightModel.light_models):
+            model = self.MPLightModel.light_models[self._primary_lens_plane_index]
+            if model is not None:
+                return model
+        for model in self.MPLightModel.light_models[:-1]:
+            if model is not None:
+                return model
+        return None
+
+    @property
+    def SourceModel(self):
+        return self.MPLightModel.light_models[-1]
+
+    def _regroup_kwargs(self, kwargs_lens=None, kwargs_source=None, kwargs_lens_light=None):
+        kwargs_mass = None
+        if kwargs_lens is not None:
+            kwargs_mass = [[kwargs_lens[i] for i in idxs] for idxs in self.plane_mass_indices]
+        kwargs_light = None
+        if kwargs_source is not None or kwargs_lens_light is not None:
+            kwargs_light = []
+            for j in range(len(self.plane_lens_light_indices)):
+                idxs = self.plane_lens_light_indices[j]
+                if idxs and kwargs_lens_light:
+                    kwargs_light.append([kwargs_lens_light[i] for i in idxs])
+                else:
+                    kwargs_light.append(None)
+            kwargs_light.append(list(kwargs_source) if kwargs_source else None)
+        return kwargs_mass, kwargs_light
+
+    def model(
+        self,
+        eta_flat=None,
+        kwargs_mass=None,
+        kwargs_light=None,
+        kwargs_lens=None,
+        kwargs_source=None,
+        kwargs_lens_light=None,
+        kwargs_point_source=None,
+        supersampled=False,
+        unconvolved=False,
+        k_mass=None,
+        k_light=None,
+        k_planes=None,
+        apply_mask=True,
+        return_pixel_scale=False,
+        point_source_add=False,
+        source_add=True,
+        lens_light_add=True,
+    ):
+        if eta_flat is None:
+            eta_flat = self.eta_flat
+        if kwargs_mass is None or kwargs_light is None:
+            km, kl = self._regroup_kwargs(
+                kwargs_lens=kwargs_lens,
+                kwargs_source=kwargs_source,
+                kwargs_lens_light=kwargs_lens_light,
+            )
+            if kwargs_mass is None:
+                kwargs_mass = km
+            if kwargs_light is None:
+                kwargs_light = kl
+        if kwargs_point_source is not None:
+            point_source_add = True
+        return super().model(
+            eta_flat=eta_flat,
+            kwargs_mass=kwargs_mass,
+            kwargs_light=kwargs_light,
+            supersampled=supersampled,
+            unconvolved=unconvolved,
+            k_mass=k_mass,
+            k_light=k_light,
+            k_planes=k_planes,
+            apply_mask=apply_mask,
+            return_pixel_scale=return_pixel_scale,
+            point_source_add=point_source_add,
+            kwargs_point_source=kwargs_point_source,
+        )
+
+    def source_surface_brightness(
+        self,
+        kwargs_source,
+        kwargs_lens=None,
+        de_lensed=False,
+        k=None,
+        k_lens=None,
+    ):
+        if self.SourceModel is None or len(self.SourceModel.profile_type_list) == 0:
+            x_grid_img, _ = self.ImageNumerics.coordinates_evaluate
+            return jnp.zeros_like(x_grid_img)
+        x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+        if de_lensed:
+            return self.SourceModel.surface_brightness(x_grid_img, y_grid_img, kwargs_source, k=k)
+        km, _ = self._regroup_kwargs(kwargs_lens=kwargs_lens)
+        ra_grid_planes, dec_grid_planes = self.MPMassModel.ray_shooting(
+            x_grid_img, y_grid_img, self.eta_flat, km, k=k_lens,
+        )
+        x_src, y_src = ra_grid_planes[-1], dec_grid_planes[-1]
+        pixels_x_coord, pixels_y_coord, _ = self.adapt_source_coordinates(ra_grid_planes, dec_grid_planes)
+        return self.SourceModel.surface_brightness(
+            x_src, y_src, kwargs_source, k=k,
+            pixels_x_coord=pixels_x_coord[-1] if pixels_x_coord else None,
+            pixels_y_coord=pixels_y_coord[-1] if pixels_y_coord else None,
+        )
+
+    def lens_surface_brightness(self, kwargs_lens_light, k=None):
+        if self.LensLightModel is None or len(self.LensLightModel.profile_type_list) == 0:
+            x_grid_img, _ = self.ImageNumerics.coordinates_evaluate
+            return jnp.zeros_like(x_grid_img)
+        x_grid_img, y_grid_img = self.ImageNumerics.coordinates_evaluate
+        return self.LensLightModel.surface_brightness(
+            x_grid_img, y_grid_img, kwargs_lens_light, k=k,
+        )
+
+
 
 def get_best_pixel_size(lens_image, herc_dict, source_grid_scale, return_full=False):
     from sklearn.neighbors import NearestNeighbors
@@ -2924,6 +3143,7 @@ def create_lens_image(
     conjugate_points=None,
     exposure_time=None,
     background_rms=None,
+    multiplane_info=None,
 ):
     num_pixels = image_data.shape[0]
 
@@ -2967,6 +3187,54 @@ def create_lens_image(
         verbose=background_rms is not None,
     )
     pixel_grid, ps_grid = create_pixel_grids(num_pixels, pixel_scale)
+
+    if multiplane_info is not None:
+        mp_mass_model_list = multiplane_info["mp_mass_model_list"]
+        mp_light_model_list = multiplane_info["mp_light_model_list"]
+        scaling_conv = multiplane_info.get("deflection_scaling_convention", "standard")
+        cosmology = multiplane_info["cosmology"]
+        redshifts = multiplane_info["redshifts"]
+
+        mass_model = MPMassModelExtension(
+            mp_mass_model_list,
+            deflection_scaling_convention=scaling_conv,
+            plane_mass_indices=multiplane_info["plane_mass_indices"],
+        )
+        eta_flat = mass_model.build_eta_matrix(cosmology, redshifts)
+        mass_model.eta_flat = eta_flat
+
+        light_model = FixedMPLightModel(mp_light_model_list)
+
+        n_mass = len(mp_mass_model_list)
+        if isinstance(source_arc_mask, (list, tuple)):
+            arc_masks = list(source_arc_mask)
+        else:
+            arc_masks = [None] * n_mass + [source_arc_mask]
+
+        if isinstance(source_grid_scale, (list, tuple)):
+            grid_scales = list(source_grid_scale)
+        else:
+            grid_scales = [1.0] * n_mass + [source_grid_scale]
+
+        if kwargs_numerics is None:
+            kwargs_numerics = {'supersampling_factor': 1}
+
+        return MPLensImageExtension(
+            grid_class=pixel_grid,
+            psf_class=psf,
+            noise_class=noise,
+            mass_model_class=mass_model,
+            light_model_class=light_model,
+            eta_flat=eta_flat,
+            plane_mass_indices=multiplane_info["plane_mass_indices"],
+            plane_lens_light_indices=multiplane_info["plane_lens_light_indices"],
+            plane_source_light_indices=multiplane_info["plane_source_light_indices"],
+            source_arc_masks=arc_masks,
+            source_grid_scale=grid_scales,
+            conjugate_points=conjugate_points,
+            kwargs_numerics=kwargs_numerics,
+            primary_lens_plane_index=multiplane_info.get("primary_lens_plane_index", 0),
+        )
 
     lens_mass_model = MassModel(type_list['lens_mass_type_list'])
     lens_light_types = type_list['lens_light_type_list']

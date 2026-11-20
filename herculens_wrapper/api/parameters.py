@@ -69,11 +69,11 @@ class Profile:
 
     _internal_names = frozenset({
         "profile_type", "_specifications", "_parameters", "_independent_by_band",
-        "_initialization", "_warm_start",
+        "_initialization", "_warm_start", "redshift",
     })
 
     def __init__(self, profile_type: str, *, prior: Mapping[str, Any] | None = None,
-                 value: Mapping[str, Any] | None = None, **initial_values: Any) -> None:
+                 value: Mapping[str, Any] | None = None, redshift: float | None = None, **initial_values: Any) -> None:
         object.__setattr__(self, "profile_type", str(profile_type))
         object.__setattr__(self, "_specifications", {})
         object.__setattr__(self, "_parameters", {})
@@ -85,6 +85,7 @@ class Profile:
         # a fixed value.  It is resolved after the enclosing model has built
         # the current NumPyro sample-site layout.
         object.__setattr__(self, "_warm_start", None)
+        object.__setattr__(self, "redshift", float(redshift) if redshift is not None else None)
         for name, item in dict(prior or {}).items(): self.parameter(name).prior = item
         for name, item in {**dict(value or {}), **initial_values}.items(): self.parameter(name).value = item
 
@@ -231,8 +232,11 @@ class Profile:
         return deepcopy(self._independent_by_band)
 
     @classmethod
-    def from_values(cls, profile_type: str, values: Mapping[str, Any]) -> "Profile":
-        return cls(profile_type, value=values)
+    def from_values(cls, profile_type: str, values: Mapping[str, Any], *, redshift: float | None = None) -> "Profile":
+        try:
+            return cls(profile_type, value=values, redshift=redshift)
+        except TypeError:
+            return cls(value=values, redshift=redshift)
 
     def _parameter_values(self, *, mode: Literal["inference", "fixed"]) -> dict[str, Any]:
         values = {}
@@ -251,7 +255,11 @@ class Profile:
         return values
 
     def freeze(self) -> "Profile":
-        return type(self)(self.profile_type, prior=self._parameter_values(mode="fixed"))
+        vals = self._parameter_values(mode="fixed")
+        try:
+            return type(self)(self.profile_type, prior=vals, redshift=self.redshift)
+        except TypeError:
+            return type(self)(prior=vals, redshift=self.redshift)
 
 
 class ProfileCollection(Sequence[Profile]):
@@ -477,6 +485,7 @@ class MassProfile(Profile):
         *,
         prior: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
         value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        redshift: float | Sequence[float] | None = None,
         **initial_values: Any,
     ):
         if isinstance(profile_type, (list, tuple)):
@@ -491,14 +500,15 @@ class MassProfile(Profile):
                 raise ValueError("The prior and value lists must match the number of mass profiles.")
             if any(not isinstance(item, Mapping) for item in priors + values):
                 raise TypeError("Each multi-profile prior/value entry must be a dictionary.")
+            redshifts = [redshift] * len(names) if not isinstance(redshift, (list, tuple)) else list(redshift)
             return ProfileCollection([
-                cls(name, prior=item_prior, value=item_value)
-                for name, item_prior, item_value in zip(names, priors, values)
+                cls(name, prior=item_prior, value=item_value, redshift=item_z)
+                for name, item_prior, item_value, item_z in zip(names, priors, values, redshifts)
             ])
         return super().__new__(cls)
 
-    def __init__(self, profile_type: str, **kwargs: Any) -> None:
-        super().__init__(str(profile_type).upper(), **kwargs)
+    def __init__(self, profile_type: str, redshift: float | None = None, **kwargs: Any) -> None:
+        super().__init__(str(profile_type).upper(), redshift=redshift, **kwargs)
 
     def __getnewargs_ex__(self):
         """Make individual mass profiles safe to pickle for spawned workers.
@@ -619,6 +629,8 @@ class StellarMassMGE(MassProfile):
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
         follow_lens_light: bool = False,
+        redshift: float | None = None,
+        **initial_values: Any,
     ) -> None:
         profiles = list(lens_light)
         if not profiles:
@@ -640,7 +652,7 @@ class StellarMassMGE(MassProfile):
         settings.setdefault("ml_gradient", 0.0)
 
         if follow_lens_light:
-            super().__init__("STELLAR_MGE", prior=settings, value=values)
+            super().__init__("STELLAR_MGE", prior=settings, value=values, redshift=redshift, **initial_values)
             return
 
         components: dict[str, list[float]] = {name: [] for name in required}
@@ -664,7 +676,7 @@ class StellarMassMGE(MassProfile):
             "light_center_x": np.asarray(components["center_x"], dtype=float),
             "light_center_y": np.asarray(components["center_y"], dtype=float),
         })
-        super().__init__("STELLAR_MGE", prior=settings, value=values)
+        super().__init__("STELLAR_MGE", prior=settings, value=values, redshift=redshift, **initial_values)
 
     @property
     def follows_lens_light(self) -> bool:
@@ -701,12 +713,14 @@ class GNFWHaloMGE(MassProfile):
         *,
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
     ) -> None:
         settings = dict(prior or {})
         values = dict(value or {})
         if "n_outer" not in settings and "n_outer" not in values:
             settings["n_outer"] = 3.0
-        super().__init__("GNFW_MGE", prior=settings, value=values)
+        super().__init__("GNFW_MGE", prior=settings, value=values, redshift=redshift, **initial_values)
 
 
 class NFWEllipseHalo(MassProfile):
@@ -736,11 +750,14 @@ class NFWEllipseHalo(MassProfile):
 
     def __init__(
         self,
+        profile_type: str | None = None,
         *,
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
     ) -> None:
-        super().__init__("NFW_ELLIPSE_KAPPA", prior=prior, value=value)
+        super().__init__(str(profile_type or "NFW_ELLIPSE_KAPPA").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
 
 
 class NFWHalo(MassProfile):
@@ -761,15 +778,91 @@ class NFWHalo(MassProfile):
 
     def __init__(
         self,
+        profile_type: str | None = None,
         *,
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
     ) -> None:
-        super().__init__("NFW", prior=prior, value=value)
+        super().__init__(str(profile_type or "NFW").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
 
 
 # Alias NFW to NFWHalo for convenience
 NFW = NFWHalo
+
+
+class EPL(MassProfile):
+    """Elliptical Power Law mass profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "EPL").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
+
+
+class SIE(MassProfile):
+    """Singular Isothermal Ellipsoid mass profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "SIE").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
+
+
+class SIS(MassProfile):
+    """Singular Isothermal Sphere mass profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "SIS").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
+
+
+class Shear(MassProfile):
+    """External shear mass profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "SHEAR").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
+
 
 class LightProfile(Profile):
     """Light profile, or a component-agnostic multi-profile collection."""
@@ -780,6 +873,7 @@ class LightProfile(Profile):
         *,
         prior: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
         value: Mapping[str, Any] | Sequence[Mapping[str, Any]] | None = None,
+        redshift: float | Sequence[float] | None = None,
         **initial_values: Any,
     ):
         # Keep the historical ``LightProfile('PIXELATED', prior=...)``
@@ -806,14 +900,15 @@ class LightProfile(Profile):
                 raise ValueError("The prior and value lists must match the number of light profiles.")
             if any(not isinstance(item, Mapping) for item in priors + values):
                 raise TypeError("Each multi-profile prior/value entry must be a dictionary.")
+            redshifts = [redshift] * len(names) if not isinstance(redshift, (list, tuple)) else list(redshift)
             return ProfileCollection([
-                cls(name, prior=item_prior, value=item_value)
-                for name, item_prior, item_value in zip(names, priors, values)
+                cls(name, prior=item_prior, value=item_value, redshift=item_z)
+                for name, item_prior, item_value, item_z in zip(names, priors, values, redshifts)
             ])
         return super().__new__(cls)
 
-    def __init__(self, profile_type: str, **kwargs: Any) -> None:
-        super().__init__(str(profile_type).upper(), **kwargs)
+    def __init__(self, profile_type: str, redshift: float | None = None, **kwargs: Any) -> None:
+        super().__init__(str(profile_type).upper(), redshift=redshift, **kwargs)
 
     def __getnewargs_ex__(self):
         """Make ordinary light-profile declarations safe for spawn/pickle."""
@@ -959,6 +1054,42 @@ class LightProfile(Profile):
         if not profiles:
             raise ValueError(f"{file_path}: kwargs_lens_light is empty.")
         return ProfileCollection(profiles)
+
+
+class Sersic(LightProfile):
+    """Sersic light profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "SERSIC_ELLIPSE").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
+
+
+class SersicEllipse(LightProfile):
+    """Sersic ellipse light profile."""
+
+    def __new__(cls, *args: Any, **kwargs: Any):
+        return object.__new__(cls)
+
+    def __init__(
+        self,
+        profile_type: str | None = None,
+        *,
+        prior: Mapping[str, Any] | None = None,
+        value: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
+        **initial_values: Any,
+    ) -> None:
+        super().__init__(str(profile_type or "SERSIC_ELLIPSE").upper(), prior=prior, value=value, redshift=redshift, **initial_values)
 
 
 class PixelatedSource(LightProfile):

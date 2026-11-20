@@ -32,7 +32,16 @@ class LensProfileCollection:
         lens_light: Profile | ProfileCollection | Sequence[Profile] | None = None,
         source_light: Profile | ProfileCollection | Sequence[Profile] | None = None,
         point_source: Profile | ProfileCollection | Sequence[Profile] | None = None,
+        perturbers: Profile | ProfileCollection | Sequence[Profile] | None = None,
     ) -> None:
+        if perturbers is not None:
+            pert_coerced = self._coerce_profiles("lens_mass", perturbers)
+            if pert_coerced is not None:
+                if lens_mass is None:
+                    lens_mass = pert_coerced
+                else:
+                    mass_coerced = self._coerce_profiles("lens_mass", lens_mass)
+                    lens_mass = ProfileCollection(list(mass_coerced) + list(pert_coerced))
         for component, profiles in zip(self._components, (lens_mass, lens_light, source_light, point_source)):
             setattr(self, component, self._coerce_profiles(component, profiles))
 
@@ -361,7 +370,8 @@ class LensProfileCollection:
                         follow_lens_light=True,
                     )
                 else:
-                    clone = profile_class(profile.profile_type, prior=prior, value=value)
+                    clone = profile_class(profile.profile_type, prior=prior, value=value, redshift=getattr(profile, "redshift", None))
+                object.__setattr__(clone, "redshift", getattr(profile, "redshift", None))
                 clone._initialization = deepcopy(profile._initialization)
                 clone._warm_start = deepcopy(profile._warm_start)
                 clones[(component, index)] = clone

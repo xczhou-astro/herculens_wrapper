@@ -110,7 +110,11 @@ class SingleBandModel:
     def __init__(self, *, profiles: LensProfileCollection, observation: SingleBandData,
                  numerics: Mapping[str, Any] | None = None,
                  source_grid_scale: float = 1.0,
-                 likelihood_scale: float = 1.0):
+                 likelihood_scale: float = 1.0,
+                 cosmology: str | Any = "Planck18",
+                 z_lens: float | None = None,
+                 z_source: float | None = None,
+                 deflection_scaling_convention: str = "standard"):
         if not isinstance(profiles, LensProfileCollection):
             raise TypeError("profiles must be a LensProfileCollection.")
         if not isinstance(observation, SingleBandData):
@@ -125,6 +129,10 @@ class SingleBandModel:
         if not np.isfinite(likelihood_scale) or likelihood_scale <= 0:
             raise ValueError("likelihood_scale must be a finite positive number.")
         self.likelihood_scale = float(likelihood_scale)
+        self.cosmology = cosmology
+        self.z_lens = float(z_lens) if z_lens is not None else None
+        self.z_source = float(z_source) if z_source is not None else None
+        self.deflection_scaling_convention = str(deflection_scaling_convention).lower()
         self.result: FitResult | None = None
         self.initial_parameters: Mapping[str, Any] | None = None
         self.initialization_path: Path | None = None
@@ -511,6 +519,109 @@ class SingleBandModel:
             if is_sampled_prior(prior)
             and not (isinstance(prior, (list, tuple)) and len(prior) == 4 and prior[0] == "correlated")
         )
+    def _get_multiplane_info(self) -> dict[str, Any] | None:
+        mass_profiles = list(self.profiles.lens_mass or [])
+        lens_light_profiles = list(self.profiles.lens_light or [])
+        source_light_profiles = list(self.profiles.source_light or [])
+
+        # Check redshifts
+        mass_z_list = [getattr(p, "redshift", None) for p in mass_profiles]
+        lens_light_z_list = [getattr(p, "redshift", None) for p in lens_light_profiles]
+        source_z_list = [getattr(p, "redshift", None) for p in source_light_profiles]
+
+        explicit_mass_z = {z for z in mass_z_list if z is not None}
+        has_multi_mass_z = len(explicit_mass_z) > 1
+
+        # If only one or zero explicit mass redshift, check if perturbers or explicit redshifts require multiplane
+        if not has_multi_mass_z and len(explicit_mass_z) <= 1:
+            return None
+
+        # Resolve cosmology
+        cosmo = self.cosmology
+        if isinstance(cosmo, str):
+            import astropy.cosmology
+            try:
+                cosmo = getattr(astropy.cosmology, cosmo)
+            except AttributeError as e:
+                raise ValueError(f"Unknown cosmology {cosmo!r}.") from e
+
+        # Resolve z_source
+        source_z = self.z_source
+        if source_z is None:
+            source_zs = [z for z in source_z_list if z is not None]
+            if source_zs:
+                source_z = max(source_zs)
+            else:
+                raise ValueError("Multi-plane ray tracing requires z_source (or redshift on source_light).")
+
+        # Resolve mass redshifts
+        resolved_mass_z = []
+        for p in mass_profiles:
+            z = getattr(p, "redshift", None)
+            if z is None:
+                z = self.z_lens
+            if z is None:
+                raise ValueError(f"Profile {p.profile_type} has no redshift, and z_lens was not specified.")
+            if z <= 0:
+                raise ValueError(f"Mass plane redshift must be positive, got {z}.")
+            if z >= source_z:
+                raise ValueError(f"Mass plane redshift ({z}) must be strictly less than source redshift ({source_z}).")
+            resolved_mass_z.append(float(z))
+
+        # Unique sorted mass redshifts
+        unique_mass_z = sorted(list(set(resolved_mass_z)))
+        redshifts = unique_mass_z + [float(source_z)]
+
+        # Map mass profiles to planes
+        type_list, _ = self.definition.as_dicts()
+        mass_types = type_list.get("lens_mass_type_list", [])
+        plane_mass_indices = []
+        mp_mass_model_list = []
+        for z_plane in unique_mass_z:
+            idxs = [i for i, z in enumerate(resolved_mass_z) if z == z_plane]
+            plane_mass_indices.append(idxs)
+            mp_mass_model_list.append([mass_types[i] for i in idxs])
+
+        # Map lens light profiles to planes
+        resolved_lens_light_z = []
+        for p in lens_light_profiles:
+            z = getattr(p, "redshift", None)
+            if z is None:
+                z = self.z_lens or unique_mass_z[0]
+            resolved_lens_light_z.append(float(z))
+
+        lens_light_types = type_list.get("lens_light_type_list", [])
+        source_light_types = type_list.get("source_light_type_list", [])
+
+        plane_lens_light_indices = []
+        mp_light_model_list = []
+        for z_plane in unique_mass_z:
+            idxs = [i for i, z in enumerate(resolved_lens_light_z) if z == z_plane]
+            plane_lens_light_indices.append(idxs)
+            if idxs:
+                mp_light_model_list.append([lens_light_types[i] for i in idxs])
+            else:
+                mp_light_model_list.append(None)
+
+        plane_source_light_indices = list(range(len(source_light_types)))
+        mp_light_model_list.append(list(source_light_types) if source_light_types else None)
+
+        primary_plane_idx = 0
+        if self.z_lens is not None and self.z_lens in unique_mass_z:
+            primary_plane_idx = unique_mass_z.index(self.z_lens)
+
+        return {
+            "redshifts": redshifts,
+            "cosmology": cosmo,
+            "deflection_scaling_convention": self.deflection_scaling_convention,
+            "plane_mass_indices": plane_mass_indices,
+            "mp_mass_model_list": mp_mass_model_list,
+            "mp_light_model_list": mp_light_model_list,
+            "plane_lens_light_indices": plane_lens_light_indices,
+            "plane_source_light_indices": plane_source_light_indices,
+            "primary_lens_plane_index": primary_plane_idx,
+        }
+
     def _build(self) -> None:
         """Create the backend model from the declared profiles and numerics."""
         create_lens_image, create_prob_model, _, validate_param_list = _model_backend()
@@ -527,6 +638,7 @@ class SingleBandModel:
                 "scale_factor": 2.0, "nsubdivisions": 3,
                 **dict(point_source_solver or {}),
             }
+        multiplane_info = self._get_multiplane_info()
         self.lens_image = create_lens_image(
             param_list, type_list, self.data.likelihood_image,
             self.data.likelihood_noise, self.data.psf, self.data.pixel_scale,
@@ -536,6 +648,7 @@ class SingleBandModel:
             source_grid_scale=self.source_grid_scale,
             exposure_time=self.data.exposure_time,
             background_rms=self.data.background_rms,
+            multiplane_info=multiplane_info,
         )
         self.prob_model = create_prob_model(
             param_list, type_list, self.lens_image, self.data.likelihood_image,
@@ -1218,6 +1331,10 @@ class SingleBandModel:
                 "numerics": deepcopy(self.numerics),
                 "source_grid_scale": self.source_grid_scale,
                 "likelihood_scale": self.likelihood_scale,
+                "cosmology": self.cosmology,
+                "z_lens": self.z_lens,
+                "z_source": self.z_source,
+                "deflection_scaling_convention": self.deflection_scaling_convention,
             },
             "directory": str(directory),
             "seed": int(sampler.random_seed),
