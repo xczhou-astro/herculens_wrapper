@@ -1136,6 +1136,7 @@ class PixelatedSource(LightProfile):
         pixel_grid: Mapping[str, Any] | None = None,
         pixelated_prior: Mapping[str, Any] | None = None,
         prior: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
     ) -> None:
         """Declare a canonical pixelated source.
 
@@ -1185,7 +1186,7 @@ class PixelatedSource(LightProfile):
             raise ValueError("nonlinear_brightness is currently available only with prior_type='matern'.")
         if prior["nonlinear_brightness"] and not prior["positive"]:
             raise ValueError("nonlinear_brightness requires positive=True.")
-        super().__init__("PIXELATED", prior={"pixel_grid": grid, "pixelated_prior": prior})
+        super().__init__("PIXELATED", prior={"pixel_grid": grid, "pixelated_prior": prior}, redshift=redshift)
 
 
 class PixelatedLensLight(LightProfile):
@@ -1217,6 +1218,7 @@ class PixelatedLensLight(LightProfile):
         scale_factor: float = 1.0,
         pixel_interpol: str = "fast_bilinear",
         matern_prior: Mapping[str, Any] | None = None,
+        redshift: float | None = None,
     ) -> None:
         if not np.isfinite(scale_factor) or float(scale_factor) <= 0:
             raise ValueError("scale_factor must be a finite positive number.")
@@ -1231,7 +1233,7 @@ class PixelatedLensLight(LightProfile):
             raise ValueError("PixelatedLensLight always uses prior_type='matern'.")
         # Settings are intentionally not Profile Parameters: they configure
         # the grid/prior and must never enter the generic light sampler.
-        super().__init__("PIXELATED", prior={})
+        super().__init__("PIXELATED", prior={}, redshift=redshift)
         object.__setattr__(self, "_pixel_grid", {
             "pixel_scale_factor": float(scale_factor),
             "pixel_interpol": str(pixel_interpol),
