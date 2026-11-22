@@ -35,6 +35,7 @@ def register_mass_profiles():
         "MASS_MGE": MassMGE,
         "STELLAR_MGE": StellarMGE,
         "GNFW_MGE": GNFWMGE,
+        "GNFW": GNFWMGE,
         "NFW_ELLIPSE_KAPPA": NFWEllipseKappa,
         "NFW": NFWSpherical,
         "INCLINED_EXPONENTIAL_DISK": InclinedExponentialDiskMGE,
@@ -44,7 +45,7 @@ def register_mass_profiles():
         # under these same names. It is the backend of our adapter, so allow
         # this specific replacement regardless of which package loads first.
         native_nfw_backend = (
-            name in {"NFW_ELLIPSE_KAPPA", "NFW"}
+            name in {"NFW_ELLIPSE_KAPPA", "NFW", "GNFW_MGE", "GNFW"}
             and getattr(existing, "__module__", "").startswith("jax_lensing_profiles.MassModel.Profiles")
         )
         if existing is not None and existing is not profile and not native_nfw_backend:

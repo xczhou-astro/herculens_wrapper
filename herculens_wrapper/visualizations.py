@@ -2195,7 +2195,7 @@ def _effective_einstein_radius(lens_image, kwargs_lens, profile_types, *, supers
     """
     halo_index = next(
         (index for index, kind in enumerate(profile_types)
-         if str(kind).upper() in {'NFW', 'NFW_ELLIPSE_KAPPA'}), None,
+         if str(kind).upper() in {'NFW', 'NFW_ELLIPSE_KAPPA', 'GNFW_MGE', 'GNFW'}), None,
     )
     result = {
         'theta_E_eff_arcsec': None,

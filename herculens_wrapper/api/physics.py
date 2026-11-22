@@ -208,6 +208,7 @@ def enclosed_mass_from_kwargs(
     labels = {
         "STELLAR_MGE": "stellar",
         "GNFW_MGE": "dark_matter",
+        "GNFW": "dark_matter",
         "NFW_ELLIPSE_KAPPA": "dark_matter",
         "NFW": "dark_matter",
     }

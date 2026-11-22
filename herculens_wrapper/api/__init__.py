@@ -8,7 +8,7 @@ from .data import SingleBandData
 from .multiband import MultiBandData, MultiBandFitResult, MultiBandModel, MultiBandProfileCollection, MultiBandResultsCombination
 from .models import ModelDefinition
 from .parameters import (
-    EPL, GNFWHaloMGE, LightProfile, MassProfile, NFW, NFWEllipseHalo, NFWHalo,
+    EPL, GNFWHalo, GNFWHaloMGE, LightProfile, MassProfile, NFW, NFWEllipseHalo, NFWHalo,
     Parameter, PixelatedLensLight, PixelatedSource, PointSourceProfile, Profile,
     ProfileCollection, Sersic, SersicEllipse, Shear, SIE, SIS, StellarMassMGE,
 )
@@ -22,7 +22,7 @@ from .mass_posterior import summarize_hmc_lens
 from .utils import fit_analytic_pixelated_source
 from .visualization import plot_single_band_data
 __all__ = [
-    "EPL", "FitResult", "GNFWHaloMGE", "LensGeometry", "LensProfileCollection",
+    "EPL", "FitResult", "GNFWHalo", "GNFWHaloMGE", "LensGeometry", "LensProfileCollection",
     "LightProfile", "MassProfile", "ModelDefinition", "MultiBandData",
     "MultiBandFitResult", "MultiBandModel", "MultiBandProfileCollection",
     "MultiBandResultsCombination", "NFW", "NFWEllipseHalo", "NFWHalo",

@@ -745,6 +745,8 @@ _Q_PHI_MASS_PROFILES = frozenset({
     'EPL',
     'SIE',
     'NFW_ELLIPSE_KAPPA',
+    'GNFW_MGE',
+    'GNFW',
     'EPL_MULTIPOLE_M1M3M4_ELL',
     'EPL_MULTIPOLE_M3M4_ELL',
 })
@@ -3539,12 +3541,12 @@ def validate_param_list(type_list, param_list):
                             f"got {q_specification!r}."
                         )
                     if (
-                        str(profile_type).upper() == "NFW_ELLIPSE_KAPPA"
+                        str(profile_type).upper() in {"NFW_ELLIPSE_KAPPA", "GNFW_MGE", "GNFW"}
                         and not is_sampled_prior(q_specification)
                         and float(q_specification) == 1.0
                     ):
                         raise ValueError(
-                            "NFW_ELLIPSE_KAPPA does not support fixed q=1; "
+                            f"{profile_type} does not support fixed q=1; "
                             "use MassProfile('NFW') for an exactly spherical halo."
                         )
         if profile_type == "INCLINED_EXPONENTIAL_DISK":

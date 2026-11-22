@@ -100,7 +100,7 @@ def add_posterior_mass_intervals(
     except Exception as error:
         grid_error = str(error)
     materialize = jax.jit(jax.vmap(kwargs_lens_from_params))
-    halo_index = next((i for i,t in enumerate(types) if t.upper() in {'NFW','NFW_ELLIPSE_KAPPA'}),0)
+    halo_index = next((i for i,t in enumerate(types) if t.upper() in {'NFW','NFW_ELLIPSE_KAPPA', 'GNFW_MGE', 'GNFW'}),0)
 
     for start in range(0,n,batch_size):
         stop = min(start+batch_size,n)

@@ -472,9 +472,10 @@ def _initialize_fixed_profiles(profiles, initial_parameters, components, compone
 class MassProfile(Profile):
     """Lens-mass profile, or a component-agnostic multi-profile collection.
 
-    EPL, SIE and NFW_ELLIPSE_KAPPA accept either native ``e1``/``e2`` or ``q`` and
-    degree-valued ``phi``.  The latter are sampled directly and converted to
-    native ellipticity immediately before evaluating the Herculens model.
+    EPL, SIE, NFW_ELLIPSE_KAPPA, and GNFW_MGE (GNFWHaloMGE) accept either native
+    ``e1``/``e2`` or ``q`` and degree-valued ``phi``.  The latter are sampled
+    directly and converted to native ellipticity immediately before evaluating
+    the Herculens model.
     MPPL similarly exposes ``phi_m`` in degrees and converts it to radians for
     its internal profile calculation.
     """
@@ -703,6 +704,28 @@ class GNFWHaloMGE(MassProfile):
     ``r_s`` is in angular units and ``kappa_s`` is dimensionless.  No redshift
     or cosmology is required until converting the fitted result to physical
     quantities.
+
+    Parameters
+    ----------
+    kappa_s
+        Dimensionless characteristic convergence normalization.
+    r_s
+        Angular scale radius, in the lens-plane coordinate unit.
+    gamma_inner
+        Inner logarithmic slope of the 3-D density profile.
+    n_outer
+        Outer transition sharpness (defaults to 3.0).
+    e1, e2
+        Native projected ellipticity components, as an alternative to q/phi.
+        Do not declare both conventions together.
+    q, phi
+        Projected minor/major axis ratio and major-axis position angle in
+        degrees, counter-clockwise from +x (equivalent modulo 180 degrees).
+        The API converts these to native e1/e2 before model evaluation.
+        Do not fix q=1 or both e1=e2=0: the elliptical MGE backend has no
+        exact circular branch.
+    center_x, center_y
+        Halo centre in lens-plane coordinates.
     """
 
     def __new__(cls, *args: Any, **kwargs: Any):
@@ -710,6 +733,7 @@ class GNFWHaloMGE(MassProfile):
 
     def __init__(
         self,
+        profile_type: str | None = None,
         *,
         prior: Mapping[str, Any] | None = None,
         value: Mapping[str, Any] | None = None,
@@ -720,7 +744,10 @@ class GNFWHaloMGE(MassProfile):
         values = dict(value or {})
         if "n_outer" not in settings and "n_outer" not in values:
             settings["n_outer"] = 3.0
-        super().__init__("GNFW_MGE", prior=settings, value=values, redshift=redshift, **initial_values)
+        super().__init__(str(profile_type or "GNFW_MGE").upper(), prior=settings, value=values, redshift=redshift, **initial_values)
+
+
+GNFWHalo = GNFWHaloMGE
 
 
 class NFWEllipseHalo(MassProfile):
