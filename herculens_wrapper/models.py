@@ -1016,9 +1016,11 @@ def create_prob_model(
     pixelated_source_index = _single_pixelated_index(source_types, 'source-light')
     has_pixelated_source = pixelated_source_index is not None
     fixed_source_pixels = None
+    fixed_source_scale_prior = None
     if has_pixelated_source:
         fixed_source_pixels = param_list['source_light_params_list'][pixelated_source_index].get('pixels')
         if fixed_source_pixels is not None:
+            fixed_source_scale_prior = param_list['source_light_params_list'][pixelated_source_index].get('scale')
             fixed_source_pixels = jnp.asarray(fixed_source_pixels)
             expected_shape = tuple(lens_image.SourceModel.pixel_grid.num_pixel_axes)
             if fixed_source_pixels.shape != expected_shape:
@@ -1250,9 +1252,16 @@ def create_prob_model(
             if fix_source_light and kwargs_source_light_fixed is not None:
                 prior_source_light = _kwargs_list_to_jax(kwargs_source_light_fixed)
             else:
-                pixelated_source_kwargs = (
-                    {'pixels': fixed_source_pixels} if fixed_source_pixels is not None else None
-                )
+                pixelated_source_kwargs = None
+                if fixed_source_pixels is not None:
+                    if fixed_source_scale_prior is not None:
+                        if is_sampled_prior(fixed_source_scale_prior):
+                            source_scale = _sample_param_from_prior('source_scale', 'scale', fixed_source_scale_prior)
+                        else:
+                            source_scale = float(fixed_source_scale_prior)
+                        pixelated_source_kwargs = {'pixels': source_scale * fixed_source_pixels}
+                    else:
+                        pixelated_source_kwargs = {'pixels': fixed_source_pixels}
                 if has_pixelated_source:
                     if prior_type == 'wavelet_sparsity':
                         # Detail scales: dist.Laplace(0, b_scales)
@@ -1673,9 +1682,13 @@ def create_prob_model(
             if fix_source_light and kwargs_source_light_fixed is not None:
                 kwargs_source = _kwargs_list_to_jax(kwargs_source_light_fixed)
             else:
-                pixelated_source_kwargs = (
-                    {'pixels': fixed_source_pixels} if fixed_source_pixels is not None else None
-                )
+                pixelated_source_kwargs = None
+                if fixed_source_pixels is not None:
+                    if fixed_source_scale_prior is not None:
+                        source_scale = params.get('source_scale', params.get('source_scale_0', 1.0))
+                        pixelated_source_kwargs = {'pixels': source_scale * fixed_source_pixels}
+                    else:
+                        pixelated_source_kwargs = {'pixels': fixed_source_pixels}
                 if has_pixelated_source:
                     if prior_type == 'wavelet_sparsity':
                         source_scales = params['source_scales']
@@ -2087,6 +2100,14 @@ def kwargs2params(
             type_list.get('source_light_type_list', []), 'source-light',
         )
     if not fix_source_light and 'source_light_params_list' in param_list:
+        if source_pixel_index is not None:
+            source_model = param_list['source_light_params_list'][source_pixel_index]
+            if source_model.get('pixels') is not None and source_model.get('scale') is not None:
+                if 'source_scale' in kwargs:
+                    params['source_scale'] = jnp.asarray(kwargs['source_scale'])
+                elif 'kwargs_source' in kwargs and source_pixel_index < len(kwargs['kwargs_source']):
+                    if 'scale' in kwargs['kwargs_source'][source_pixel_index]:
+                        params['source_scale'] = jnp.asarray(kwargs['kwargs_source'][source_pixel_index]['scale'])
         for i, source_light_model in enumerate(param_list['source_light_params_list']):
             if i == source_pixel_index:
                 continue

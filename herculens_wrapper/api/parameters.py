@@ -434,7 +434,7 @@ def _initialize_fixed_profiles(profiles, initial_parameters, components, compone
             raise TypeError(f"Saved parameters for {names[i]}[{i}] must be a mapping.")
         if isinstance(profile, PixelatedSource):
             allowed = {"pixels", "pixels_wn", "n_source_grid", "rho_source_grid",
-                       "sigma_source_grid", "pow_lam_source_grid", "scale_lam_source_grid"}
+                       "sigma_source_grid", "pow_lam_source_grid", "scale_lam_source_grid", "scale"}
             if "pixels" not in values or set(values) - allowed:
                 raise ValueError("Fixed PixelatedSource requires pixels and only recognized source parameters.")
             pixels = values["pixels"]
@@ -446,7 +446,10 @@ def _initialize_fixed_profiles(profiles, initial_parameters, components, compone
             pixels = np.asarray(pixels)
             if pixels.ndim != 2 or not np.issubdtype(pixels.dtype, np.number) or not np.all(np.isfinite(pixels)):
                 raise ValueError("Fixed source pixels must be a finite numeric 2D array.")
-            updates.append((profile, {"pixels": pixels.copy()}))
+            profile_dict = {"pixels": pixels.copy()}
+            if "scale" in values:
+                profile_dict["scale"] = values["scale"]
+            updates.append((profile, profile_dict))
             continue
         missing, extra = set(profile._parameters) - set(values), set(values) - set(profile._parameters)
         if missing or extra:

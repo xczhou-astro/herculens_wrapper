@@ -176,6 +176,8 @@ class ModelDefinition:
                 site = f"{prefixes[component]}{name}_{index}"
                 if site in flat_parameters:
                     profile.parameter(name).value = flat_parameters[site]
+                elif f"{prefixes[component]}{name}" in flat_parameters:
+                    profile.parameter(name).value = flat_parameters[f"{prefixes[component]}{name}"]
 
     def profile(self, component: ComponentName, index: int = 0) -> Profile:
         try:

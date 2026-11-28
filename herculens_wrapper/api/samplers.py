@@ -1702,6 +1702,8 @@ class FitResult:
             kwargs_json["likelihood_parameters"] = {
                 "background_rms": self.parameters["background_rms"],
             }
+        if "source_scale" in self.parameters:
+            kwargs_json["source_scale"] = float(self.parameters["source_scale"])
         kwargs_result_path = directory / "kwargs_result.json"
         with kwargs_result_path.open("w") as stream:
             json.dump(kwargs_json, stream, indent=4, default=json_serializer)
